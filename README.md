@@ -1,6 +1,6 @@
 ﻿# SpaceLens
 
-Desktop filesystem storage analysis application. This initial scaffold displays a minimal React screen; scanning and analysis are not implemented yet.
+Desktop filesystem storage analysis application. The current shell opens to an Overview placeholder; scanning and analysis are not implemented yet.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 
@@ -30,10 +30,12 @@ If the launching environment sets `ELECTRON_RUN_AS_NODE`, unset it before starti
 
 - `src/main` — Electron lifecycle and window creation.
 - `src/preload` — isolated context bridge exposing only `window.spaceLens.getAppInfo()`.
-- `src/renderer` — React entry point and minimal screen.
+- `src/renderer` — React application shell, UI primitives and Overview placeholder.
 - `src/shared` — shared IPC contracts and channel names.
 
-The screen displays the application name, version and OS platform returned by the main process. The IPC handler accepts requests only from the application's main renderer frame and takes no arguments.
+The sidebar and topbar stay in place while the main content scrolls. At narrower widths, the sidebar becomes an icon rail. Navigation and Settings are explicitly disabled placeholders; routing is not implemented yet.
+
+A compact footer displays the application name, version and OS platform returned by the main process, with a refresh action. The IPC handler accepts requests only from the application's main renderer frame and takes no arguments.
 
 The renderer has no Node.js access. Context isolation and sandboxing are enabled. Dependencies are locked in `package-lock.json`; use `npm ci` for repeatable installs.
 
