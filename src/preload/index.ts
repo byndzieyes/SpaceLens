@@ -1,6 +1,8 @@
-﻿import { contextBridge } from 'electron'
+import { contextBridge, ipcRenderer } from 'electron'
+import { IPC_CHANNELS, type SpaceLensAPI } from '../shared/ipc'
 
-// No filesystem or IPC capabilities are exposed by the initial scaffold.
-const api: Readonly<Record<string, never>> = Object.freeze({})
+const api: SpaceLensAPI = {
+  getAppInfo: () => ipcRenderer.invoke(IPC_CHANNELS.getAppInfo)
+}
 
-contextBridge.exposeInMainWorld('api', api)
+contextBridge.exposeInMainWorld('spaceLens', api)

@@ -29,7 +29,10 @@ If the launching environment sets `ELECTRON_RUN_AS_NODE`, unset it before starti
 ## Structure
 
 - `src/main` — Electron lifecycle and window creation.
-- `src/preload` — isolated context bridge with an empty typed API.
+- `src/preload` — isolated context bridge exposing only `window.spaceLens.getAppInfo()`.
 - `src/renderer` — React entry point and minimal screen.
+- `src/shared` — shared IPC contracts and channel names.
+
+The screen displays the application name, version and OS platform returned by the main process. The IPC handler accepts requests only from the application's main renderer frame and takes no arguments.
 
 The renderer has no Node.js access. Context isolation and sandboxing are enabled. Dependencies are locked in `package-lock.json`; use `npm ci` for repeatable installs.

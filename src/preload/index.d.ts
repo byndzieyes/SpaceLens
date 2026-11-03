@@ -1,7 +1,7 @@
-﻿export {}
+import type { SpaceLensAPI } from '../shared/ipc'
 
 declare global {
   interface Window {
-    api: Readonly<Record<string, never>>
+    readonly spaceLens: SpaceLensAPI
   }
 }
