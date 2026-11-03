@@ -20,6 +20,8 @@ If the launching environment sets `ELECTRON_RUN_AS_NODE`, unset it before starti
 - `npm run dev` — start the renderer development server and Electron with hot reload.
 - `npm run typecheck` — check main, preload and renderer TypeScript.
 - `npm run lint` — run ESLint.
+- `npm run format` — format source and configuration files with Prettier.
+- `npm run format:check` — check formatting without modifying files.
 - `npm run build` — typecheck and build production output into `out/`.
 - `npm start` — preview the production build in Electron after building.
 - `npm run build:unpack` — build an unpacked application with electron-builder.

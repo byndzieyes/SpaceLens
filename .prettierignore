@@ -1,6 +1,16 @@
-out
-dist
+# Dependencies and generated output
+node_modules/
+out/
+dist/
+coverage/
+*.tsbuildinfo
+.eslintcache
+*.log*
+
+# Generated dependency lockfiles
+package-lock.json
 pnpm-lock.yaml
-LICENSE.md
-tsconfig.json
-tsconfig.*.json
+yarn.lock
+
+# Repository instructions
+AGENTS.md
