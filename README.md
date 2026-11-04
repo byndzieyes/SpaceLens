@@ -30,12 +30,12 @@ If the launching environment sets `ELECTRON_RUN_AS_NODE`, unset it before starti
 
 - `src/main` — Electron lifecycle and window creation.
 - `src/preload` — isolated context bridge exposing only `window.spaceLens.getAppInfo()`.
-- `src/renderer` — React application shell, UI primitives and Overview placeholder.
+- `src/renderer` — React application shell, UI primitives and section placeholder pages.
 - `src/shared` — shared IPC contracts and channel names.
 
-The sidebar and topbar stay in place while the main content scrolls. At narrower widths, the sidebar becomes an icon rail. Navigation and Settings are explicitly disabled placeholders; routing is not implemented yet.
+The sidebar and topbar stay in place while the main content scrolls. At narrower widths, the sidebar becomes an icon rail. Typed React state selects Overview, Explorer, Insights or History without a router. Each launch starts on Overview; page selection is not persisted. Settings remains disabled until implemented.
 
-A compact footer displays the application name, version and OS platform returned by the main process, with a refresh action. The IPC handler accepts requests only from the application's main renderer frame and takes no arguments.
+The typed `getAppInfo()` IPC method remains available through the preload API. Its handler accepts requests only from the application's main renderer frame and takes no arguments.
 
 The renderer has no Node.js access. Context isolation and sandboxing are enabled. Dependencies are locked in `package-lock.json`; use `npm ci` for repeatable installs.
 
