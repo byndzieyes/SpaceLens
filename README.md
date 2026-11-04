@@ -1,6 +1,6 @@
 ﻿# SpaceLens
 
-Desktop filesystem storage analysis application. The current shell opens to a responsive Overview dashboard with preview placeholders for storage devices and recent scans. The Scan Folder action is disabled; scanning and analysis are not implemented yet.
+Desktop filesystem storage analysis application. The current shell opens to a responsive Overview dashboard with demo storage device cards and a recent scans placeholder. Device capacities use decimal GB (1 GB = 1,000,000,000 bytes); these are example drives, not detected devices. The Scan Folder action is disabled; scanning and analysis are not implemented yet.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 
@@ -38,6 +38,7 @@ The extension loads through Electron's `session.defaultSession.extensions.loadEx
 - `npm run dev` — start the renderer development server and Electron with hot reload.
 - `npm run typecheck` — check main, preload and renderer TypeScript.
 - `npm run lint` — run ESLint.
+- `npm test` — check storage formatting and usage calculations using Node's built-in test runner.
 - `npm run format` — format source and configuration files with Prettier.
 - `npm run format:check` — check formatting without modifying files.
 - `npm run build` — typecheck and build production output into `out/`.

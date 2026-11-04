@@ -1,7 +1,9 @@
-import { FolderSearch, HardDrive, History } from 'lucide-react'
+import { FolderSearch, History } from 'lucide-react'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { DiskCard } from '../features/overview/DiskCard'
+import { demoDevices } from '../features/overview/demoDevices'
 
 export function OverviewPage(): React.JSX.Element {
   return (
@@ -27,23 +29,11 @@ export function OverviewPage(): React.JSX.Element {
           <h3 id="storage-devices-title" className="text-base font-semibold">
             Storage Devices
           </h3>
-          <Badge>Preview</Badge>
+          <Badge>Demo data</Badge>
         </div>
         <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] gap-4">
-          {[1, 2].map((slot) => (
-            <Card key={slot} aria-label={`Storage device placeholder ${slot}`} className="min-w-0">
-              <div className="mb-6 flex items-center gap-3">
-                <div className="rounded-lg border border-accent/15 bg-accent/10 p-2.5">
-                  <HardDrive size={20} className="text-accent" aria-hidden="true" />
-                </div>
-                <h4 className="text-sm font-medium">Storage device</h4>
-              </div>
-              <div aria-hidden="true" className="mb-5 space-y-3">
-                <div className="h-3 w-2/3 rounded-sm bg-surface-active/60" />
-                <div className="h-2 w-full rounded-sm bg-surface-elevated" />
-              </div>
-              <p className="text-xs text-text-secondary">Device card placeholder</p>
-            </Card>
+          {demoDevices.map((device) => (
+            <DiskCard key={device.id} device={device} />
           ))}
         </div>
       </section>
