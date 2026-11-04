@@ -1,6 +1,6 @@
 ﻿# SpaceLens
 
-Desktop filesystem storage analysis application. The current shell opens to an Overview placeholder; scanning and analysis are not implemented yet.
+Desktop filesystem storage analysis application. The current shell opens to a responsive Overview dashboard with preview placeholders for storage devices and recent scans. The Scan Folder action is disabled; scanning and analysis are not implemented yet.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 
@@ -48,7 +48,7 @@ The extension loads through Electron's `session.defaultSession.extensions.loadEx
 
 - `src/main` — Electron lifecycle and window creation.
 - `src/preload` — isolated context bridge exposing only `window.spaceLens.getAppInfo()`.
-- `src/renderer` — React application shell, UI primitives and section placeholder pages.
+- `src/renderer` — React application shell, UI primitives, Overview dashboard layout and other section placeholder pages.
 - `src/shared` — shared IPC contracts and channel names.
 
 The sidebar and topbar stay in place while the main content scrolls. At narrower widths, the sidebar becomes an icon rail. Typed React state selects Overview, Explorer, Insights or History without a router. Each launch starts on Overview; page selection is not persisted. Settings remains disabled until implemented.
