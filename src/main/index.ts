@@ -1,5 +1,5 @@
-import { app, BrowserWindow } from 'electron'
-import { join } from 'path'
+import { app, BrowserWindow, session } from 'electron'
+import { join, resolve } from 'path'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
@@ -42,7 +42,7 @@ function createWindow(): void {
 // This method will be called when Electron has finished
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
-app.whenReady().then(() => {
+app.whenReady().then(async () => {
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.spacelens.app')
 
@@ -54,6 +54,23 @@ app.whenReady().then(() => {
   })
 
   registerAppInfoHandler(rendererUrl)
+
+  if (!app.isPackaged && process.env['NODE_ENV'] === 'development') {
+    const extensionPath = process.env['REACT_DEVTOOLS_PATH']?.trim()
+
+    if (extensionPath) {
+      try {
+        await session.defaultSession.extensions.loadExtension(resolve(extensionPath), {
+          allowFileAccess: true
+        })
+      } catch (error) {
+        console.warn('[React DevTools] Could not load extension; continuing startup.', error)
+      }
+    } else {
+      console.info('[React DevTools] Set REACT_DEVTOOLS_PATH to enable the extension.')
+    }
+  }
+
   createWindow()
 
   app.on('activate', function () {
