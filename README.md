@@ -8,7 +8,7 @@ Based on the [official electron-vite React + TypeScript template](https://electr
 
 ## Development
 
-Use Node.js 22.12+ (or a newer supported LTS release) and npm.
+Use Node.js 22.22.2+, 24.15+ or a newer supported LTS release, and npm. These minimums also cover the jsdom test environment.
 
 ```sh
 npm install
@@ -38,14 +38,17 @@ The extension loads through Electron's `session.defaultSession.extensions.loadEx
 ## Commands
 
 - `npm run dev` — start the renderer development server and Electron with hot reload.
-- `npm run typecheck` — check main, preload and renderer TypeScript.
+- `npm run typecheck` — check main, preload, renderer, test and test-configuration TypeScript.
 - `npm run lint` — run ESLint.
-- `npm test` — check storage calculations and Recent Scans rendering using Node's built-in test runner and Vite's existing JSX pipeline.
+- `npm test` — run all Vitest utility and React component tests once.
+- `npm run test:watch` — run Vitest in watch mode during development.
 - `npm run format` — format source and configuration files with Prettier.
 - `npm run format:check` — check formatting without modifying files.
 - `npm run build` — typecheck and build production output into `out/`.
 - `npm start` — preview the production build in Electron after building.
 - `npm run build:unpack` — build an unpacked application with electron-builder.
+
+Tests live in `tests/` as `.test.ts` and `.test.tsx` files. `vitest.config.mts` uses the existing React plugin and jsdom; `tests/setup.ts` adds jest-dom matchers and cleans up rendered components after each test. Test workers use UTC so completion-date assertions are independent of the computer's timezone; the application still displays local times. Test scan fixtures stay in `tests/fixtures/` and never read local storage or scan history. The existing application demo toggle is independent of those fixtures.
 
 ## Structure
 

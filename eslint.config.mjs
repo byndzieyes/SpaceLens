@@ -28,12 +28,5 @@ export default defineConfig(
       ...eslintPluginReactRefresh.configs.vite.rules
     }
   },
-  {
-    files: ['tests/**/*.mjs'],
-    rules: {
-      // JavaScript test helpers cannot declare TypeScript return annotations.
-      '@typescript-eslint/explicit-function-return-type': 'off'
-    }
-  },
   eslintConfigPrettier
 )
