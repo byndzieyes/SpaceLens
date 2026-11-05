@@ -1,6 +1,8 @@
 ﻿# SpaceLens
 
-Desktop filesystem storage analysis application. The current shell opens to a responsive Overview dashboard with demo storage device cards and a recent scans placeholder. Device capacities use decimal GB (1 GB = 1,000,000,000 bytes); these are example drives, not detected devices. The Scan Folder action is disabled; scanning and analysis are not implemented yet.
+Desktop filesystem storage analysis application. The current shell opens to a responsive Overview dashboard with demo storage device cards and a Recent Scans empty state. Device capacities use decimal GB (1 GB = 1,000,000,000 bytes); these are example drives, not detected devices. The Scan Folder action is disabled; scanning and analysis are not implemented yet.
+
+Recent Scans can display the five latest completed scan summaries, with local completion times, decimal GB sizes and file counts. It starts empty. The **Demo scans** button toggles example history, clearly labeled **Demo data**, for previewing the populated layout until scan persistence is implemented. The toggle is not saved and resets when leaving Overview or restarting the application.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 
@@ -38,7 +40,7 @@ The extension loads through Electron's `session.defaultSession.extensions.loadEx
 - `npm run dev` — start the renderer development server and Electron with hot reload.
 - `npm run typecheck` — check main, preload and renderer TypeScript.
 - `npm run lint` — run ESLint.
-- `npm test` — check storage formatting and usage calculations using Node's built-in test runner.
+- `npm test` — check storage calculations and Recent Scans rendering using Node's built-in test runner and Vite's existing JSX pipeline.
 - `npm run format` — format source and configuration files with Prettier.
 - `npm run format:check` — check formatting without modifying files.
 - `npm run build` — typecheck and build production output into `out/`.

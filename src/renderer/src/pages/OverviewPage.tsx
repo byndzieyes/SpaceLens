@@ -1,11 +1,15 @@
-import { FolderSearch, History } from 'lucide-react'
+import { useState } from 'react'
+import { FlaskConical, FolderSearch } from 'lucide-react'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
-import { Card } from '../components/ui/Card'
 import { DiskCard } from '../features/overview/DiskCard'
 import { demoDevices } from '../features/overview/demoDevices'
+import { demoScans } from '../features/overview/demoScans'
+import { RecentScans } from '../features/overview/RecentScans'
 
 export function OverviewPage(): React.JSX.Element {
+  const [showDemoScans, setShowDemoScans] = useState(false)
+
   return (
     <div className="space-y-8 sm:space-y-10">
       <header className="flex flex-wrap items-center justify-between gap-5">
@@ -38,28 +42,22 @@ export function OverviewPage(): React.JSX.Element {
         </div>
       </section>
 
-      <section aria-labelledby="recent-scans-title" className="space-y-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <h3 id="recent-scans-title" className="text-base font-semibold">
-            Recent Scans
-          </h3>
-          <Badge>Preview</Badge>
-        </div>
-        <Card aria-label="Recent scans placeholder" className="min-h-48">
-          <div className="flex items-center gap-3 text-text-secondary">
-            <History size={18} className="shrink-0" aria-hidden="true" />
-            <p className="text-sm">Recent scan list placeholder</p>
-          </div>
-          <div aria-hidden="true" className="mt-6 divide-y divide-separator">
-            {[1, 2].map((slot) => (
-              <div key={slot} className="flex items-center justify-between gap-6 py-4">
-                <div className="h-2 w-2/5 rounded-sm bg-surface-elevated" />
-                <div className="h-2 w-1/5 rounded-sm bg-surface-elevated" />
-              </div>
-            ))}
-          </div>
-        </Card>
-      </section>
+      <RecentScans
+        scans={showDemoScans ? demoScans : []}
+        actions={
+          <>
+            {showDemoScans && <Badge>Demo data</Badge>}
+            <Button
+              variant={showDemoScans ? 'primary' : 'secondary'}
+              aria-pressed={showDemoScans}
+              onClick={() => setShowDemoScans((current) => !current)}
+            >
+              <FlaskConical size={16} aria-hidden="true" />
+              Demo scans
+            </Button>
+          </>
+        }
+      />
     </div>
   )
 }
