@@ -1,4 +1,4 @@
-import { useId, type ReactNode } from 'react'
+import { useId } from 'react'
 import { Folder, History } from 'lucide-react'
 import type { RecentScanSummary } from '../../../../shared/scan'
 import { Card } from '../../components/ui/Card'
@@ -7,27 +7,23 @@ import { formatScanDate, getRecentScans } from './recentScanUtils'
 
 interface RecentScansProps {
   scans: readonly RecentScanSummary[]
-  actions?: ReactNode
 }
 
 const fileCountFormat = new Intl.NumberFormat('en-US')
 
-export function RecentScans({ scans, actions }: RecentScansProps): React.JSX.Element {
+export function RecentScans({ scans }: RecentScansProps): React.JSX.Element {
   const titleId = useId()
   const recentScans = getRecentScans(scans)
 
   return (
-    <section aria-labelledby={titleId} className="space-y-4">
+    <div className="space-y-4">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <h3 id={titleId} className="text-base font-semibold">
           Recent Scans
         </h3>
-        <div className="flex flex-wrap items-center gap-3">
-          {scans.length > recentScans.length && (
-            <p className="text-xs text-text-secondary">Showing latest {recentScans.length}</p>
-          )}
-          {actions}
-        </div>
+        {scans.length > recentScans.length && (
+          <p className="text-xs text-text-secondary">Showing latest {recentScans.length}</p>
+        )}
       </div>
       <Card aria-labelledby={titleId} className="min-w-0">
         {recentScans.length === 0 ? (
@@ -76,6 +72,6 @@ export function RecentScans({ scans, actions }: RecentScansProps): React.JSX.Ele
           </ol>
         )}
       </Card>
-    </section>
+    </div>
   )
 }

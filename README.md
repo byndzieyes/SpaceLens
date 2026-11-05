@@ -2,7 +2,7 @@
 
 Desktop filesystem storage analysis application. The current shell opens to a responsive Overview dashboard with demo storage device cards and a Recent Scans empty state. Device capacities use decimal GB (1 GB = 1,000,000,000 bytes); these are example drives, not detected devices. The Scan Folder action is disabled; scanning and analysis are not implemented yet.
 
-Recent Scans can display the five latest completed scan summaries, with local completion times, decimal GB sizes and file counts. It starts empty. The **Demo scans** button toggles example history, clearly labeled **Demo data**, for previewing the populated layout until scan persistence is implemented. The toggle is not saved and resets when leaving Overview or restarting the application.
+Recent Scans displays "No scans yet" until scan persistence is implemented. Its reusable component supports the five latest completed scan summaries, with local completion times, decimal GB sizes and file counts; the populated state is covered by test fixtures only.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 
@@ -48,7 +48,7 @@ The extension loads through Electron's `session.defaultSession.extensions.loadEx
 - `npm start` — preview the production build in Electron after building.
 - `npm run build:unpack` — build an unpacked application with electron-builder.
 
-Tests live in `tests/` as `.test.ts` and `.test.tsx` files. `vitest.config.mts` uses the existing React plugin and jsdom; `tests/setup.ts` adds jest-dom matchers and cleans up rendered components after each test. Test workers use UTC so completion-date assertions are independent of the computer's timezone; the application still displays local times. Test scan fixtures stay in `tests/fixtures/` and never read local storage or scan history. The existing application demo toggle is independent of those fixtures.
+Tests live in `tests/` as `.test.ts` and `.test.tsx` files. `vitest.config.mts` uses the existing React plugin and jsdom; `tests/setup.ts` adds jest-dom matchers and cleans up rendered components after each test. Test workers use UTC so completion-date assertions are independent of the computer's timezone; the application still displays local times. Scan fixtures stay inside test files and never read local storage or scan history.
 
 ## Structure
 

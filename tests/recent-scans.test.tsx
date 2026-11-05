@@ -1,19 +1,29 @@
-import { expect, test, vi } from 'vitest'
-import { fireEvent, render, screen, within } from '@testing-library/react'
+import { expect, test } from 'vitest'
+import { render, screen, within } from '@testing-library/react'
+import type { RecentScanSummary } from '../src/shared/scan'
 import { RecentScans } from '../src/renderer/src/features/overview/RecentScans'
 import { OverviewPage } from '../src/renderer/src/pages/OverviewPage'
-import { createScanSummary, demoScanFixtures } from './fixtures/scans'
 
-// Exercise Overview with test-owned fixtures, independent of the app's demo history.
-vi.mock('../src/renderer/src/features/overview/demoScans', async () => {
-  const { demoScanFixtures } = await import('./fixtures/scans')
-  return { demoScans: demoScanFixtures }
-})
+function createScanSummary(
+  id: string,
+  completedAt: string,
+  overrides: Partial<RecentScanSummary> = {}
+): RecentScanSummary {
+  return {
+    id,
+    path: `C:\\Test fixtures\\${id}`,
+    completedAt,
+    totalBytes: 12_500_000_000,
+    fileCount: 12_345,
+    ...overrides
+  }
+}
 
 test('empty state explains where completed scans will appear without fabricated entries or actions', () => {
   render(<RecentScans scans={[]} />)
 
   expect(screen.getByRole('heading', { name: 'Recent Scans' })).toBeVisible()
+  expect(screen.getAllByRole('region', { name: 'Recent Scans' })).toHaveLength(1)
   expect(screen.getByRole('heading', { name: 'No scans yet' })).toBeVisible()
   expect(screen.getByText(/Completed scans will appear here/)).toBeVisible()
   expect(screen.queryByRole('list')).not.toBeInTheDocument()
@@ -98,29 +108,10 @@ test('Overview defaults to the empty state and keeps Scan Folder disabled', () =
 
   expect(screen.getByRole('heading', { name: 'No scans yet' })).toBeVisible()
   expect(screen.queryByRole('list')).not.toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Demo scans', pressed: false })).toBeEnabled()
-  expect(screen.getByRole('button', { name: 'Scan Folder' })).toBeDisabled()
-})
-
-test('Overview toggles labeled demo history on and off while Scan Folder stays disabled', () => {
-  render(<OverviewPage />)
-
-  fireEvent.click(screen.getByRole('button', { name: 'Demo scans' }))
-  expect(screen.getByRole('button', { name: 'Demo scans', pressed: true })).toBeEnabled()
-  expect(screen.getAllByText('Demo data')).toHaveLength(2)
-  expect(within(screen.getByRole('list')).getAllByRole('listitem')).toHaveLength(
-    demoScanFixtures.length
-  )
-  for (const scan of demoScanFixtures) {
-    expect(screen.getByText(scan.path)).toBeVisible()
-  }
-  expect(screen.queryByRole('heading', { name: 'No scans yet' })).not.toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Scan Folder' })).toBeDisabled()
-
-  fireEvent.click(screen.getByRole('button', { name: 'Demo scans' }))
-  expect(screen.getByRole('button', { name: 'Demo scans', pressed: false })).toBeEnabled()
-  expect(screen.getByRole('heading', { name: 'No scans yet' })).toBeVisible()
-  expect(screen.queryByRole('list')).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Demo scans' })).not.toBeInTheDocument()
   expect(screen.getAllByText('Demo data')).toHaveLength(1)
   expect(screen.getByRole('button', { name: 'Scan Folder' })).toBeDisabled()
+  expect(screen.getByRole('button', { name: 'Scan Folder' })).toHaveAccessibleDescription(
+    'Coming soon'
+  )
 })

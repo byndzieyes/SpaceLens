@@ -1,15 +1,11 @@
-import { useState } from 'react'
-import { FlaskConical, FolderSearch } from 'lucide-react'
+import { FolderSearch } from 'lucide-react'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { DiskCard } from '../features/overview/DiskCard'
 import { demoDevices } from '../features/overview/demoDevices'
-import { demoScans } from '../features/overview/demoScans'
 import { RecentScans } from '../features/overview/RecentScans'
 
 export function OverviewPage(): React.JSX.Element {
-  const [showDemoScans, setShowDemoScans] = useState(false)
-
   return (
     <div className="space-y-8 sm:space-y-10">
       <header className="flex flex-wrap items-center justify-between gap-5">
@@ -42,22 +38,7 @@ export function OverviewPage(): React.JSX.Element {
         </div>
       </section>
 
-      <RecentScans
-        scans={showDemoScans ? demoScans : []}
-        actions={
-          <>
-            {showDemoScans && <Badge>Demo data</Badge>}
-            <Button
-              variant={showDemoScans ? 'primary' : 'secondary'}
-              aria-pressed={showDemoScans}
-              onClick={() => setShowDemoScans((current) => !current)}
-            >
-              <FlaskConical size={16} aria-hidden="true" />
-              Demo scans
-            </Button>
-          </>
-        }
-      />
+      <RecentScans scans={[]} />
     </div>
   )
 }
