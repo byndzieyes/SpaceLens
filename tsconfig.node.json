@@ -10,6 +10,6 @@
   "compilerOptions": {
     "strict": true,
     "composite": true,
-    "types": ["electron-vite/node"]
+    "types": ["node", "electron-vite/node"]
   }
 }
