@@ -3,7 +3,9 @@ import type { Stats } from 'node:fs'
 import { basename } from 'node:path'
 import type { FileEntry, FileEntryType } from '../../shared/scan'
 
-function getEntryType(stats: Stats): FileEntryType {
+export function getEntryType(
+  stats: Pick<Stats, 'isSymbolicLink' | 'isDirectory' | 'isFile'>
+): FileEntryType {
   if (stats.isSymbolicLink()) return 'symlink'
   if (stats.isDirectory()) return 'directory'
   if (stats.isFile()) return 'file'

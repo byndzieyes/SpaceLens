@@ -1,8 +1,11 @@
 import type { FileEntry } from '../../shared/scan'
+import type { TraversalEvent } from './traverse'
 
 export type DirectoryAggregationEvent =
   | { readonly type: 'entry'; readonly entry: FileEntry }
   | { readonly type: 'directory-finalized'; readonly entry: FileEntry }
+
+export type ScannerAggregationEvent = DirectoryAggregationEvent | TraversalEvent
 
 interface DirectoryTotal {
   readonly entry: FileEntry
@@ -29,7 +32,11 @@ function finishDirectory(stack: DirectoryTotal[]): FileEntry {
 }
 
 /**
- * Consume the single-root, depth-first entry stream from traverseDirectory().
+ * Consume a single-root, depth-first stream from traverseDirectory() or
+ * traverseDirectoryEvents(). The entry-only API retains its fail-fast behavior.
+ * Event streams forward errors and report unknown metadata as errors, allowing
+ * partial totals of known bytes. Consumers must retain/handle these errors to
+ * distinguish partial results; a finalized directory does not imply completeness.
  * Forward discoveries unchanged, then yield directory-finalized replacements
  * keyed by the same scanId/id. Consumers must update that entry, not insert a
  * second one. No input entry is mutated and no complete snapshot is retained.
@@ -37,14 +44,25 @@ function finishDirectory(stack: DirectoryTotal[]): FileEntry {
  * A change of parent closes completed branches; successful end-of-stream closes
  * the remaining ancestors. Only the active ancestry and one lookahead entry are
  * retained (O(depth)). Errors/early exit never flush unfinished directory totals.
- * Unknown sizes/types and unsafe sums fail rather than claim a verified total.
+ * Unsafe sums and invalid numeric values remain fatal in both modes.
  */
-export async function* aggregateDirectorySizes(
+export function aggregateDirectorySizes(
   entries: AsyncIterable<FileEntry>
-): AsyncGenerator<DirectoryAggregationEvent, void, void> {
+): AsyncGenerator<DirectoryAggregationEvent, void, void>
+export function aggregateDirectorySizes(
+  entries: AsyncIterable<TraversalEvent>
+): AsyncGenerator<ScannerAggregationEvent, void, void>
+export async function* aggregateDirectorySizes(
+  entries: AsyncIterable<FileEntry | TraversalEvent>
+): AsyncGenerator<ScannerAggregationEvent, void, void> {
   const stack: DirectoryTotal[] = []
 
-  for await (const entry of entries) {
+  for await (const item of entries) {
+    if (item.type === 'error') {
+      yield item
+      continue
+    }
+    const entry = item.type === 'entry' ? item.entry : item
     if (stack.length === 0) {
       if (entry.type !== 'directory' || entry.parentId !== null) {
         throw new Error('Aggregation requires a root directory as the first entry.')
@@ -64,16 +82,22 @@ export async function* aggregateDirectorySizes(
       }
     }
 
-    if (entry.type === 'directory') {
+    if ((entry.type === 'file' && entry.sizeBytes === null) || entry.type === 'unknown') {
+      const message = `Cannot aggregate an unknown size or entry type at ${entry.path}`
+      if (item.type !== 'entry') throw new Error(message)
+      yield {
+        type: 'error',
+        error: {
+          path: entry.path,
+          code: entry.type === 'file' ? 'UNKNOWN_FILE_SIZE' : 'UNKNOWN_ENTRY_TYPE',
+          message
+        }
+      }
+    } else if (entry.type === 'directory') {
       stack.push({ entry, bytes: 0 })
     } else if (entry.type === 'file') {
-      if (entry.sizeBytes === null) {
-        throw new Error(`Cannot aggregate an unknown logical file size at ${entry.path}`)
-      }
       const parent = stack[stack.length - 1]
-      parent.bytes = addBytes(parent.bytes, entry.sizeBytes, entry.path)
-    } else if (entry.type === 'unknown') {
-      throw new Error(`Cannot aggregate an unclassified entry at ${entry.path}`)
+      parent.bytes = addBytes(parent.bytes, entry.sizeBytes!, entry.path)
     }
 
     yield { type: 'entry', entry }
