@@ -1,15 +1,16 @@
 // @vitest-environment node
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
-import { once } from 'node:events'
+import { getEventListeners, once } from 'node:events'
 import { cp, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { Worker } from 'node:worker_threads'
+import { MessageChannel, Worker, type MessagePort } from 'node:worker_threads'
 import { resolveConfig } from 'electron-vite'
 import { build } from 'vite'
 import { scanDirectory } from '../src/main/scanner/scan'
 import { consumeScannerWorker } from '../src/main/scanner/workerClient'
+import { ScanCancelledError, SCANNER_CANCEL_TIMEOUT_MS } from '../src/main/scanner/cancellation'
 import {
   SCANNER_BATCH_SIZE,
   parseScannerWorkerMessage,
@@ -70,6 +71,7 @@ beforeEach(async () => {
 })
 
 afterEach(async () => {
+  vi.useRealTimers()
   vi.restoreAllMocks()
   for (const worker of workers) await worker.terminate()
   workers.clear()
@@ -83,10 +85,15 @@ afterAll(async () => {
   await rm(target, { recursive: true, force: true })
 })
 
-function start(script?: string, extra: Record<string, unknown> = {}): Worker {
+function start(
+  script?: string,
+  extra: Record<string, unknown> = {},
+  transferList: MessagePort[] = []
+): Worker {
   const worker = new Worker(script ?? workerPath, {
     eval: script !== undefined,
-    workerData: { rootPath, scanId, workerPath, ...extra }
+    workerData: { rootPath, scanId, workerPath, ...extra },
+    transferList
   })
   workers.add(worker)
   return worker
@@ -118,6 +125,290 @@ function normalize(events: ScanOutputEvent[]): unknown[] {
     })
     .sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)))
 }
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve!: () => void
+  const promise = new Promise<void>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
+}
+
+test.each(['development', 'production'])(
+  'cancels before %s runner startup without creating a worker',
+  async (mode) => {
+    const controller = new AbortController()
+    controller.abort(new Error('Caller reason'))
+    const threadModule = require('node:worker_threads') as typeof import('node:worker_threads')
+    const construct = vi.spyOn(threadModule, 'Worker')
+    const consume = vi.fn()
+    const progress = vi.fn()
+    await expect(
+      artifacts.get(mode)!.runner(rootPath, scanId, consume, {
+        signal: controller.signal,
+        onProgress: progress
+      })
+    ).rejects.toMatchObject({ name: 'ScanCancelledError', code: 'SCAN_CANCELLED' })
+    expect(construct).not.toHaveBeenCalled()
+    expect(consume).not.toHaveBeenCalled()
+    expect(progress).not.toHaveBeenCalled()
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  }
+)
+
+test('cooperatively cancels during filesystem work and closes open directory handles', async () => {
+  await mkdir(join(rootPath, 'nested'))
+  const blocked = join(rootPath, 'nested', 'file')
+  await writeFile(blocked, 'abc')
+  const { port1, port2 } = new MessageChannel()
+  const counters = new SharedArrayBuffer(8)
+  const worker = start(
+    `
+    const { parentPort, workerData } = require('node:worker_threads');
+    const fs = require('node:fs/promises');
+    const counts = new Int32Array(workerData.counters);
+    const originalOpen = fs.opendir;
+    fs.opendir = async (...args) => {
+      const dir = await originalOpen(...args);
+      Atomics.add(counts, 0, 1);
+      const close = dir.close.bind(dir);
+      dir.close = async () => { await close(); Atomics.add(counts, 1, 1); };
+      return dir;
+    };
+    const originalStat = fs.lstat;
+    fs.lstat = async (path, ...args) => {
+      if (path === workerData.blocked) {
+        await new Promise(resolve => {
+          parentPort.once('message', () => resolve());
+          workerData.control.postMessage('reading');
+        });
+        workerData.control.close();
+      }
+      return originalStat(path, ...args);
+    };
+    require(workerData.workerPath);
+  `,
+    { control: port2, counters, blocked },
+    [port2]
+  )
+  const controller = new AbortController()
+  const consume = vi.fn()
+  const progress = vi.fn()
+  const terminate = vi.spyOn(worker, 'terminate')
+  const messages: unknown[] = []
+  const observe = (message: unknown): void => {
+    messages.push(message)
+  }
+  worker.on('message', observe)
+  const result = consumeScannerWorker(worker, scanId, consume, {
+    signal: controller.signal,
+    onProgress: progress
+  })
+  const assertion = expect(result).rejects.toBeInstanceOf(ScanCancelledError)
+  try {
+    expect(await once(port1, 'message')).toEqual(['reading'])
+    controller.abort()
+    await assertion
+    expect(Array.from(new Int32Array(counters))).toEqual([2, 2])
+    expect(messages).toEqual([{ type: 'cancelled', scanId }])
+    expect(consume).not.toHaveBeenCalled()
+    expect(progress).not.toHaveBeenCalled()
+    expect(terminate).not.toHaveBeenCalled()
+  } finally {
+    port1.close()
+    worker.off('message', observe)
+  }
+  expectReleased(worker)
+  expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+})
+
+test('cancels a large scan while an event consumer is pending without waiting for that callback', async () => {
+  for (let index = 0; index < SCANNER_BATCH_SIZE * 2; index++)
+    await writeFile(join(rootPath, `file-${index}`), 'x')
+  const worker = start()
+  const controller = new AbortController()
+  const ready = deferred()
+  const gate = deferred()
+  const sent = vi.spyOn(worker, 'postMessage')
+  const terminate = vi.spyOn(worker, 'terminate')
+  const consume = vi.fn(async () => {
+    ready.resolve()
+    await gate.promise
+  })
+  const progress = vi.fn()
+  const result = consumeScannerWorker(worker, scanId, consume, {
+    signal: controller.signal,
+    onProgress: progress
+  })
+  const assertion = expect(result).rejects.toBeInstanceOf(ScanCancelledError)
+  await ready.promise
+  controller.abort()
+  controller.abort()
+  await assertion
+  expect(sent.mock.calls).toEqual([[{ type: 'cancel', scanId }]])
+  expect(terminate).not.toHaveBeenCalled()
+  expect(consume).toHaveBeenCalledOnce()
+  expect(progress).not.toHaveBeenCalled()
+  expectReleased(worker)
+  expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  gate.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(sent).toHaveBeenCalledOnce()
+  expect(consume).toHaveBeenCalledOnce()
+})
+
+test('cancels while a progress consumer is pending and sends no acknowledgment', async () => {
+  const worker = start()
+  const controller = new AbortController()
+  const ready = deferred()
+  const gate = deferred()
+  const sent = vi.spyOn(worker, 'postMessage')
+  const progress = vi.fn(async () => {
+    ready.resolve()
+    await gate.promise
+  })
+  const result = consumeScannerWorker(worker, scanId, () => {}, {
+    signal: controller.signal,
+    onProgress: progress
+  })
+  const assertion = expect(result).rejects.toBeInstanceOf(ScanCancelledError)
+  await ready.promise
+  controller.abort()
+  await assertion
+  gate.resolve()
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(sent.mock.calls).toEqual([[{ type: 'cancel', scanId }]])
+  expect(progress).toHaveBeenCalledOnce()
+  expectReleased(worker)
+})
+
+test('worker accepts cancellation without a batch acknowledgment and sends only one terminal reply', async () => {
+  const worker = start()
+  const exit = once(worker, 'exit')
+  const first = await once(worker, 'message')
+  expect(first[0].type).toBe('batch')
+  const messages: unknown[] = []
+  const observe = (message: unknown): void => {
+    messages.push(message)
+  }
+  worker.on('message', observe)
+  worker.postMessage({ type: 'cancel', scanId })
+  worker.postMessage({ type: 'cancel', scanId })
+  expect(await exit).toEqual([0])
+  expect(messages).toEqual([{ type: 'cancelled', scanId }])
+  worker.off('message', observe)
+  expectReleased(worker)
+})
+
+test.each(['entry', 'summary'] as const)(
+  'generated production runner cancels from the %s callback near completion',
+  async (stopAt) => {
+    const controller = new AbortController()
+    const types: string[] = []
+    const progress = vi.fn()
+    await expect(
+      artifacts.get('production')!.runner(
+        rootPath,
+        scanId,
+        (event) => {
+          types.push(event.type)
+          if (event.type === stopAt) controller.abort()
+        },
+        { signal: controller.signal, onProgress: progress }
+      )
+    ).rejects.toMatchObject({ code: 'SCAN_CANCELLED' })
+    expect(types).toEqual(
+      stopAt === 'entry' ? ['entry'] : ['entry', 'directory-finalized', 'summary']
+    )
+    expect(progress).not.toHaveBeenCalled()
+    expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  }
+)
+
+test('aborting after normal completion has no effect and leaves no abort subscription', async () => {
+  const controller = new AbortController()
+  const worker = start()
+  const sent = vi.spyOn(worker, 'postMessage')
+  const progress = vi.fn()
+  const result = await consumeScannerWorker(worker, scanId, () => {}, {
+    signal: controller.signal,
+    onProgress: progress
+  })
+  expect(result.summary.directoryCount).toBe(1)
+  const messages = sent.mock.calls.length
+  controller.abort()
+  expect(sent).toHaveBeenCalledTimes(messages)
+  expect(progress).toHaveBeenCalledOnce()
+  expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  expectReleased(worker)
+})
+
+test('fatal errors observed before cancellation retain their original outcome', async () => {
+  const controller = new AbortController()
+  const worker = start(undefined, { rootPath: join(rootPath, 'missing') })
+  const result = consumeScannerWorker(worker, scanId, () => {}, { signal: controller.signal })
+  await expect(result).rejects.toMatchObject({ code: 'ENOENT' })
+  controller.abort()
+  await expect(result).rejects.not.toBeInstanceOf(ScanCancelledError)
+  expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  expectReleased(worker)
+})
+
+test.each(['complete', 'fatal', 'crash'] as const)(
+  'late worker %s cannot replace an accepted cancellation',
+  async (terminal) => {
+    const worker = start(
+      `
+    const { parentPort, workerData } = require('node:worker_threads');
+    parentPort.once('message', () => {
+      if (workerData.terminal === 'crash') throw new Error('Late crash');
+      if (workerData.terminal === 'fatal') parentPort.postMessage({ type: 'fatal', scanId: workerData.scanId,
+        error: { name: 'Error', message: 'Late failure', code: 'EIO' } });
+      else {
+        parentPort.postMessage({ type: 'cancelled', scanId: workerData.scanId });
+        parentPort.postMessage({ type: 'batch', scanId: workerData.scanId, sequence: 0, events: [] });
+        parentPort.postMessage({ type: 'complete', scanId: workerData.scanId });
+      }
+      parentPort.close();
+    });
+  `,
+      { terminal }
+    )
+    const controller = new AbortController()
+    const consume = vi.fn()
+    const progress = vi.fn()
+    const result = consumeScannerWorker(worker, scanId, consume, {
+      signal: controller.signal,
+      onProgress: progress
+    })
+    const assertion = expect(result).rejects.toBeInstanceOf(ScanCancelledError)
+    controller.abort()
+    await assertion
+    expect(consume).not.toHaveBeenCalled()
+    expect(progress).not.toHaveBeenCalled()
+    expectReleased(worker)
+  }
+)
+
+test('forces termination after the grace period when a worker cannot cooperate', async () => {
+  const worker = start('setInterval(() => {}, 1000)')
+  await once(worker, 'online')
+  const controller = new AbortController()
+  const terminate = vi.spyOn(worker, 'terminate')
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const result = consumeScannerWorker(worker, scanId, () => {}, { signal: controller.signal })
+  const assertion = expect(result).rejects.toBeInstanceOf(ScanCancelledError)
+  controller.abort()
+  expect(terminate).not.toHaveBeenCalled()
+  await vi.advanceTimersByTimeAsync(SCANNER_CANCEL_TIMEOUT_MS)
+  await assertion
+  expect(terminate).toHaveBeenCalledOnce()
+  expect(vi.getTimerCount()).toBe(0)
+  expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0)
+  expectReleased(worker)
+})
 
 test.each(['development', 'production'])(
   'launches the generated %s runner/worker from relocated JavaScript artifacts',

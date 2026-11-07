@@ -20,6 +20,11 @@ export interface ScannerWorkerAck {
   readonly sequence: number
 }
 
+export interface ScannerWorkerCancel {
+  readonly type: 'cancel'
+  readonly scanId: string
+}
+
 export type ScannerWorkerMessage =
   | {
       readonly type: 'batch'
@@ -28,6 +33,7 @@ export type ScannerWorkerMessage =
       readonly events: readonly ScanOutputEvent[]
     }
   | { readonly type: 'complete'; readonly scanId: string }
+  | { readonly type: 'cancelled'; readonly scanId: string }
   | { readonly type: 'fatal'; readonly scanId: string; readonly error: ScannerWorkerFailure }
 
 function record(value: unknown): value is Record<string, unknown> {
@@ -110,6 +116,7 @@ export function parseScannerWorkerRequest(value: unknown): ScannerWorkerRequest 
 export function parseScannerWorkerMessage(value: unknown, scanId: string): ScannerWorkerMessage {
   if (!record(value) || value.scanId !== scanId) throw new Error('Invalid scanner worker scan ID.')
   if (value.type === 'complete') return { type: 'complete', scanId }
+  if (value.type === 'cancelled') return { type: 'cancelled', scanId }
   if (
     value.type === 'fatal' &&
     record(value.error) &&
@@ -144,6 +151,13 @@ export function isScannerWorkerAck(
   return (
     record(value) && value.type === 'ack' && value.scanId === scanId && value.sequence === sequence
   )
+}
+
+export function isScannerWorkerCancel(
+  value: unknown,
+  scanId: string
+): value is ScannerWorkerCancel {
+  return record(value) && value.type === 'cancel' && value.scanId === scanId
 }
 
 export function serializeWorkerFailure(error: unknown): ScannerWorkerFailure {

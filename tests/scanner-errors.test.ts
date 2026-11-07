@@ -4,6 +4,8 @@ import type { Dir } from 'node:fs'
 import { lstat, opendir } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import type { FileEntry, ScanError } from '../src/shared/scan'
+import { ScanCancelledError } from '../src/main/scanner/cancellation'
+import { scanDirectory } from '../src/main/scanner/scan'
 import { basename, dirname, join, resolve } from 'node:path'
 import {
   aggregateDirectorySizes,
@@ -64,6 +66,41 @@ afterEach(async () => {
 function filesystemError(code: string): NodeJS.ErrnoException {
   return Object.assign(new Error(`Test filesystem failure: ${code}`), { code })
 }
+
+test('an already aborted traversal performs no filesystem operations', async () => {
+  const controller = new AbortController()
+  const cancelled = new ScanCancelledError()
+  controller.abort(cancelled)
+  const iterator = traverseDirectoryEvents(rootPath, scanId, controller.signal)
+  await expect(iterator.next()).rejects.toBe(cancelled)
+  expect(lstat).not.toHaveBeenCalled()
+  expect(opendir).not.toHaveBeenCalled()
+})
+
+test('cancellation after discovery closes handles without finalizing partial totals or summary', async () => {
+  await fs.writeFile(join(rootPath, 'file'), 'abc')
+  const controller = new AbortController()
+  const iterator = scanDirectory(rootPath, scanId, controller.signal)
+  expect((await iterator.next()).value).toMatchObject({ type: 'entry' })
+  controller.abort(new ScanCancelledError())
+  await expect(iterator.next()).rejects.toBeInstanceOf(ScanCancelledError)
+  expect(await iterator.next()).toEqual({ value: undefined, done: true })
+  expect(handles).toHaveLength(1)
+  await expect(handles[0].read()).rejects.toMatchObject({ code: 'ERR_DIR_CLOSED' })
+})
+
+test('cancellation during opendir closes the new handle before it can enter the traversal stack', async () => {
+  const controller = new AbortController()
+  vi.mocked(opendir).mockImplementation(async (...args) => {
+    const handle = await openTracked(...args)
+    controller.abort(new ScanCancelledError())
+    return handle
+  })
+  const iterator = traverseDirectoryEvents(rootPath, scanId, controller.signal)
+  await expect(iterator.next()).rejects.toBeInstanceOf(ScanCancelledError)
+  expect(handles).toHaveLength(1)
+  await expect(handles[0].read()).rejects.toMatchObject({ code: 'ERR_DIR_CLOSED' })
+})
 
 async function collect(
   source = traverseDirectoryEvents(rootPath, scanId)

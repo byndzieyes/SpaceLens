@@ -33,20 +33,23 @@ async function closeDirectories(stack: DirectoryFrame[], failure?: unknown): Pro
   }
 }
 
-async function checkDirectory(path: string, expected: Stats): Promise<void> {
+async function checkDirectory(path: string, expected: Stats, signal?: AbortSignal): Promise<void> {
+  signal?.throwIfAborted()
   const current = await lstat(path)
+  signal?.throwIfAborted()
   if (!current.isDirectory() || current.dev !== expected.dev || current.ino !== expected.ino) {
     throw new DirectoryChangedError(path)
   }
 }
 
-async function openDirectory(path: string, expected: Stats): Promise<Dir> {
+async function openDirectory(path: string, expected: Stats, signal?: AbortSignal): Promise<Dir> {
   // Check again after consumer yields and after opening, before reading children.
   // Path-based checks reduce replacement races; they are not an atomic snapshot.
-  await checkDirectory(path, expected)
+  await checkDirectory(path, expected, signal)
+  signal?.throwIfAborted()
   const directory = await opendir(path)
   try {
-    await checkDirectory(path, expected)
+    await checkDirectory(path, expected, signal)
     return directory
   } catch (error) {
     try {
@@ -89,13 +92,16 @@ export async function* traverseDirectory(
  */
 export async function* traverseDirectoryEvents(
   rootPath: string,
-  scanId: string
+  scanId: string,
+  signal?: AbortSignal
 ): AsyncGenerator<TraversalEvent, void, void> {
+  signal?.throwIfAborted()
   if (rootPath.length === 0) throw new TypeError('Root path must not be empty.')
   if (scanId.trim().length === 0) throw new TypeError('Scan ID must not be empty.')
 
   const path = resolve(rootPath)
   const stats = await lstat(path)
+  signal?.throwIfAborted()
   if (!stats.isDirectory()) throw new Error('Scan root must be a directory, not a file or symlink.')
 
   const root = createFileEntry(path, scanId, null, stats)
@@ -103,17 +109,22 @@ export async function* traverseDirectoryEvents(
   let failure: unknown
 
   try {
-    stack.push({ directory: await openDirectory(path, stats), entry: root, stats })
+    stack.push({ directory: await openDirectory(path, stats, signal), entry: root, stats })
+    signal?.throwIfAborted()
     yield { type: 'entry', entry: root }
 
     while (stack.length > 0) {
+      signal?.throwIfAborted()
       const frame = stack[stack.length - 1]
       let child: Dirent | null
       try {
         // A consumer yield or a previous read may have allowed this path to change.
-        await checkDirectory(frame.entry.path, frame.stats)
+        await checkDirectory(frame.entry.path, frame.stats, signal)
+        signal?.throwIfAborted()
         child = await frame.directory.read()
+        signal?.throwIfAborted()
       } catch (error) {
+        signal?.throwIfAborted()
         if (frame.entry.parentId === null) throw error
         const reported = toRecoverableScanError(error, frame.entry.path)
         stack.pop()
@@ -140,11 +151,14 @@ export async function* traverseDirectoryEvents(
       const childPath = join(frame.entry.path, child.name)
       let childStats: Stats
       try {
+        signal?.throwIfAborted()
         childStats = await lstat(childPath)
       } catch (error) {
+        signal?.throwIfAborted()
         yield { type: 'error', error: toRecoverableScanError(error, childPath) }
         continue
       }
+      signal?.throwIfAborted()
       const entry = createFileEntry(childPath, scanId, frame.entry.id, childStats)
       if (getEntryType(child) !== entry.type) {
         yield {
@@ -156,19 +170,22 @@ export async function* traverseDirectoryEvents(
           }
         }
       }
+      signal?.throwIfAborted()
       yield { type: 'entry', entry }
 
       if (entry.type === 'directory') {
         let directory: Dir
         try {
-          directory = await openDirectory(childPath, childStats)
+          directory = await openDirectory(childPath, childStats, signal)
         } catch (error) {
+          signal?.throwIfAborted()
           yield { type: 'error', error: toRecoverableScanError(error, childPath) }
           continue
         }
         stack.push({ directory, entry, stats: childStats })
       }
     }
+    signal?.throwIfAborted()
   } catch (error) {
     failure = error
     throw error

@@ -5,10 +5,11 @@ import { traverseDirectoryEvents } from './traverse'
 /** Stream discoveries, finalized directories, errors, then a final summary; stores no entries. */
 export async function* scanDirectory(
   rootPath: string,
-  scanId: string
+  scanId: string,
+  signal?: AbortSignal
 ): AsyncGenerator<ScanOutputEvent, void, void> {
   yield* summarizeScanEvents(
-    aggregateDirectorySizes(traverseDirectoryEvents(rootPath, scanId)),
+    aggregateDirectorySizes(traverseDirectoryEvents(rootPath, scanId, signal)),
     scanId
   )
 }
