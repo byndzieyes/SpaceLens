@@ -1,4 +1,6 @@
 import type { Worker } from 'node:worker_threads'
+import type { ScanProgress } from '../../shared/scan'
+import { ScanProgressTracker } from './progress'
 import type { ScanOutputEvent, ScanSummaryEvent } from './summary'
 import {
   parseScannerWorkerMessage,
@@ -7,13 +9,16 @@ import {
 } from './workerProtocol'
 
 export type ScanEventConsumer = (event: ScanOutputEvent) => void | Promise<void>
+export type ScanProgressConsumer = (progress: ScanProgress) => void | Promise<void>
 
 /** Own a newly started worker. Only one batch is processed, and acknowledged, at a time. */
 export async function consumeScannerWorker(
   worker: Worker,
   scanId: string,
-  consume: ScanEventConsumer
+  consume: ScanEventConsumer,
+  onProgress?: ScanProgressConsumer
 ): Promise<ScanSummaryEvent> {
+  const progress = onProgress ? new ScanProgressTracker(scanId) : undefined
   let settled = false
   let exited = false
   let busy = false
@@ -40,7 +45,12 @@ export async function consumeScannerWorker(
         throw new Error('Scanner worker sent an event after the final summary.')
       if (event.type === 'summary') summary = event
       await consume(event)
+      if (settled) return
+      progress?.accept(event)
     }
+    if (settled) return
+    // Progress describes consumed events and shares their acknowledgment boundary.
+    if (progress && onProgress) await onProgress(progress.snapshot())
     if (settled) return
     busy = false
     sequence++

@@ -1,7 +1,7 @@
 // @vitest-environment node
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { once } from 'node:events'
-import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, mkdtemp, readdir, rm, symlink, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
@@ -17,6 +17,7 @@ import {
 } from '../src/main/scanner/workerProtocol'
 import type { ScanOutputEvent, ScanSummaryEvent } from '../src/main/scanner/summary'
 import type { runScannerWorker } from '../src/main/scanner/workerRunner'
+import type { ScanProgress } from '../src/shared/scan'
 
 const require = createRequire(import.meta.url)
 const scanId = 'worker-test'
@@ -122,9 +123,27 @@ test.each(['development', 'production'])(
   'launches the generated %s runner/worker from relocated JavaScript artifacts',
   async (mode) => {
     const events: ScanOutputEvent[] = []
-    const result = await artifacts.get(mode)!.runner(rootPath, scanId, (event) => {
-      events.push(event)
-    })
+    const progress: ScanProgress[] = []
+    const result = await artifacts.get(mode)!.runner(
+      rootPath,
+      scanId,
+      (event) => {
+        events.push(event)
+      },
+      (snapshot) => {
+        expect(events.at(-1)?.type).toBe('summary')
+        progress.push(snapshot)
+      }
+    )
+    expect(progress).toEqual([
+      {
+        scanId,
+        processedFileCount: 0,
+        processedDirectoryCount: 1,
+        processedBytes: 0,
+        currentPath: rootPath
+      }
+    ])
     expect(events.map((event) => event.type)).toEqual(['entry', 'directory-finalized', 'summary'])
     expect(result).toEqual(events.at(-1))
     expect(result.summary).toEqual({
@@ -145,8 +164,21 @@ test('executes in a separate thread and matches direct scanning of nested files'
   const worker = start()
   expect(worker.threadId).toBeGreaterThan(0)
   const events: ScanOutputEvent[] = []
-  const summary = await consumeScannerWorker(worker, scanId, (event) => {
-    events.push(event)
+  const progress = vi.fn()
+  const summary = await consumeScannerWorker(
+    worker,
+    scanId,
+    (event) => {
+      events.push(event)
+    },
+    progress
+  )
+  expect(progress).toHaveBeenCalledExactlyOnceWith({
+    scanId,
+    processedFileCount: 2,
+    processedDirectoryCount: 3,
+    processedBytes: 8,
+    currentPath: rootPath
   })
   expect(normalize(events)).toEqual(normalize(direct))
   expect(summary.summary).toEqual({ fileCount: 2, directoryCount: 3, totalBytes: 8, errorCount: 0 })
@@ -204,8 +236,21 @@ test('preserves recoverable error events and partial known totals inside the act
     { denied: join(rootPath, 'private') }
   )
   const events: ScanOutputEvent[] = []
-  const result = await consumeScannerWorker(worker, scanId, (event) => {
-    events.push(event)
+  const progress = vi.fn()
+  const result = await consumeScannerWorker(
+    worker,
+    scanId,
+    (event) => {
+      events.push(event)
+    },
+    progress
+  )
+  expect(progress).toHaveBeenCalledExactlyOnceWith({
+    scanId,
+    processedFileCount: 1,
+    processedDirectoryCount: 1,
+    processedBytes: 3,
+    currentPath: rootPath
   })
   expect(events.filter((event) => event.type === 'error')).toEqual([
     {
@@ -220,10 +265,12 @@ test('preserves recoverable error events and partial known totals inside the act
 test('propagates fatal scanner errors and releases the worker', async () => {
   const worker = start(undefined, { rootPath: join(rootPath, 'missing') })
   const consume = vi.fn()
-  await expect(consumeScannerWorker(worker, scanId, consume)).rejects.toMatchObject({
+  const progress = vi.fn()
+  await expect(consumeScannerWorker(worker, scanId, consume, progress)).rejects.toMatchObject({
     code: 'ENOENT'
   })
   expect(consume).not.toHaveBeenCalled()
+  expect(progress).not.toHaveBeenCalled()
   expectReleased(worker)
 })
 
@@ -243,12 +290,25 @@ test('flushes partial discoveries before a fatal failure without sending a summa
     { bad: join(rootPath, 'bad') }
   )
   const events: ScanOutputEvent[] = []
+  const progress = vi.fn()
   await expect(
-    consumeScannerWorker(worker, scanId, (event) => {
-      events.push(event)
-    })
+    consumeScannerWorker(
+      worker,
+      scanId,
+      (event) => {
+        events.push(event)
+      },
+      progress
+    )
   ).rejects.toMatchObject({ name: 'TypeError', message: 'Unexpected scanner failure' })
   expect(events.map((event) => event.type)).toEqual(['entry'])
+  expect(progress).toHaveBeenCalledExactlyOnceWith({
+    scanId,
+    processedFileCount: 0,
+    processedDirectoryCount: 1,
+    processedBytes: 0,
+    currentPath: rootPath
+  })
   expectReleased(worker)
 })
 
@@ -322,6 +382,167 @@ test('awaits consumer processing before acknowledging a batch', async () => {
   await result
   expect(consume).toHaveBeenCalledTimes(3)
   worker.off('message', observe)
+  expectReleased(worker)
+})
+
+test('reports cumulative progress once per batch and awaits slow progress before acknowledging', async () => {
+  for (let index = 0; index < SCANNER_BATCH_SIZE * 2; index++) {
+    await writeFile(join(rootPath, `file-${index}`), 'abc')
+  }
+  const worker = start()
+  const acknowledge = vi.spyOn(worker, 'postMessage')
+  let release!: () => void
+  const gate = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  let ready!: () => void
+  const firstProgress = new Promise<void>((resolve) => {
+    ready = resolve
+  })
+  const snapshots: ScanProgress[] = []
+  let consumedFiles = 0
+  let consumedDirectories = 0
+  let consumedBytes = 0
+  let currentPath: string | null = null
+  let receivedSummary = false
+  const result = consumeScannerWorker(
+    worker,
+    scanId,
+    async (event) => {
+      // Progress must reflect even asynchronous consumer completion.
+      await Promise.resolve()
+      if (event.type === 'entry') {
+        if (event.entry.type === 'file') {
+          consumedFiles++
+          consumedBytes += event.entry.sizeBytes ?? 0
+        } else if (event.entry.type === 'directory') consumedDirectories++
+      }
+      if (event.type === 'entry' || event.type === 'directory-finalized')
+        currentPath = event.entry.path
+      if (event.type === 'summary') receivedSummary = true
+    },
+    async (snapshot) => {
+      expect(snapshot).toEqual({
+        scanId,
+        processedFileCount: consumedFiles,
+        processedDirectoryCount: consumedDirectories,
+        processedBytes: consumedBytes,
+        currentPath
+      })
+      snapshots.push(snapshot)
+      if (snapshots.length === 1) {
+        expect(receivedSummary).toBe(false)
+        ready()
+        await gate
+      }
+    }
+  )
+  try {
+    await firstProgress
+    expect(acknowledge).not.toHaveBeenCalled()
+    expect(snapshots).toHaveLength(1)
+    expect(consumedFiles).toBe(SCANNER_BATCH_SIZE - 1)
+    expect(worker.threadId).toBeGreaterThan(0)
+  } finally {
+    release()
+  }
+  const completed = await result
+  expect(snapshots.map((snapshot) => snapshot.processedFileCount)).toEqual([127, 255, 256])
+  expect(snapshots.map((snapshot) => snapshot.processedBytes)).toEqual([381, 765, 768])
+  expect(acknowledge).toHaveBeenCalledTimes(3)
+  expect(snapshots.at(-1)).toEqual({
+    scanId,
+    processedFileCount: completed.summary.fileCount,
+    processedDirectoryCount: completed.summary.directoryCount,
+    processedBytes: completed.summary.totalBytes,
+    currentPath: rootPath
+  })
+  expectReleased(worker)
+})
+
+test('reports known bytes with unknown file metadata and does not count junction targets', async (context) => {
+  const target = await mkdtemp(join(suitePath, 'target-'))
+  await writeFile(join(target, 'excluded'), 'not scanned')
+  try {
+    await symlink(target, join(rootPath, 'link'), process.platform === 'win32' ? 'junction' : 'dir')
+  } catch (error) {
+    if (['EPERM', 'EACCES', 'ENOTSUP'].includes((error as NodeJS.ErrnoException).code ?? '')) {
+      context.skip()
+      return
+    }
+    throw error
+  }
+  await writeFile(join(rootPath, 'unknown'), 'unknown size')
+  await writeFile(join(rootPath, 'known'), '12345')
+  await writeFile(join(rootPath, 'empty'), '')
+  const worker = start(
+    `
+    const { workerData } = require('node:worker_threads');
+    const fs = require('node:fs/promises');
+    const original = fs.lstat;
+    fs.lstat = async (path, ...args) => {
+      const stats = await original(path, ...args);
+      if (path === workerData.unknown) stats.size = NaN;
+      return stats;
+    };
+    require(workerData.workerPath);
+  `,
+    { unknown: join(rootPath, 'unknown') }
+  )
+  const progress = vi.fn()
+  const events: ScanOutputEvent[] = []
+  const result = await consumeScannerWorker(
+    worker,
+    scanId,
+    (event) => {
+      events.push(event)
+    },
+    progress
+  )
+  expect(events.filter((event) => event.type === 'error')).toEqual([
+    expect.objectContaining({ error: expect.objectContaining({ code: 'UNKNOWN_FILE_SIZE' }) })
+  ])
+  expect(result.summary).toEqual({ fileCount: 3, directoryCount: 1, totalBytes: 5, errorCount: 1 })
+  expect(progress).toHaveBeenCalledExactlyOnceWith({
+    scanId,
+    processedFileCount: 3,
+    processedDirectoryCount: 1,
+    processedBytes: 5,
+    currentPath: rootPath
+  })
+  expectReleased(worker)
+})
+
+test.each(['sync', 'async'] as const)(
+  'terminates the worker when the %s progress consumer fails',
+  async (kind) => {
+    const worker = start()
+    const acknowledge = vi.spyOn(worker, 'postMessage')
+    const failure = new Error('Progress consumer failed')
+    const progress = vi.fn(() => {
+      if (kind === 'sync') throw failure
+      return Promise.reject(failure)
+    })
+    await expect(consumeScannerWorker(worker, scanId, () => {}, progress)).rejects.toBe(failure)
+    expect(progress).toHaveBeenCalledOnce()
+    expect(acknowledge).not.toHaveBeenCalled()
+    expectReleased(worker)
+  }
+)
+
+test('rejects an inconsistent final summary before notifying progress', async () => {
+  const worker = start(`
+    const { parentPort, workerData } = require('node:worker_threads');
+    const summary = { type: 'summary', scanId: workerData.scanId, rootEntryId: 'root',
+      summary: { fileCount: 0, directoryCount: 1, totalBytes: 0, errorCount: 0 } };
+    parentPort.postMessage({ type: 'batch', scanId: workerData.scanId, sequence: 0, events: [summary] });
+    setInterval(() => {}, 1000);
+  `)
+  const progress = vi.fn()
+  await expect(consumeScannerWorker(worker, scanId, () => {}, progress)).rejects.toThrow(
+    'differs from'
+  )
+  expect(progress).not.toHaveBeenCalled()
   expectReleased(worker)
 })
 
