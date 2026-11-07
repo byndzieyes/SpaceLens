@@ -12,7 +12,16 @@ export default defineConfig(({ command, mode }) => {
   }
 
   return {
-    main: {},
+    main: {
+      build: {
+        rolldownOptions: {
+          input: {
+            index: resolve('src/main/index.ts'),
+            scannerWorkerRunner: resolve('src/main/scanner/workerRunner.ts')
+          }
+        }
+      }
+    },
     preload: {},
     renderer: {
       resolve: {
