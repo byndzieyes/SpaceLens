@@ -19,11 +19,15 @@ import {
 import type { ScanOutputEvent, ScanSummaryEvent } from '../src/main/scanner/summary'
 import type { runScannerWorker } from '../src/main/scanner/workerRunner'
 import type { ScanProgress } from '../src/shared/scan'
+import type { ScanSessionManager, ScanSessionState } from '../src/main/scanner/sessionManager'
 
 const require = createRequire(import.meta.url)
 const scanId = 'worker-test'
 const workers = new Set<Worker>()
-const artifacts = new Map<string, { runner: typeof runScannerWorker; workerPath: string }>()
+const artifacts = new Map<
+  string,
+  { runner: typeof runScannerWorker; workerPath: string; Manager: typeof ScanSessionManager }
+>()
 let suitePath: string
 let rootPath: string
 let workerPath: string
@@ -57,7 +61,14 @@ beforeAll(async () => {
       const module = require(join(relocated, 'scannerWorkerRunner.js')) as {
         runScannerWorker: typeof runScannerWorker
       }
-      artifacts.set(mode, { runner: module.runScannerWorker, workerPath: join(relocated, worker) })
+      const { ScanSessionManager } = require(join(relocated, 'scanSessionManager.js')) as {
+        ScanSessionManager: typeof import('../src/main/scanner/sessionManager').ScanSessionManager
+      }
+      artifacts.set(mode, {
+        runner: module.runScannerWorker,
+        workerPath: join(relocated, worker),
+        Manager: ScanSessionManager
+      })
     }
   } finally {
     if (previousMode === undefined) delete process.env.NODE_ENV_ELECTRON_VITE
@@ -133,6 +144,147 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
   })
   return { promise, resolve }
 }
+
+test.each(['development', 'production'])(
+  'generated %s session manager completes a real scan with batch-paced notifications',
+  async (mode) => {
+    const instance = new (artifacts.get(mode)!.Manager)()
+    await mkdir(join(rootPath, 'nested'))
+    await writeFile(join(rootPath, 'file'), '123')
+    await writeFile(join(rootPath, 'nested', 'file'), '12345')
+    const states: ScanSessionState[] = []
+    const events: ScanOutputEvent[] = []
+    instance.subscribe((state) => {
+      states.push(state)
+    })
+    try {
+      const result = await instance.start(rootPath, (event) => {
+        events.push(event)
+      })
+      expect(result.session.status).toBe('completed')
+      expect(result.session.summary).toEqual({
+        fileCount: 2,
+        directoryCount: 2,
+        totalBytes: 8,
+        errorCount: 0
+      })
+      expect(result.progress).toMatchObject({
+        scanId: result.session.id,
+        processedFileCount: 2,
+        processedDirectoryCount: 2,
+        processedBytes: 8
+      })
+      expect(states.map((state) => state.session.status)).toEqual([
+        'running',
+        'running',
+        'completed'
+      ])
+      expect(events.at(-1)?.type).toBe('summary')
+      expect(instance.getState()).toEqual(result)
+    } finally {
+      await instance.dispose()
+    }
+  }
+)
+
+test('session manager preserves consumer backpressure and disposes a real worker with a pending callback', async () => {
+  const threadModule = require('node:worker_threads') as typeof import('node:worker_threads')
+  const OriginalWorker = threadModule.Worker
+  let created!: Worker
+  vi.spyOn(threadModule, 'Worker').mockImplementation(function (file, options) {
+    created = new OriginalWorker(file, options)
+    workers.add(created)
+    return created
+  })
+  const instance = new (artifacts.get('production')!.Manager)()
+  const ready = deferred()
+  const gate = deferred()
+  const consume = vi.fn(async () => {
+    ready.resolve()
+    await gate.promise
+  })
+  const states: ScanSessionState[] = []
+  instance.subscribe((state) => {
+    states.push(state)
+  })
+  const done = instance.start(rootPath, consume)
+  await ready.promise
+  expect(instance.getState()!.session.status).toBe('running')
+  expect(consume).toHaveBeenCalledOnce()
+  expect(states).toHaveLength(1)
+  await expect(instance.start(rootPath)).rejects.toThrow('already active')
+  const disposing = instance.dispose()
+  expect(instance.getState()!.session.status).toBe('running')
+  await disposing
+  expect((await done).session.status).toBe('cancelled')
+  expectReleased(created)
+  gate.resolve()
+  await Promise.resolve()
+  expect(consume).toHaveBeenCalledOnce()
+  expect(states).toHaveLength(1)
+})
+
+test('session manager cancels a large real scan, preserves known partial totals, then starts afresh', async () => {
+  for (let index = 0; index < SCANNER_BATCH_SIZE * 2; index++)
+    await writeFile(join(rootPath, `file-${index}`), 'abc')
+  const instance = new (artifacts.get('production')!.Manager)()
+  const states: ScanSessionState[] = []
+  const unsubscribe = instance.subscribe((state) => {
+    states.push(state)
+    if (state.session.status === 'running' && state.progress.processedFileCount > 0) {
+      instance.cancel()
+      instance.cancel()
+      expect(instance.getState()!.session.status).toBe('running')
+    }
+  })
+  try {
+    const cancelled = await instance.start(rootPath)
+    expect(cancelled.session.status).toBe('cancelled')
+    expect(cancelled.session.summary).toEqual({
+      fileCount: 127,
+      directoryCount: 1,
+      totalBytes: 381,
+      errorCount: 0
+    })
+    expect(states.map((state) => state.session.status)).toEqual(['running', 'running', 'cancelled'])
+    unsubscribe()
+    const completed = await instance.start(rootPath)
+    expect(completed.session.id).not.toBe(cancelled.session.id)
+    expect(completed.session.status).toBe('completed')
+    expect(completed.session.summary).toEqual({
+      fileCount: 256,
+      directoryCount: 1,
+      totalBytes: 768,
+      errorCount: 0
+    })
+  } finally {
+    await instance.dispose()
+  }
+})
+
+test('session manager records actual worker and callback failures and can recover', async () => {
+  const instance = new (artifacts.get('production')!.Manager)()
+  try {
+    const missing = await instance.start(join(rootPath, 'missing'))
+    expect(missing.session.status).toBe('failed')
+    expect(missing.failure?.code).toBe('ENOENT')
+    await writeFile(join(rootPath, 'file'), 'abc')
+    const failed = await instance.start(rootPath, (event) => {
+      if (event.type === 'entry' && event.entry.type === 'file') throw new Error('Consumer failed')
+    })
+    expect(failed.session.status).toBe('failed')
+    expect(failed.failure?.message).toBe('Consumer failed')
+    expect(failed.session.summary).toEqual({
+      fileCount: 0,
+      directoryCount: 1,
+      totalBytes: 0,
+      errorCount: 0
+    })
+    expect((await instance.start(rootPath)).session.status).toBe('completed')
+  } finally {
+    await instance.dispose()
+  }
+})
 
 test.each(['development', 'production'])(
   'cancels before %s runner startup without creating a worker',

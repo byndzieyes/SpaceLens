@@ -17,7 +17,8 @@ export default defineConfig(({ command, mode }) => {
         rolldownOptions: {
           input: {
             index: resolve('src/main/index.ts'),
-            scannerWorkerRunner: resolve('src/main/scanner/workerRunner.ts')
+            scannerWorkerRunner: resolve('src/main/scanner/workerRunner.ts'),
+            scanSessionManager: resolve('src/main/scanner/sessionManager.ts')
           }
         }
       }
