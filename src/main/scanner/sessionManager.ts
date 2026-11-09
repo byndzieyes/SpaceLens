@@ -1,19 +1,12 @@
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
-import type { ScanProgress, ScanSession } from '../../shared/scan'
+import type { ScanProgress, ScanSessionState } from '../../shared/scan'
+export type { ScanSessionState } from '../../shared/scan'
 import { ScanCancelledError } from './cancellation'
 import { ScanProgressTracker } from './progress'
 import type { ScanEventConsumer } from './workerClient'
 import { serializeWorkerFailure, type ScannerWorkerFailure } from './workerProtocol'
 import { runScannerWorker } from './workerRunner'
-
-/** Metadata only: neither stored entries nor a ScanResult/entries reference. */
-export interface ScanSessionState {
-  readonly session: ScanSession
-  readonly progress: ScanProgress
-  /** Fatal execution/callback failure; summary.errorCount counts streamed ScanErrors. */
-  readonly failure: ScannerWorkerFailure | null
-}
 
 /** Synchronous observers only; asynchronous work belongs in the event consumer. */
 export type ScanSessionSubscriber = (state: ScanSessionState) => undefined

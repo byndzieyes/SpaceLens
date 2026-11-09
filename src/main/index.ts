@@ -4,6 +4,12 @@ import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { registerAppInfoHandler } from './ipc'
+import { ScanSessionManager } from './scanner/sessionManager'
+import { registerScannerIpc, registerScannerShutdown } from './scannerIpc'
+
+const scanManager = new ScanSessionManager()
+let scannerIpc: ReturnType<typeof registerScannerIpc> | undefined
+registerScannerShutdown(() => (scannerIpc ? scannerIpc.dispose() : scanManager.dispose()))
 
 const rendererUrl =
   is.dev && process.env['ELECTRON_RENDERER_URL']
@@ -33,6 +39,7 @@ function createWindow(): void {
 
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
+  scannerIpc?.attachRenderer(mainWindow.webContents)
 
   // HMR for renderer base on electron-vite cli.
   // Load the remote URL for development or the local html file for production.
@@ -54,6 +61,8 @@ app.whenReady().then(async () => {
   })
 
   registerAppInfoHandler(rendererUrl)
+  // Deny all scan roots until the native folder picker supplies Main-owned approval.
+  scannerIpc = registerScannerIpc(scanManager, rendererUrl)
 
   if (!app.isPackaged && process.env['NODE_ENV'] === 'development') {
     const extensionPath = process.env['REACT_DEVTOOLS_PATH']?.trim()

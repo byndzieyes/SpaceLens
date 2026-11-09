@@ -68,6 +68,20 @@ export interface ScanProgress {
   readonly currentPath: string | null
 }
 
+export interface ScanFailure {
+  readonly name: string
+  readonly message: string
+  readonly code: string | null
+}
+
+/** Session metadata only; does not promise stored or queryable filesystem entries. */
+export interface ScanSessionState {
+  readonly session: ScanSession
+  readonly progress: ScanProgress
+  /** Fatal failure, separate from summary.errorCount (streamed filesystem errors). */
+  readonly failure: ScanFailure | null
+}
+
 /** Plain error data, never a platform-specific Error object. */
 export interface ScanError {
   readonly path: string

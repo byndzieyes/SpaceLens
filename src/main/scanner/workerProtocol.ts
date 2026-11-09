@@ -1,4 +1,5 @@
 import type { ScanOutputEvent } from './summary'
+import type { ScanFailure } from '../../shared/scan'
 
 /** One batch may be in flight; the worker pauses until Main acknowledges it. */
 export const SCANNER_BATCH_SIZE = 128
@@ -8,11 +9,7 @@ export interface ScannerWorkerRequest {
   readonly scanId: string
 }
 
-export interface ScannerWorkerFailure {
-  readonly name: string
-  readonly message: string
-  readonly code: string | null
-}
+export type ScannerWorkerFailure = ScanFailure
 
 export interface ScannerWorkerAck {
   readonly type: 'ack'
