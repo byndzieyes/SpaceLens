@@ -2,12 +2,13 @@
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
-import { app, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
+import { app, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { IPC_CHANNELS, type ScannerIpcResult, type ScanStateSnapshot } from '../src/shared/ipc'
 import type { ScanSessionState } from '../src/shared/scan'
 import type { ScanSessionManager, ScanSessionSubscriber } from '../src/main/scanner/sessionManager'
 import { registerScannerIpc, registerScannerShutdown } from '../src/main/scannerIpc'
 import { registerAppInfoHandler } from '../src/main/ipc'
+import { verifyScanDirectory } from '../src/main/scanner/directoryApproval'
 
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events')
@@ -18,9 +19,15 @@ vi.mock('electron', async () => {
       getName: () => 'SpaceLens',
       getVersion: () => '0.1.0'
     }),
-    BrowserWindow: { fromWebContents: vi.fn(() => ({})) }
+    BrowserWindow: { fromWebContents: vi.fn(() => ({ isDestroyed: () => false })) },
+    dialog: { showOpenDialog: vi.fn() }
   }
 })
+
+vi.mock('../src/main/scanner/directoryApproval', () => ({
+  inspectScanDirectory: vi.fn(async (path: string) => ({ path, dev: 1n, ino: 1n })),
+  verifyScanDirectory: vi.fn(async () => true)
+}))
 
 const url = 'file:///app/index.html'
 const rootPath = resolve('approved-fixture')
@@ -37,7 +44,6 @@ let start: ReturnType<typeof vi.fn>
 let cancel: ReturnType<typeof vi.fn>
 let dispose: ReturnType<typeof vi.fn>
 let unsubscribe: ReturnType<typeof vi.fn>
-let approve: ReturnType<typeof vi.fn<(absolutePath: string) => boolean>>
 
 function makeRenderer(): EventEmitter & {
   isDestroyed: ReturnType<typeof vi.fn<() => boolean>>
@@ -96,7 +102,7 @@ beforeEach(() => {
   unsubscribe = vi.fn()
   cancel = vi.fn()
   dispose = vi.fn(async () => {})
-  approve = vi.fn(() => true)
+  vi.mocked(dialog.showOpenDialog).mockResolvedValue({ canceled: false, filePaths: [rootPath] })
   start = vi.fn(() => {
     state = running()
     subscriber(state)
@@ -115,7 +121,7 @@ beforeEach(() => {
       return unsubscribe
     }
   } as unknown as ScanSessionManager
-  boundary = registerScannerIpc(manager, url, approve)
+  boundary = registerScannerIpc(manager, url)
   boundary.attachRenderer(renderer as unknown as WebContents)
   ack(0)
   renderer.send.mockClear()
@@ -128,8 +134,9 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
-test('accepts an approved root promptly, exposes current state, and rejects concurrent starts', () => {
-  const accepted = invoke(IPC_CHANNELS.startScan, [{ rootPath }])
+test('accepts an approved root promptly, exposes current state, and rejects concurrent starts', async () => {
+  await invoke(IPC_CHANNELS.selectScanDirectory)
+  const accepted = await invoke(IPC_CHANNELS.startScan, [{ rootPath }])
   expect(accepted).toEqual({ ok: true, value: { scanId: id } })
   expect(accepted).not.toBeInstanceOf(Promise)
   expect(start).toHaveBeenCalledExactlyOnceWith(rootPath)
@@ -160,8 +167,31 @@ test.each([
     error: { code: 'INVALID_REQUEST' }
   })
   expect(start).not.toHaveBeenCalled()
-  expect(approve).not.toHaveBeenCalled()
 })
+
+test.each(['navigation', 'replacement', 'dispose'] as const)(
+  'rechecks authorization after pending filesystem validation and rejects %s',
+  async (change) => {
+    await invoke(IPC_CHANNELS.selectScanDirectory)
+    let finish!: (valid: boolean) => void
+    vi.mocked(verifyScanDirectory).mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve
+        })
+    )
+    const pending = invoke(IPC_CHANNELS.startScan, [{ rootPath }])
+    if (change === 'navigation') renderer.emit('did-start-navigation', { isMainFrame: true })
+    if (change === 'replacement') await invoke(IPC_CHANNELS.selectScanDirectory)
+    if (change === 'dispose') await boundary.dispose()
+    finish(true)
+    expect(await pending).toMatchObject({
+      ok: false,
+      error: { code: change === 'replacement' ? 'PATH_NOT_AUTHORIZED' : 'UNAVAILABLE' }
+    })
+    expect(start).not.toHaveBeenCalled()
+  }
+)
 
 test('rejects argument count errors and malformed cancellation identifiers', () => {
   for (const args of [[], [{ rootPath }, { rootPath }]])
@@ -197,7 +227,6 @@ test.runIf(process.platform === 'win32')('rejects Windows drive-relative and dev
 })
 
 test('requires explicit approval independently of absolute path validation', async () => {
-  approve.mockReturnValue(false)
   expect(invoke(IPC_CHANNELS.startScan, [{ rootPath }])).toMatchObject({
     ok: false,
     error: { code: 'PATH_NOT_AUTHORIZED' }
@@ -264,8 +293,9 @@ test('bounds notifications to one in flight and coalesces the latest pending sta
 
 test.each(['completed', 'cancelled', 'failed'] as const)(
   'forwards %s only when the manager reports terminal state',
-  (status) => {
-    invoke(IPC_CHANNELS.startScan, [{ rootPath }])
+  async (status) => {
+    await invoke(IPC_CHANNELS.selectScanDirectory)
+    await invoke(IPC_CHANNELS.startScan, [{ rootPath }])
     const first = renderer.send.mock.calls[0][1] as ScanStateSnapshot
     if (status === 'cancelled') {
       expect(invoke(IPC_CHANNELS.cancelScan, [{ scanId: id }])).toEqual({
@@ -309,7 +339,8 @@ test('sanitizes failure diagnostics and handles thrown requests and rejected bac
   const snapshot = invoke(IPC_CHANNELS.getScanState)
   expect(JSON.stringify(snapshot)).not.toMatch(/Secret|SECRET|InternalError/)
   state = null
-  invoke(IPC_CHANNELS.startScan, [{ rootPath }])
+  await invoke(IPC_CHANNELS.selectScanDirectory)
+  await invoke(IPC_CHANNELS.startScan, [{ rootPath }])
   reject(new Error('Internal rejection'))
   await Promise.resolve()
   expect(console.error).toHaveBeenCalled()
@@ -352,7 +383,7 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(replacement.listenerCount('did-finish-load')).toBe(0)
   expect(replacement.listenerCount('destroyed')).toBe(0)
   expect(ipcMain.listenerCount(IPC_CHANNELS.acknowledgeScanState)).toBe(0)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(3)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(4)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

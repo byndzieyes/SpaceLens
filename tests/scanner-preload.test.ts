@@ -37,6 +37,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'getAppInfo',
     'getScanState',
     'onScanStateChanged',
+    'selectScanDirectory',
     'startScan'
   ])
   const response = { ok: false, error: { code: 'PATH_NOT_AUTHORIZED', message: 'Not approved' } }
@@ -45,6 +46,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   await api.getScanState()
   await api.cancelScan({ scanId: 'scan-id' })
   await api.getAppInfo()
+  await api.selectScanDirectory()
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(1, IPC_CHANNELS.startScan, {
     rootPath: 'C:\\approved'
   })
@@ -53,6 +55,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     scanId: 'scan-id'
   })
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(4, IPC_CHANNELS.getAppInfo)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(5, IPC_CHANNELS.selectScanDirectory)
 })
 
 test('deduplicates subscribers, strips Electron events, and supports idempotent unsubscription', () => {

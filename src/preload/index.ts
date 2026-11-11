@@ -41,6 +41,7 @@ globalThis.addEventListener(
 
 const api: SpaceLensAPI = {
   getAppInfo: () => ipcRenderer.invoke(IPC_CHANNELS.getAppInfo),
+  selectScanDirectory: () => ipcRenderer.invoke(IPC_CHANNELS.selectScanDirectory),
   startScan: (request) => ipcRenderer.invoke(IPC_CHANNELS.startScan, request),
   getScanState: () => ipcRenderer.invoke(IPC_CHANNELS.getScanState),
   cancelScan: (request) => ipcRenderer.invoke(IPC_CHANNELS.cancelScan, request),

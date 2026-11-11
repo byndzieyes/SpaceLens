@@ -61,7 +61,7 @@ app.whenReady().then(async () => {
   })
 
   registerAppInfoHandler(rendererUrl)
-  // Deny all scan roots until the native folder picker supplies Main-owned approval.
+  // Only native directory selection can grant this renderer permission to scan a root.
   scannerIpc = registerScannerIpc(scanManager, rendererUrl)
 
   if (!app.isPackaged && process.env['NODE_ENV'] === 'development') {

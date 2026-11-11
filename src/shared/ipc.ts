@@ -8,6 +8,7 @@ export interface AppInfo {
 
 export interface SpaceLensAPI {
   getAppInfo: () => Promise<AppInfo>
+  selectScanDirectory: () => Promise<ScannerIpcResult<ScanDirectorySelection>>
   startScan: (request: StartScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
   getScanState: () => Promise<ScannerIpcResult<ScanStateSnapshot>>
   cancelScan: (request: CancelScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
@@ -16,6 +17,7 @@ export interface SpaceLensAPI {
 
 export const IPC_CHANNELS = {
   getAppInfo: 'spacelens:get-app-info',
+  selectScanDirectory: 'spacelens:select-scan-directory',
   startScan: 'spacelens:start-scan',
   getScanState: 'spacelens:get-scan-state',
   cancelScan: 'spacelens:cancel-scan',
@@ -23,8 +25,12 @@ export const IPC_CHANNELS = {
   acknowledgeScanState: 'spacelens:acknowledge-scan-state'
 } as const
 export interface StartScanRequest {
+  /** Use the exact canonical rootPath returned by selectScanDirectory(). */
   readonly rootPath: string
 }
+
+export type ScanDirectorySelection =
+  { readonly cancelled: true } | { readonly cancelled: false; readonly rootPath: string }
 
 export interface CancelScanRequest {
   readonly scanId: string
@@ -34,6 +40,9 @@ export type ScannerIpcErrorCode =
   | 'UNAUTHORIZED'
   | 'INVALID_REQUEST'
   | 'PATH_NOT_AUTHORIZED'
+  | 'PICKER_BUSY'
+  | 'PICKER_FAILED'
+  | 'DIRECTORY_UNAVAILABLE'
   | 'SCAN_ACTIVE'
   | 'SCAN_MISMATCH'
   | 'NOT_RUNNING'

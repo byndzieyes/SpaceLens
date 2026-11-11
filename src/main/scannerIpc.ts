@@ -1,20 +1,28 @@
 import {
   app,
+  BrowserWindow,
+  dialog,
   ipcMain,
   type IpcMainEvent,
   type IpcMainInvokeEvent,
   type WebContents
 } from 'electron'
-import { isAbsolute, resolve } from 'node:path'
+import { isAbsolute } from 'node:path'
 import {
   IPC_CHANNELS,
   type ScannerIpcErrorCode,
   type ScannerIpcResult,
   type ScanAccepted,
+  type ScanDirectorySelection,
   type ScanStateSnapshot
 } from '../shared/ipc'
 import type { ScanSessionState } from '../shared/scan'
 import type { ScanSessionManager } from './scanner/sessionManager'
+import {
+  inspectScanDirectory,
+  verifyScanDirectory,
+  type DirectoryApproval
+} from './scanner/directoryApproval'
 
 function failure(code: ScannerIpcErrorCode, message: string): ScannerIpcResult<never> {
   return { ok: false, error: { code, message } }
@@ -73,11 +81,10 @@ function publicState(state: ScanSessionState | null): ScanSessionState | null {
   }
 }
 
-/** Main-only approval policy. A well-formed renderer path never grants permission. */
+/** Only the native picker grants approval, scoped to the attached renderer document. */
 export function registerScannerIpc(
   manager: ScanSessionManager,
-  rendererUrl: string,
-  isPathAuthorized: (absolutePath: string) => boolean = () => false
+  rendererUrl: string
 ): { attachRenderer: (renderer: WebContents) => void; dispose: () => Promise<void> } {
   let renderer: WebContents | null = null
   let disposed = false
@@ -85,6 +92,20 @@ export function registerScannerIpc(
   let revision = 0
   let latest: ScanStateSnapshot = { revision, state: publicState(manager.getState()) }
   let inFlight: number | null = null
+  let approval: DirectoryApproval | null = null
+  let contextVersion = 0
+  let pickerBusy = false
+  let starting = false
+
+  const clearApproval = (): void => {
+    approval = null
+    contextVersion++
+  }
+  const onNavigation = (
+    details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>
+  ): void => {
+    if (details.isMainFrame) clearApproval()
+  }
 
   const authorizedRenderer = (): boolean => {
     try {
@@ -120,6 +141,8 @@ export function registerScannerIpc(
     sendLatest()
   }
   const detachRenderer = (): void => {
+    clearApproval()
+    renderer?.removeListener('did-start-navigation', onNavigation)
     renderer?.removeListener('did-finish-load', onLoaded)
     renderer?.removeListener('destroyed', detachRenderer)
     renderer = null
@@ -140,6 +163,57 @@ export function registerScannerIpc(
   }
   ipcMain.on(IPC_CHANNELS.acknowledgeScanState, onAck)
 
+  ipcMain.handle(
+    IPC_CHANNELS.selectScanDirectory,
+    async (event, ...args: unknown[]): Promise<ScannerIpcResult<ScanDirectorySelection>> => {
+      if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
+      if (!authorized(event)) return failure('UNAUTHORIZED', 'Scanner access is not authorized.')
+      if (args.length !== 0)
+        return failure('INVALID_REQUEST', 'selectScanDirectory does not accept arguments.')
+      if (pickerBusy) return failure('PICKER_BUSY', 'A directory picker is already open.')
+      const owner = BrowserWindow.fromWebContents(event.sender)
+      if (!owner || owner.isDestroyed())
+        return failure('UNAVAILABLE', 'The application window is unavailable.')
+      pickerBusy = true
+      const version = contextVersion
+      const currentContext = (): boolean =>
+        !disposed && version === contextVersion && authorized(event) && !owner.isDestroyed()
+      try {
+        let selection: Electron.OpenDialogReturnValue
+        try {
+          selection = await dialog.showOpenDialog(owner, {
+            title: 'Select a directory to scan',
+            properties: ['openDirectory']
+          })
+        } catch {
+          return failure('PICKER_FAILED', 'The directory picker could not be opened.')
+        }
+        if (!currentContext())
+          return failure('UNAVAILABLE', 'The selection context is no longer available.')
+        if (selection.canceled) return { ok: true, value: { cancelled: true } }
+        if (selection.filePaths.length !== 1 || !validRoot(selection.filePaths[0])) {
+          return failure('DIRECTORY_UNAVAILABLE', 'Select an accessible filesystem directory.')
+        }
+        try {
+          const selected = await inspectScanDirectory(selection.filePaths[0])
+          if (!currentContext())
+            return failure('UNAVAILABLE', 'The selection context is no longer available.')
+          if (!validRoot(selected.path))
+            return failure('DIRECTORY_UNAVAILABLE', 'Select an accessible filesystem directory.')
+          approval = selected
+          return { ok: true, value: { cancelled: false, rootPath: selected.path } }
+        } catch {
+          return failure(
+            'DIRECTORY_UNAVAILABLE',
+            'The selected directory is unavailable or inaccessible.'
+          )
+        }
+      } finally {
+        pickerBusy = false
+      }
+    }
+  )
+
   const channels = [
     IPC_CHANNELS.startScan,
     IPC_CHANNELS.getScanState,
@@ -148,7 +222,12 @@ export function registerScannerIpc(
   for (const channel of channels) {
     ipcMain.handle(
       channel,
-      (event, ...args: unknown[]): ScannerIpcResult<ScanAccepted | ScanStateSnapshot> => {
+      (
+        event,
+        ...args: unknown[]
+      ):
+        | ScannerIpcResult<ScanAccepted | ScanStateSnapshot>
+        | Promise<ScannerIpcResult<ScanAccepted>> => {
         try {
           if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
           if (!authorized(event))
@@ -168,26 +247,59 @@ export function registerScannerIpc(
             const previous = manager.getState()
             if (previous?.session.status === 'running')
               return failure('SCAN_ACTIVE', 'A scan is already active.')
-            const rootPath = resolve(path)
-            if (!isPathAuthorized(rootPath))
+            if (!approval || path !== approval.path)
               return failure(
                 'PATH_NOT_AUTHORIZED',
                 'Choose an approved location before starting a scan.'
               )
-            // start() reserves its running session synchronously. Its promise represents
-            // terminal settlement, so do not await it in the IPC acceptance response.
-            void manager
-              .start(rootPath)
-              .catch(() => console.error('Scanner start could not settle normally.'))
-            const accepted = manager.getState()
-            if (
-              !accepted ||
-              accepted.session.id === previous?.session.id ||
-              accepted.session.status !== 'running'
-            ) {
-              return failure('INTERNAL_ERROR', 'The scan could not be started.')
-            }
-            return { ok: true, value: { scanId: accepted.session.id } }
+            if (starting) return failure('SCAN_ACTIVE', 'A scan start is already pending.')
+            const selected = approval
+            const version = contextVersion
+            starting = true
+            return (async (): Promise<ScannerIpcResult<ScanAccepted>> => {
+              try {
+                let valid = false
+                try {
+                  valid = await verifyScanDirectory(selected)
+                } catch {
+                  /* Unavailable locations revoke their approval. */
+                }
+                if (disposed || version !== contextVersion || !authorized(event))
+                  return failure('UNAVAILABLE', 'The scan context is no longer available.')
+                if (approval !== selected)
+                  return failure(
+                    'PATH_NOT_AUTHORIZED',
+                    'Select the directory again before scanning.'
+                  )
+                if (!valid) {
+                  approval = null
+                  return failure(
+                    'DIRECTORY_UNAVAILABLE',
+                    'The selected directory changed or is no longer accessible. Select it again.'
+                  )
+                }
+                if (manager.getState()?.session.status === 'running')
+                  return failure('SCAN_ACTIVE', 'A scan is already active.')
+                // start() reserves its running session synchronously. Its promise represents
+                // terminal settlement, so do not await it in the IPC acceptance response.
+                void manager
+                  .start(selected.path)
+                  .catch(() => console.error('Scanner start could not settle normally.'))
+                const accepted = manager.getState()
+                if (
+                  !accepted ||
+                  accepted.session.id === previous?.session.id ||
+                  accepted.session.status !== 'running'
+                ) {
+                  return failure('INTERNAL_ERROR', 'The scan could not be started.')
+                }
+                return { ok: true, value: { scanId: accepted.session.id } }
+              } catch {
+                return failure('INTERNAL_ERROR', 'The scan could not be started.')
+              } finally {
+                starting = false
+              }
+            })()
           }
           const scanId = singleField(args, 'scanId')
           if (
@@ -219,6 +331,7 @@ export function registerScannerIpc(
         return
       }
       next.on('did-finish-load', onLoaded)
+      next.on('did-start-navigation', onNavigation)
       next.on('destroyed', detachRenderer)
       sendLatest()
     },
@@ -228,6 +341,7 @@ export function registerScannerIpc(
       unsubscribe()
       detachRenderer()
       for (const channel of channels) ipcMain.removeHandler(channel)
+      ipcMain.removeHandler(IPC_CHANNELS.selectScanDirectory)
       ipcMain.removeListener(IPC_CHANNELS.acknowledgeScanState, onAck)
       disposal = manager.dispose()
       return disposal
