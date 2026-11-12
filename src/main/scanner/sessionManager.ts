@@ -4,6 +4,21 @@ import type { RecentScanSummary, ScanProgress, ScanSessionState } from '../../sh
 export type { ScanSessionState } from '../../shared/scan'
 import { ScanCancelledError } from './cancellation'
 import { ScanProgressTracker } from './progress'
+import {
+  DEFAULT_SNAPSHOT_LIMITS,
+  ScanSnapshotStorage,
+  SnapshotAccessError,
+  validateSnapshotRequest,
+  type SnapshotLimits
+} from './snapshot'
+import type {
+  ScanDirectoryPage,
+  ScanDirectoryRequest,
+  ScanEntryRequest,
+  ScanSnapshotAvailability
+} from '../../shared/snapshot'
+import type { FileEntry } from '../../shared/scan'
+import type { ScanSummaryEvent } from './summary'
 import type { ScanEventConsumer } from './workerClient'
 import { serializeWorkerFailure, type ScannerWorkerFailure } from './workerProtocol'
 import { runScannerWorker } from './workerRunner'
@@ -15,6 +30,7 @@ interface ActiveScan {
   readonly id: string
   readonly controller: AbortController
   readonly tracker: ScanProgressTracker
+  readonly snapshot: ScanSnapshotStorage
   readonly done: Promise<ScanSessionState>
   errorCount: number
 }
@@ -28,8 +44,8 @@ function copy(state: ScanSessionState): ScanSessionState {
 }
 
 /**
- * One active attempt and the latest state, with O(1) scan metadata and no event
- * history. start() resolves a terminal snapshot for all worker outcomes; invalid,
+ * One active attempt and the latest state, with bounded temporary entry retention
+ * and no event history. start() resolves terminal state for all worker outcomes; invalid,
  * concurrent, or disposed starts reject. Await it before starting another scan.
  */
 export class ScanSessionManager {
@@ -39,6 +55,47 @@ export class ScanSessionManager {
   private readonly subscribers = new Set<ScanSessionSubscriber>()
   private disposed = false
   private disposal: Promise<void> | undefined
+  private published: ScanSnapshotStorage | null = null
+  private unavailable: ScanSnapshotAvailability['unavailable'] = null
+  private readonly snapshotLimits: SnapshotLimits
+
+  constructor(limits: SnapshotLimits = DEFAULT_SNAPSHOT_LIMITS) {
+    if (
+      !Number.isSafeInteger(limits.maxEntries) ||
+      limits.maxEntries < 0 ||
+      !Number.isSafeInteger(limits.maxEstimatedBytes) ||
+      limits.maxEstimatedBytes < 0
+    )
+      throw new RangeError('Snapshot limits must be non-negative safe integers.')
+    this.snapshotLimits = { ...limits }
+  }
+
+  getScanSnapshot(): ScanSnapshotAvailability {
+    return {
+      snapshot: this.published?.describe() ?? null,
+      unavailable: this.unavailable === null ? null : { ...this.unavailable }
+    }
+  }
+
+  getScanEntry(request: ScanEntryRequest): FileEntry {
+    validateSnapshotRequest(request, false)
+    return this.snapshotFor(request.scanId).getEntry(request.entryId)
+  }
+
+  listScanDirectory(request: ScanDirectoryRequest): ScanDirectoryPage {
+    validateSnapshotRequest(request, true)
+    return this.snapshotFor(request.scanId).listDirectory(request)
+  }
+
+  private snapshotFor(scanId: string): ScanSnapshotStorage {
+    if (this.published?.scanId === scanId) return this.published
+    if (!this.published || this.unavailable?.scanId === scanId || this.state?.session.id === scanId)
+      throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'This scan has no available snapshot.')
+    throw new SnapshotAccessError(
+      'SNAPSHOT_EXPIRED',
+      'This snapshot reference is no longer available.'
+    )
+  }
 
   getLatestCompleted(): RecentScanSummary | null {
     return this.latestCompleted === null ? null : { ...this.latestCompleted }
@@ -80,6 +137,7 @@ export class ScanSessionManager {
     const active: ActiveScan = {
       id,
       tracker,
+      snapshot: new ScanSnapshotStorage(id, path, this.snapshotLimits),
       controller: new AbortController(),
       errorCount: 0,
       // Establish the active reservation before callbacks can cancel/dispose/reenter.
@@ -101,6 +159,10 @@ export class ScanSessionManager {
     this.disposed = true
     this.subscribers.clear()
     this.cancel()
+    this.published?.discard()
+    this.published = null
+    this.active?.snapshot.discard()
+    this.unavailable = null
     this.disposal = this.active?.done.then(() => undefined) ?? Promise.resolve()
     return this.disposal
   }
@@ -133,6 +195,7 @@ export class ScanSessionManager {
   ): Promise<ScanSessionState> {
     let status: 'completed' | 'cancelled' | 'failed' = 'completed'
     let failure: ScannerWorkerFailure | null = null
+    let completedResult: ScanSummaryEvent | null = null
     try {
       const result = await runScannerWorker(
         path,
@@ -149,6 +212,7 @@ export class ScanSessionManager {
             active.errorCount++
           }
           active.tracker.accept(event)
+          if (!this.disposed) active.snapshot.accept(event)
           this.refresh(active)
         },
         {
@@ -174,6 +238,7 @@ export class ScanSessionManager {
         ...this.state!,
         session: { ...this.state!.session, summary: { ...result.summary } }
       }
+      completedResult = result
     } catch (error) {
       if (active.controller.signal.aborted && error instanceof ScanCancelledError)
         status = 'cancelled'
@@ -189,6 +254,20 @@ export class ScanSessionManager {
     }
     if (this.state.session.status === 'completed') {
       const session = this.state.session
+      if (
+        !this.disposed &&
+        completedResult &&
+        active.snapshot.complete(completedResult, session.finishedAt)
+      ) {
+        this.published?.discard()
+        this.published = active.snapshot
+        this.unavailable = null
+      } else if (!this.disposed) {
+        this.unavailable = {
+          scanId: active.id,
+          reason: active.snapshot.unavailableReason ?? 'invalid-data'
+        }
+      }
       this.latestCompleted = {
         id: session.id,
         path: session.rootPath,
@@ -198,6 +277,7 @@ export class ScanSessionManager {
         errorCount: session.summary.errorCount
       }
     }
+    if (this.published !== active.snapshot) active.snapshot.discard()
     const terminal = copy(this.state)
     this.notify()
     this.active = null

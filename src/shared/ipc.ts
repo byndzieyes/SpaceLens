@@ -1,4 +1,11 @@
-import type { RecentScanSummary, ScanSessionState } from './scan'
+import type { FileEntry, RecentScanSummary, ScanSessionState } from './scan'
+import type {
+  ScanDirectoryPage,
+  ScanDirectoryRequest,
+  ScanEntryRequest,
+  ScanSnapshotAvailability,
+  SnapshotAccessErrorCode
+} from './snapshot'
 
 export interface AppInfo {
   name: string
@@ -11,6 +18,9 @@ export interface SpaceLensAPI {
   selectScanDirectory: () => Promise<ScannerIpcResult<ScanDirectorySelection>>
   startScan: (request: StartScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
   getScanState: () => Promise<ScannerIpcResult<ScanStateSnapshot>>
+  getScanSnapshot: () => Promise<ScannerIpcResult<ScanSnapshotAvailability>>
+  getScanEntry: (request: ScanEntryRequest) => Promise<ScannerIpcResult<FileEntry>>
+  listScanDirectory: (request: ScanDirectoryRequest) => Promise<ScannerIpcResult<ScanDirectoryPage>>
   cancelScan: (request: CancelScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
   onScanStateChanged: (callback: (snapshot: ScanStateSnapshot) => void) => () => void
 }
@@ -20,6 +30,9 @@ export const IPC_CHANNELS = {
   selectScanDirectory: 'spacelens:select-scan-directory',
   startScan: 'spacelens:start-scan',
   getScanState: 'spacelens:get-scan-state',
+  getScanSnapshot: 'spacelens:get-scan-snapshot',
+  getScanEntry: 'spacelens:get-scan-entry',
+  listScanDirectory: 'spacelens:list-scan-directory',
   cancelScan: 'spacelens:cancel-scan',
   scanStateChanged: 'spacelens:scan-state-changed',
   acknowledgeScanState: 'spacelens:acknowledge-scan-state'
@@ -37,6 +50,7 @@ export interface CancelScanRequest {
 }
 
 export type ScannerIpcErrorCode =
+  | SnapshotAccessErrorCode
   | 'UNAUTHORIZED'
   | 'INVALID_REQUEST'
   | 'PATH_NOT_AUTHORIZED'

@@ -73,6 +73,9 @@ beforeEach(() => {
   api = {
     getAppInfo: vi.fn(),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: latest })),
+    getScanSnapshot: vi.fn(),
+    getScanEntry: vi.fn(),
+    listScanDirectory: vi.fn(),
     onScanStateChanged: vi.fn((listener) => {
       listeners.add(listener)
       return () => {

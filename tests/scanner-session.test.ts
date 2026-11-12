@@ -413,3 +413,137 @@ test('retains one isolated completed summary through later attempts and resets o
   expect(instance.getLatestCompleted()!.id).toBe(next.run.id)
   expect(manager().getLatestCompleted()).toBeNull()
 })
+
+test('publishes storage only after settlement, preserves it across attempts, and expires old references', async () => {
+  const instance = manager()
+  expect(instance.getScanSnapshot()).toEqual({ snapshot: null, unavailable: null })
+  const first = await begin(instance)
+  await root(first.run)
+  await first.run.consume({ type: 'entry', entry: entry(first.run, 'file', 300) })
+  await first.run.consume({
+    type: 'error',
+    error: { path: rootPath, code: 'EACCES', message: 'Denied' }
+  })
+  // Even final aggregation and summary do not publish before worker exit.
+  const settle = first.run.resolve
+  first.run.resolve = () => {}
+  const result = await finish(instance, first.run)
+  expect(instance.getScanSnapshot().snapshot).toBeNull()
+  expect(() => instance.getScanEntry({ scanId: first.run.id, entryId: 'directory' })).toThrow(
+    'no available snapshot'
+  )
+  settle(result)
+  await first.done
+  const available = instance.getScanSnapshot()
+  expect(available.snapshot).toMatchObject({
+    root: { aggregatedSizeBytes: 300 },
+    incomplete: true,
+    summary: { errorCount: 1 }
+  })
+  const reference = { scanId: first.run.id, entryId: 'directory' }
+  expect(instance.listScanDirectory({ ...reference, offset: 0, limit: 10 }).entries).toEqual([
+    entry(first.run, 'file', 300)
+  ])
+  for (const outcome of ['cancelled', 'failed']) {
+    const next = await begin(instance)
+    await root(next.run)
+    expect(instance.getScanSnapshot()).toEqual(available)
+    if (outcome === 'cancelled') instance.cancel()
+    next.run.reject(
+      outcome === 'cancelled' ? new ScanCancelledError() : new Error('Worker failed after entries')
+    )
+    await next.done
+    expect(instance.getScanSnapshot()).toEqual(available)
+    expect(instance.getScanEntry(reference).aggregatedSizeBytes).toBe(300)
+  }
+  const next = await begin(instance)
+  await root(next.run)
+  await finish(instance, next.run)
+  await next.done
+  expect(instance.getScanSnapshot().snapshot!.entries.scanId).toBe(next.run.id)
+  expect(() => instance.getScanEntry(reference)).toThrow('no longer available')
+  expect(() => instance.getScanEntry({ scanId: next.run.id, entryId: 'file' })).toThrow(
+    'does not exist'
+  )
+  await instance.dispose()
+  expect(instance.getScanSnapshot()).toEqual({ snapshot: null, unavailable: null })
+  expect(() => instance.getScanEntry({ scanId: next.run.id, entryId: 'directory' })).toThrow(
+    'no available snapshot'
+  )
+})
+
+test('retention limits preserve previous entries while new statistics finish successfully', async () => {
+  const instance = new ScanSessionManager({ maxEntries: 1, maxEstimatedBytes: 1_000_000 })
+  managers.push(instance)
+  const first = await begin(instance)
+  await root(first.run)
+  await finish(instance, first.run)
+  await first.done
+  const previous = instance.getScanSnapshot().snapshot
+  const next = await begin(instance)
+  await root(next.run)
+  await next.run.consume({ type: 'entry', entry: entry(next.run, 'file', 300) })
+  await finish(instance, next.run)
+  const terminal = await next.done
+  expect(terminal.session).toMatchObject({
+    status: 'completed',
+    summary: { totalBytes: 300, fileCount: 1 }
+  })
+  expect(instance.getLatestCompleted()!.id).toBe(next.run.id)
+  expect(instance.getScanSnapshot()).toEqual({
+    snapshot: previous,
+    unavailable: { scanId: next.run.id, reason: 'limit-exceeded' }
+  })
+  expect(() => instance.getScanEntry({ scanId: next.run.id, entryId: 'directory' })).toThrow(
+    'no available snapshot'
+  )
+  // A subsequent retainable completion clears the diagnostic and replaces the old snapshot.
+  const last = await begin(instance)
+  await root(last.run)
+  await finish(instance, last.run)
+  await last.done
+  expect(instance.getScanSnapshot().unavailable).toBeNull()
+  expect(instance.getScanSnapshot().snapshot!.entries.scanId).toBe(last.run.id)
+})
+
+test('invalid storage cannot replace published entries or invalidate otherwise valid scan statistics', async () => {
+  const instance = manager()
+  const first = await begin(instance)
+  await root(first.run)
+  await finish(instance, first.run)
+  await first.done
+  const previous = instance.getScanSnapshot().snapshot
+  const next = await begin(instance)
+  await root(next.run)
+  await next.run.consume({
+    type: 'entry',
+    entry: { ...entry(next.run, 'file', 10), parentId: 'missing' }
+  })
+  await finish(instance, next.run)
+  expect((await next.done).session.status).toBe('completed')
+  expect(instance.getScanSnapshot()).toEqual({
+    snapshot: previous,
+    unavailable: { scanId: next.run.id, reason: 'invalid-data' }
+  })
+})
+
+test('shutdown discards building and published entries even with a pending consumer', async () => {
+  const instance = manager()
+  const first = await begin(instance)
+  await root(first.run)
+  await finish(instance, first.run)
+  await first.done
+  let release!: () => void
+  const pending = new Promise<void>((resolve) => {
+    release = resolve
+  })
+  const next = await begin(instance, () => pending)
+  const callback = root(next.run)
+  const disposal = instance.dispose()
+  expect(instance.getScanSnapshot().snapshot).toBeNull()
+  next.run.reject(new ScanCancelledError())
+  await disposal
+  release()
+  await callback
+  expect(instance.getScanSnapshot()).toEqual({ snapshot: null, unavailable: null })
+})

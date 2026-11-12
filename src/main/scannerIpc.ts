@@ -17,6 +17,8 @@ import {
   type ScanStateSnapshot
 } from '../shared/ipc'
 import type { ScanSessionState } from '../shared/scan'
+import type { ScanDirectoryRequest, ScanEntryRequest } from '../shared/snapshot'
+import { SnapshotAccessError, validateSnapshotRequest } from './scanner/snapshot'
 import type { ScanSessionManager } from './scanner/sessionManager'
 import {
   inspectScanDirectory,
@@ -222,6 +224,39 @@ export function registerScannerIpc(
     }
   )
 
+  const snapshotChannels = [
+    IPC_CHANNELS.getScanSnapshot,
+    IPC_CHANNELS.getScanEntry,
+    IPC_CHANNELS.listScanDirectory
+  ] as const
+  for (const channel of snapshotChannels) {
+    ipcMain.handle(channel, (event, ...args: unknown[]) => {
+      if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
+      if (!authorized(event)) return failure('UNAUTHORIZED', 'Scanner access is not authorized.')
+      try {
+        if (channel === IPC_CHANNELS.getScanSnapshot) {
+          if (args.length !== 0)
+            return failure('INVALID_REQUEST', 'getScanSnapshot does not accept arguments.')
+          return { ok: true, value: manager.getScanSnapshot() }
+        }
+        if (args.length !== 1)
+          return failure('INVALID_REQUEST', 'One snapshot request is required.')
+        const request = args[0] as ScanEntryRequest | ScanDirectoryRequest
+        validateSnapshotRequest(request, channel === IPC_CHANNELS.listScanDirectory)
+        return {
+          ok: true,
+          value:
+            channel === IPC_CHANNELS.getScanEntry
+              ? manager.getScanEntry(request)
+              : manager.listScanDirectory(request as ScanDirectoryRequest)
+        }
+      } catch (error) {
+        if (error instanceof SnapshotAccessError) return failure(error.code, error.message)
+        return failure('INTERNAL_ERROR', 'The snapshot request could not be processed.')
+      }
+    })
+  }
+
   const channels = [
     IPC_CHANNELS.startScan,
     IPC_CHANNELS.getScanState,
@@ -349,6 +384,7 @@ export function registerScannerIpc(
       unsubscribe()
       detachRenderer()
       for (const channel of channels) ipcMain.removeHandler(channel)
+      for (const channel of snapshotChannels) ipcMain.removeHandler(channel)
       ipcMain.removeHandler(IPC_CHANNELS.selectScanDirectory)
       ipcMain.removeListener(IPC_CHANNELS.acknowledgeScanState, onAck)
       disposal = manager.dispose()

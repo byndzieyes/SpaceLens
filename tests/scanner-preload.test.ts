@@ -35,7 +35,10 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   expect(Object.keys(api).sort()).toEqual([
     'cancelScan',
     'getAppInfo',
+    'getScanEntry',
+    'getScanSnapshot',
     'getScanState',
+    'listScanDirectory',
     'onScanStateChanged',
     'selectScanDirectory',
     'startScan'
@@ -56,6 +59,20 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   })
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(4, IPC_CHANNELS.getAppInfo)
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(5, IPC_CHANNELS.selectScanDirectory)
+  await api.getScanSnapshot()
+  await api.getScanEntry({ scanId: 'scan', entryId: 'entry' })
+  await api.listScanDirectory({ scanId: 'scan', entryId: 'root', offset: 100, limit: 50 })
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(6, IPC_CHANNELS.getScanSnapshot)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(7, IPC_CHANNELS.getScanEntry, {
+    scanId: 'scan',
+    entryId: 'entry'
+  })
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(8, IPC_CHANNELS.listScanDirectory, {
+    scanId: 'scan',
+    entryId: 'root',
+    offset: 100,
+    limit: 50
+  })
 })
 
 test('deduplicates subscribers, strips Electron events, and supports idempotent unsubscription', () => {

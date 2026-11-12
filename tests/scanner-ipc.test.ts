@@ -9,6 +9,7 @@ import type { ScanSessionManager, ScanSessionSubscriber } from '../src/main/scan
 import { registerScannerIpc, registerScannerShutdown } from '../src/main/scannerIpc'
 import { registerAppInfoHandler } from '../src/main/ipc'
 import { verifyScanDirectory } from '../src/main/scanner/directoryApproval'
+import { SnapshotAccessError } from '../src/main/scanner/snapshot'
 
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events')
@@ -114,6 +115,9 @@ beforeEach(() => {
   manager = {
     getState: () => state,
     getLatestCompleted: () => null,
+    getScanSnapshot: vi.fn(() => ({ snapshot: null, unavailable: null })),
+    getScanEntry: vi.fn(),
+    listScanDirectory: vi.fn(),
     start,
     cancel,
     dispose,
@@ -133,6 +137,102 @@ afterEach(async () => {
   ipcMain.removeAllListeners()
   app.removeAllListeners()
   vi.restoreAllMocks()
+})
+
+test('retrieval uses fixed, authorized channels and forwards bounded ID-only queries', () => {
+  expect(invoke(IPC_CHANNELS.getScanSnapshot)).toEqual({
+    ok: true,
+    value: { snapshot: null, unavailable: null }
+  })
+  const request = { scanId: id, entryId: otherId }
+  const value = { id: otherId, scanId: id }
+  vi.mocked(manager.getScanEntry).mockReturnValue(
+    value as ReturnType<ScanSessionManager['getScanEntry']>
+  )
+  expect(invoke(IPC_CHANNELS.getScanEntry, [request])).toEqual({ ok: true, value })
+  expect(manager.getScanEntry).toHaveBeenCalledExactlyOnceWith(request)
+  const page = { ...request, offset: 100, limit: 100 }
+  invoke(IPC_CHANNELS.listScanDirectory, [page])
+  expect(manager.listScanDirectory).toHaveBeenCalledExactlyOnceWith(page)
+})
+
+test.each([
+  IPC_CHANNELS.getScanSnapshot,
+  IPC_CHANNELS.getScanEntry,
+  IPC_CHANNELS.listScanDirectory
+])(
+  'rejects foreign senders, subframes, navigated documents, and shutdown on %s',
+  async (channel) => {
+    expect(invoke(channel, [], event(makeRenderer()))).toMatchObject({
+      ok: false,
+      error: { code: 'UNAUTHORIZED' }
+    })
+    expect(
+      invoke(channel, [], { ...event(), senderFrame: { url } } as IpcMainInvokeEvent)
+    ).toMatchObject({ ok: false, error: { code: 'UNAUTHORIZED' } })
+    renderer.mainFrame.url = 'https://foreign.example'
+    expect(invoke(channel)).toMatchObject({ ok: false, error: { code: 'UNAUTHORIZED' } })
+    renderer.mainFrame.url = url
+    await boundary.dispose()
+    expect(invoke(channel)).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+    expect(manager.getScanSnapshot).not.toHaveBeenCalled()
+    expect(manager.getScanEntry).not.toHaveBeenCalled()
+    expect(manager.listScanDirectory).not.toHaveBeenCalled()
+  }
+)
+
+test('rejects path access, extra arguments, invalid IDs and unbounded pagination before dispatch', () => {
+  for (const args of [
+    [],
+    [null],
+    [{ scanId: id, entryId: '' }],
+    [{ scanId: id, entryId: '../secret' }],
+    [{ scanId: id, entryId: otherId, path: rootPath }],
+    [{ scanId: id, entryId: otherId }, 'extra']
+  ]) {
+    expect(invoke(IPC_CHANNELS.getScanEntry, args)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+  }
+  for (const args of [
+    [],
+    [{ scanId: id, entryId: otherId, offset: -1, limit: 100 }],
+    [{ scanId: id, entryId: otherId, offset: 0, limit: 101 }]
+  ]) {
+    expect(invoke(IPC_CHANNELS.listScanDirectory, args)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+  }
+  expect(invoke(IPC_CHANNELS.getScanSnapshot, [{}])).toMatchObject({
+    ok: false,
+    error: { code: 'INVALID_REQUEST' }
+  })
+  expect(manager.getScanEntry).not.toHaveBeenCalled()
+  expect(manager.listScanDirectory).not.toHaveBeenCalled()
+})
+
+test.each([
+  'SNAPSHOT_UNAVAILABLE',
+  'SNAPSHOT_EXPIRED',
+  'ENTRY_NOT_FOUND',
+  'NOT_DIRECTORY'
+] as const)('returns the precise storage outcome %s without exposing internal errors', (code) => {
+  vi.mocked(manager.getScanEntry).mockImplementation(() => {
+    throw new SnapshotAccessError(code, 'Public message')
+  })
+  expect(invoke(IPC_CHANNELS.getScanEntry, [{ scanId: id, entryId: otherId }])).toEqual({
+    ok: false,
+    error: { code, message: 'Public message' }
+  })
+  vi.mocked(manager.getScanEntry).mockImplementation(() => {
+    throw new Error('private internals')
+  })
+  expect(invoke(IPC_CHANNELS.getScanEntry, [{ scanId: id, entryId: otherId }])).toEqual({
+    ok: false,
+    error: { code: 'INTERNAL_ERROR', message: 'The snapshot request could not be processed.' }
+  })
 })
 
 test('accepts an approved root promptly, exposes current state, and rejects concurrent starts', async () => {
@@ -384,7 +484,7 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(replacement.listenerCount('did-finish-load')).toBe(0)
   expect(replacement.listenerCount('destroyed')).toBe(0)
   expect(ipcMain.listenerCount(IPC_CHANNELS.acknowledgeScanState)).toBe(0)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(4)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(7)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

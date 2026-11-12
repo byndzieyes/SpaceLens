@@ -1,8 +1,12 @@
 ﻿# SpaceLens
 
-Desktop filesystem storage analysis application. The current shell opens to a responsive Overview dashboard with demo storage device cards and a Recent Scans empty state. Device capacities use decimal GB (1 GB = 1,000,000,000 bytes); these are example drives, not detected devices. The Scan Folder action is disabled; scanning and analysis are not implemented yet.
+Desktop filesystem storage analysis application. Overview displays demo storage device cards and the latest completed scan summary. Device capacities use decimal GB (1 GB = 1,000,000,000 bytes); these are example drives, not detected devices. Scan Folder opens a native directory picker and scans the selected directory in a worker, with progress and cancellation.
 
-Recent Scans displays "No scans yet" until scan persistence is implemented. Its reusable component supports the five latest completed scan summaries, with local completion times, decimal GB sizes and file counts; the populated state is covered by test fixtures only.
+Recent Scans displays "No scans yet" until a scan completes. Results are temporary and reset on application restart. Known logical bytes may be incomplete after filesystem errors; cancelled or failed attempts preserve the previous completed result.
+
+Main retains at most one completed entry snapshot and one under construction. Each is limited to 100,000 entries and an estimated 64 MiB (512 bytes per entry/index plus UTF-16 string lengths), with a 64 KiB per-entry cap. This is a retention estimate, not a hard JavaScript heap limit. Exceeding a limit discards that scan's entries while statistics still complete and the previous snapshot remains available. Storage validation failures are also reported explicitly. SQLite persistence and larger datasets remain future work.
+
+The typed `getScanSnapshot()`, `getScanEntry({ scanId, entryId })`, and `listScanDirectory({ scanId, entryId, offset, limit })` preload methods expose only completed data. Directory pages contain at most 100 direct children, sorted by name then ID in UTF-16 order. References expire on replacement; missing entries, unavailable snapshots and non-directory queries have distinct errors. Snapshot metadata includes recoverable-error counts and an incomplete indicator. Explorer integration is not implemented yet.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 
@@ -52,8 +56,8 @@ Tests live in `tests/` as `.test.ts` and `.test.tsx` files. `vitest.config.mts` 
 
 ## Structure
 
-- `src/main` — Electron lifecycle and window creation.
-- `src/preload` — isolated context bridge exposing only `window.spaceLens.getAppInfo()`.
+- `src/main` — Electron lifecycle, scanner worker, scan session management and temporary snapshot indexes.
+- `src/preload` — isolated, typed context bridge for application information, authorized scanning and bounded snapshot retrieval.
 - `src/renderer` — React application shell, UI primitives, Overview dashboard layout and other section placeholder pages.
 - `src/shared` — shared IPC contracts and channel names.
 

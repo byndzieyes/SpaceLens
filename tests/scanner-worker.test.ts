@@ -117,6 +117,120 @@ function expectReleased(worker: Worker): void {
   }
 }
 
+test.each(['development', 'production'])(
+  'generated %s manager retains finalized nested entries from a real worker',
+  async (mode) => {
+    const nested = join(rootPath, 'nested Україна')
+    await mkdir(nested)
+    await writeFile(join(rootPath, 'root file.txt'), '12345')
+    await writeFile(join(nested, 'data.bin'), '1234567')
+    const instance = new (artifacts.get(mode)!.Manager)()
+    try {
+      const state = await instance.start(rootPath)
+      expect(state.session.status).toBe('completed')
+      const snapshot = instance.getScanSnapshot().snapshot!
+      expect(snapshot).toMatchObject({
+        entryCount: 4,
+        incomplete: false,
+        root: { path: rootPath, aggregatedSizeBytes: 12 },
+        summary: { fileCount: 2, directoryCount: 2, totalBytes: 12, errorCount: 0 }
+      })
+      const request = {
+        scanId: snapshot.entries.scanId,
+        entryId: snapshot.root.id,
+        offset: 0,
+        limit: 100
+      }
+      const children = instance.listScanDirectory(request)
+      expect(children.entries.map((item) => item.name)).toEqual(['nested Україна', 'root file.txt'])
+      const directory = children.entries[0]
+      expect(
+        instance.getScanEntry({ scanId: request.scanId, entryId: directory.id }).aggregatedSizeBytes
+      ).toBe(7)
+      const files = instance.listScanDirectory({ ...request, entryId: directory.id }).entries
+      expect(files).toHaveLength(1)
+      expect(files[0]).toMatchObject({
+        parentId: directory.id,
+        path: join(nested, 'data.bin'),
+        sizeBytes: 7,
+        aggregatedSizeBytes: null
+      })
+      // Fatal failure after a previous real completion leaves the published snapshot intact.
+      expect((await instance.start(join(rootPath, 'missing'))).session.status).toBe('failed')
+      expect(instance.getScanSnapshot().snapshot).toEqual(snapshot)
+      let cancelled = false
+      const stateAfterCancel = await instance.start(rootPath, () => {
+        if (!cancelled) {
+          cancelled = true
+          instance.cancel()
+        }
+      })
+      expect(stateAfterCancel.session.status).toBe('cancelled')
+      expect(instance.getScanSnapshot().snapshot).toEqual(snapshot)
+      await instance.start(nested)
+      expect(instance.getScanSnapshot().snapshot!.root.aggregatedSizeBytes).toBe(7)
+      expect(() => instance.listScanDirectory(request)).toThrow('no longer available')
+    } finally {
+      await instance.dispose()
+    }
+    expect(instance.getScanSnapshot().snapshot).toBeNull()
+  }
+)
+
+test('production snapshot paginates a larger real fixture and keeps statistics after retention exhaustion', async () => {
+  const count = 3000
+  // Bounded fixture creation; scanner and storage still consume worker batches incrementally.
+  for (let offset = 0; offset < count; offset += 50) {
+    await Promise.all(
+      Array.from({ length: 50 }, (_, index) =>
+        writeFile(join(rootPath, `file-${String(offset + index).padStart(5, '0')}.txt`), 'data')
+      )
+    )
+  }
+  const Manager = artifacts.get('production')!.Manager
+  const instance = new Manager()
+  const limited = new Manager({ maxEntries: 100, maxEstimatedBytes: 1024 * 1024 })
+  const heapBefore = process.memoryUsage().heapUsed
+  try {
+    await instance.start(rootPath)
+    const heapAfter = process.memoryUsage().heapUsed
+    const snapshot = instance.getScanSnapshot().snapshot!
+    expect(snapshot.entryCount).toBe(count + 1)
+    expect(snapshot.root.aggregatedSizeBytes).toBe(count * 4)
+    let offset: number | null = 0
+    let observed = 0
+    while (offset !== null) {
+      const page = instance.listScanDirectory({
+        scanId: snapshot.entries.scanId,
+        entryId: snapshot.root.id,
+        offset,
+        limit: 100
+      })
+      expect(page.entries).toHaveLength(100)
+      expect(page.entries[0].name).toBe(`file-${String(observed).padStart(5, '0')}.txt`)
+      expect(page.totalCount).toBe(count)
+      observed += page.entries.length
+      offset = page.nextOffset
+    }
+    expect(observed).toBe(count)
+    console.info(
+      `Snapshot fixture: ${count + 1} entries; approximate Main heap delta ${((heapAfter - heapBefore) / 1024 / 1024).toFixed(1)} MiB (includes worker event processing and GC variability).`
+    )
+    const result = await limited.start(rootPath)
+    expect(result.session).toMatchObject({
+      status: 'completed',
+      summary: { fileCount: count, totalBytes: count * 4 }
+    })
+    expect(limited.getScanSnapshot()).toEqual({
+      snapshot: null,
+      unavailable: { scanId: result.session.id, reason: 'limit-exceeded' }
+    })
+  } finally {
+    await instance.dispose()
+    await limited.dispose()
+  }
+}, 30_000)
+
 function normalize(events: ScanOutputEvent[]): unknown[] {
   const paths = new Map<string, string>()
   for (const event of events)
