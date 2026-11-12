@@ -89,6 +89,7 @@ beforeEach(async () => {
   boundary = registerScannerIpc(
     {
       getState: () => state,
+      getLatestCompleted: () => null,
       start,
       cancel: vi.fn(),
       subscribe: () => () => {},

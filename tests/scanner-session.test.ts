@@ -374,3 +374,42 @@ test('validates roots and permits disposing an unused manager', async () => {
   await instance.dispose()
   expect(runScannerWorker).not.toHaveBeenCalled()
 })
+
+test('retains one isolated completed summary through later attempts and resets on recreation', async () => {
+  const instance = manager()
+  expect(instance.getLatestCompleted()).toBeNull()
+  const first = await begin(instance)
+  await root(first.run)
+  await first.run.consume({ type: 'entry', entry: entry(first.run, 'file', 300) })
+  await first.run.consume({
+    type: 'error',
+    error: { path: rootPath, code: 'EACCES', message: 'Denied' }
+  })
+  expect(instance.getLatestCompleted()).toBeNull()
+  await finish(instance, first.run)
+  const completed = await first.done
+  const summary = instance.getLatestCompleted()!
+  expect(summary).toEqual({
+    id: first.run.id,
+    path: rootPath,
+    completedAt: completed.session.finishedAt,
+    totalBytes: 300,
+    fileCount: 1,
+    errorCount: 1
+  })
+  Object.assign(instance.getLatestCompleted()!, { totalBytes: 999 })
+  for (const status of ['cancelled', 'failed']) {
+    const next = await begin(instance)
+    expect(instance.getLatestCompleted()).toEqual(summary)
+    if (status === 'cancelled') instance.cancel()
+    next.run.reject(status === 'cancelled' ? new ScanCancelledError() : new Error('Failed'))
+    await next.done
+    expect(instance.getLatestCompleted()).toEqual(summary)
+  }
+  const next = await begin(instance)
+  await root(next.run)
+  await finish(instance, next.run)
+  await next.done
+  expect(instance.getLatestCompleted()!.id).toBe(next.run.id)
+  expect(manager().getLatestCompleted()).toBeNull()
+})

@@ -1,4 +1,4 @@
-import type { ScanSessionState } from './scan'
+import type { RecentScanSummary, ScanSessionState } from './scan'
 
 export interface AppInfo {
   name: string
@@ -58,6 +58,8 @@ export type ScannerIpcResult<T> =
 
 /** Compare revisions when combining query responses with subscription updates. */
 export interface ScanStateSnapshot {
+  /** Latest settled completion in this application session; absent on older producers. */
+  readonly latestCompleted?: RecentScanSummary | null
   readonly revision: number
   readonly state: ScanSessionState | null
 }

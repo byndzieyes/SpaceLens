@@ -90,7 +90,11 @@ export function registerScannerIpc(
   let disposed = false
   let disposal: Promise<void> | undefined
   let revision = 0
-  let latest: ScanStateSnapshot = { revision, state: publicState(manager.getState()) }
+  let latest: ScanStateSnapshot = {
+    revision,
+    state: publicState(manager.getState()),
+    latestCompleted: manager.getLatestCompleted()
+  }
   let inFlight: number | null = null
   let approval: DirectoryApproval | null = null
   let contextVersion = 0
@@ -119,7 +123,11 @@ export function registerScannerIpc(
 
   const capture = (state: ScanSessionState | null): ScanStateSnapshot => {
     if (revision === Number.MAX_SAFE_INTEGER) throw new Error('Scan state revision exhausted.')
-    latest = { revision: ++revision, state: publicState(state) }
+    latest = {
+      revision: ++revision,
+      state: publicState(state),
+      latestCompleted: manager.getLatestCompleted()
+    }
     return latest
   }
   const sendLatest = (): void => {

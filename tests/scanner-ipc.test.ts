@@ -113,6 +113,7 @@ beforeEach(() => {
   })
   manager = {
     getState: () => state,
+    getLatestCompleted: () => null,
     start,
     cancel,
     dispose,

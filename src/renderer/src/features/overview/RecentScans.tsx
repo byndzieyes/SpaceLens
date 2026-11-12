@@ -25,6 +25,10 @@ export function RecentScans({ scans }: RecentScansProps): React.JSX.Element {
           <p className="text-xs text-text-secondary">Showing latest {recentScans.length}</p>
         )}
       </div>
+      <p className="text-xs text-text-secondary">
+        Latest completed scan from this application session only. Results are cleared when the
+        application closes. Sizes are known logical file bytes, not allocated disk space.
+      </p>
       <Card aria-labelledby={titleId} className="min-w-0">
         {recentScans.length === 0 ? (
           <div className="flex min-h-40 flex-col items-center justify-center gap-3 text-center">
@@ -51,6 +55,12 @@ export function RecentScans({ scans }: RecentScansProps): React.JSX.Element {
                       Completed{' '}
                       <time dateTime={scan.completedAt}>{formatScanDate(scan.completedAt)}</time>
                     </p>
+                    {(scan.errorCount ?? 0) > 0 && (
+                      <p className="text-xs text-warning">
+                        Completed with {fileCountFormat.format(scan.errorCount!)} filesystem errors.
+                        Incomplete result; known totals may be lower than the full directory size.
+                      </p>
+                    )}
                   </div>
                 </div>
                 <dl className="flex flex-wrap gap-x-6 gap-y-2 pl-7.5 sm:justify-end sm:pl-0">
@@ -58,6 +68,9 @@ export function RecentScans({ scans }: RecentScansProps): React.JSX.Element {
                     <dt className="text-xs text-text-secondary">Analyzed</dt>
                     <dd className="text-sm font-medium tabular-nums">
                       {formatStorageSize(scan.totalBytes)}
+                      <span className="block text-xs text-text-secondary">
+                        {fileCountFormat.format(scan.totalBytes)} bytes
+                      </span>
                     </dd>
                   </div>
                   <div className="space-y-1 sm:text-right">

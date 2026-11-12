@@ -415,3 +415,36 @@ test('coalesces progress bursts and flushes terminal state without delayed stale
     vi.useRealTimers()
   }
 })
+
+test('Recent Scans uses Main summaries, survives navigation and ignores stale replacement', async () => {
+  const completed = {
+    id: 'completed-a',
+    path: '/completed directory',
+    completedAt: '2026-11-11T10:01:00Z',
+    totalBytes: 300,
+    fileCount: 2,
+    errorCount: 1
+  }
+  render(<App />)
+  await screen.findByText('Ready to scan')
+  emit({ ...snapshot(1, 'completed'), latestCompleted: completed })
+  const recent = (): ReturnType<typeof within> =>
+    within(screen.getByRole('region', { name: 'Recent Scans' }))
+  expect(recent().getByText(completed.path)).toBeVisible()
+  expect(recent().getByText('300 bytes')).toBeVisible()
+  expect(recent().getByText(/Incomplete result/)).toBeVisible()
+  for (const status of ['running', 'cancelled', 'failed'] as const) {
+    emit({ ...snapshot(latest.revision + 1, status, 'next'), latestCompleted: completed })
+    expect(recent().getByText(completed.path)).toBeVisible()
+  }
+  fireEvent.click(screen.getByRole('button', { name: 'Explorer' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
+  await screen.findByText(completed.path)
+  emit({
+    ...snapshot(10, 'completed', 'new'),
+    latestCompleted: { ...completed, id: 'new', path: '/new', errorCount: 0 }
+  })
+  emit({ ...snapshot(2, 'completed'), latestCompleted: completed })
+  expect(recent().getByText('/new')).toBeVisible()
+  expect(recent().queryByText(completed.path)).not.toBeInTheDocument()
+})

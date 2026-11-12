@@ -109,8 +109,10 @@ export interface ScanResult {
   readonly entries: ScanEntriesReference
 }
 
-/** Summary of a completed scan; cancelled and incomplete scans are not included. */
+/** Summary of a completed scan; recoverable errors may leave known totals incomplete. */
 export interface RecentScanSummary {
+  /** Absent for older summaries whose error count was not recorded. */
+  readonly errorCount?: number
   readonly id: string
   readonly path: string
   /** ISO 8601 completion timestamp with a timezone offset or Z. */

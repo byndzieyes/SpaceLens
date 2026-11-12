@@ -45,7 +45,7 @@ export function OverviewPage(): React.JSX.Element {
         </div>
       </section>
 
-      <RecentScans scans={[]} />
+      <RecentScans scans={scanner.latestCompleted ? [scanner.latestCompleted] : []} />
     </div>
   )
 }

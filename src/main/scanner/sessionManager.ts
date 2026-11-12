@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
-import type { ScanProgress, ScanSessionState } from '../../shared/scan'
+import type { RecentScanSummary, ScanProgress, ScanSessionState } from '../../shared/scan'
 export type { ScanSessionState } from '../../shared/scan'
 import { ScanCancelledError } from './cancellation'
 import { ScanProgressTracker } from './progress'
@@ -33,11 +33,16 @@ function copy(state: ScanSessionState): ScanSessionState {
  * concurrent, or disposed starts reject. Await it before starting another scan.
  */
 export class ScanSessionManager {
+  private latestCompleted: RecentScanSummary | null = null
   private state: ScanSessionState | null = null
   private active: ActiveScan | null = null
   private readonly subscribers = new Set<ScanSessionSubscriber>()
   private disposed = false
   private disposal: Promise<void> | undefined
+
+  getLatestCompleted(): RecentScanSummary | null {
+    return this.latestCompleted === null ? null : { ...this.latestCompleted }
+  }
 
   getState(): ScanSessionState | null {
     return this.state === null ? null : copy(this.state)
@@ -181,6 +186,17 @@ export class ScanSessionManager {
       ...this.state!,
       failure,
       session: { ...this.state!.session, status, finishedAt: new Date().toISOString() }
+    }
+    if (this.state.session.status === 'completed') {
+      const session = this.state.session
+      this.latestCompleted = {
+        id: session.id,
+        path: session.rootPath,
+        completedAt: session.finishedAt,
+        totalBytes: session.summary.totalBytes,
+        fileCount: session.summary.fileCount,
+        errorCount: session.summary.errorCount
+      }
     }
     const terminal = copy(this.state)
     this.notify()

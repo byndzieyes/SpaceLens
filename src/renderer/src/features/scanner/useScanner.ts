@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ScannerIpcErrorCode, ScanStateSnapshot } from '../../../../shared/ipc'
-import type { ScanSessionState } from '../../../../shared/scan'
+import type { RecentScanSummary, ScanSessionState } from '../../../../shared/scan'
 
 interface ScanView {
+  latestCompleted: RecentScanSummary | null
   scan: ScanSessionState | null
   ready: boolean
   pending: 'selecting' | 'starting' | null
@@ -12,6 +13,7 @@ interface ScanView {
 }
 
 const initialView: ScanView = {
+  latestCompleted: null,
   scan: null,
   ready: false,
   pending: null,
@@ -87,6 +89,7 @@ export function useScanner(): ScanView & {
       update(
         {
           scan,
+          latestCompleted: snapshot.latestCompleted ?? null,
           ready: true,
           cancelling:
             scan?.session.status === 'running' && scan.session.id === current.cancelling
