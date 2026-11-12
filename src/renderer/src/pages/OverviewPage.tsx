@@ -4,8 +4,11 @@ import { Button } from '../components/ui/Button'
 import { DiskCard } from '../features/overview/DiskCard'
 import { demoDevices } from '../features/overview/demoDevices'
 import { RecentScans } from '../features/overview/RecentScans'
+import { ScanPanel } from '../features/scanner/ScanPanel'
+import { useScanner } from '../features/scanner/useScanner'
 
 export function OverviewPage(): React.JSX.Element {
+  const scanner = useScanner()
   return (
     <div className="space-y-8 sm:space-y-10">
       <header className="flex flex-wrap items-center justify-between gap-5">
@@ -14,15 +17,19 @@ export function OverviewPage(): React.JSX.Element {
           <p className="text-sm text-text-secondary">Monitor and explore your storage</p>
         </div>
         <div className="flex flex-wrap items-center gap-3">
-          <span id="scan-folder-status" className="text-xs text-text-secondary">
-            Coming soon
-          </span>
-          <Button disabled aria-describedby="scan-folder-status">
+          <Button
+            onClick={scanner.select}
+            disabled={
+              !scanner.ready || !!scanner.pending || scanner.scan?.session.status === 'running'
+            }
+          >
             <FolderSearch size={16} aria-hidden="true" />
             Scan Folder
           </Button>
         </div>
       </header>
+
+      <ScanPanel scanner={scanner} />
 
       <section aria-labelledby="storage-devices-title" className="space-y-4">
         <div className="flex flex-wrap items-center gap-3">

@@ -1,8 +1,10 @@
-import { expect, test } from 'vitest'
+import { afterEach, expect, test, vi } from 'vitest'
 import { render, screen, within } from '@testing-library/react'
 import type { RecentScanSummary } from '../src/shared/scan'
 import { RecentScans } from '../src/renderer/src/features/overview/RecentScans'
 import { OverviewPage } from '../src/renderer/src/pages/OverviewPage'
+
+afterEach(() => vi.unstubAllGlobals())
 
 function createScanSummary(
   id: string,
@@ -103,15 +105,17 @@ test('preserves unusual paths as text and displays zero sizes and file counts', 
   expect(screen.getByText('0', { exact: true })).toBeVisible()
 })
 
-test('Overview defaults to the empty state and keeps Scan Folder disabled', () => {
+test('Overview preserves demo devices and empty Recent Scans while enabling folder selection', async () => {
+  vi.stubGlobal('spaceLens', {
+    getScanState: async () => ({ ok: true, value: { revision: 0, state: null } }),
+    onScanStateChanged: () => () => {}
+  })
   render(<OverviewPage />)
 
   expect(screen.getByRole('heading', { name: 'No scans yet' })).toBeVisible()
   expect(screen.queryByRole('list')).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Demo scans' })).not.toBeInTheDocument()
   expect(screen.getAllByText('Demo data')).toHaveLength(1)
-  expect(screen.getByRole('button', { name: 'Scan Folder' })).toBeDisabled()
-  expect(screen.getByRole('button', { name: 'Scan Folder' })).toHaveAccessibleDescription(
-    'Coming soon'
-  )
+  await screen.findByText('Ready to scan')
+  expect(screen.getByRole('button', { name: 'Scan Folder' })).toBeEnabled()
 })
