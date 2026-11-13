@@ -72,6 +72,8 @@ export type ScannerIpcResult<T> =
 
 /** Compare revisions when combining query responses with subscription updates. */
 export interface ScanStateSnapshot {
+  /** Retention failure is separate from filesystem errors and does not invalidate statistics. */
+  readonly snapshotUnavailable?: ScanSnapshotAvailability['unavailable']
   /** Latest settled completion in this application session; absent on older producers. */
   readonly latestCompleted?: RecentScanSummary | null
   readonly revision: number

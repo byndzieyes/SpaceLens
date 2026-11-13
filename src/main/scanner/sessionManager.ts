@@ -73,8 +73,13 @@ export class ScanSessionManager {
   getScanSnapshot(): ScanSnapshotAvailability {
     return {
       snapshot: this.published?.describe() ?? null,
-      unavailable: this.unavailable === null ? null : { ...this.unavailable }
+      unavailable: this.getSnapshotUnavailable()
     }
+  }
+
+  /** Small notification metadata; never copies entries or root paths on progress updates. */
+  getSnapshotUnavailable(): ScanSnapshotAvailability['unavailable'] {
+    return this.unavailable === null ? null : { ...this.unavailable }
   }
 
   getScanEntry(request: ScanEntryRequest): FileEntry {

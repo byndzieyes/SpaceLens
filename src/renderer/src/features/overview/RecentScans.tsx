@@ -7,11 +7,12 @@ import { formatScanDate, getRecentScans } from './recentScanUtils'
 
 interface RecentScansProps {
   scans: readonly RecentScanSummary[]
+  unavailableScanId?: string
 }
 
 const fileCountFormat = new Intl.NumberFormat('en-US')
 
-export function RecentScans({ scans }: RecentScansProps): React.JSX.Element {
+export function RecentScans({ scans, unavailableScanId }: RecentScansProps): React.JSX.Element {
   const titleId = useId()
   const recentScans = getRecentScans(scans)
 
@@ -50,7 +51,9 @@ export function RecentScans({ scans }: RecentScansProps): React.JSX.Element {
                 <div className="flex min-w-0 items-start gap-3">
                   <Folder size={18} className="mt-0.5 shrink-0 text-accent" aria-hidden="true" />
                   <div className="min-w-0 space-y-1">
-                    <p className="text-sm font-medium break-all">{scan.path}</p>
+                    <p className="truncate text-sm font-medium" title={scan.path}>
+                      {scan.path}
+                    </p>
                     <p className="text-xs text-text-secondary">
                       Completed{' '}
                       <time dateTime={scan.completedAt}>{formatScanDate(scan.completedAt)}</time>
@@ -59,6 +62,11 @@ export function RecentScans({ scans }: RecentScansProps): React.JSX.Element {
                       <p className="text-xs text-warning">
                         Completed with {fileCountFormat.format(scan.errorCount!)} filesystem errors.
                         Incomplete result; known totals may be lower than the full directory size.
+                      </p>
+                    )}
+                    {scan.id === unavailableScanId && (
+                      <p className="text-xs text-warning">
+                        Summary only; filesystem entries were not retained.
                       </p>
                     )}
                   </div>

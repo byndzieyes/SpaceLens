@@ -22,6 +22,10 @@ export function ScanPanel({
   const running = scan?.session.status === 'running'
   const status = scan?.session.status
   const incomplete = (scan?.session.summary.errorCount ?? 0) > 0
+  const unavailable =
+    status === 'completed' && scanner.snapshotUnavailable?.scanId === scan?.session.id
+      ? scanner.snapshotUnavailable
+      : null
   const label = cancelling
     ? 'Cancellation requested'
     : running
@@ -137,6 +141,15 @@ export function ScanPanel({
           {status === 'cancelled' && (
             <p className="text-sm text-text-secondary">
               The scan stopped before completion. These are partial totals.
+            </p>
+          )}
+          {unavailable && (
+            <p role="status" className="text-sm text-warning">
+              Summary only.{' '}
+              {unavailable.reason === 'limit-exceeded'
+                ? 'The temporary snapshot storage limit was reached.'
+                : 'Filesystem entries could not be retained.'}{' '}
+              Scan statistics are available, but this scan has no browsable snapshot.
             </p>
           )}
           {status === 'failed' && (

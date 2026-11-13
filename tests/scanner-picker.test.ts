@@ -90,6 +90,7 @@ beforeEach(async () => {
     {
       getState: () => state,
       getLatestCompleted: () => null,
+      getSnapshotUnavailable: () => null,
       start,
       cancel: vi.fn(),
       subscribe: () => () => {},

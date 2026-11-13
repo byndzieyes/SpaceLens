@@ -95,6 +95,7 @@ export function registerScannerIpc(
   let latest: ScanStateSnapshot = {
     revision,
     state: publicState(manager.getState()),
+    snapshotUnavailable: manager.getSnapshotUnavailable(),
     latestCompleted: manager.getLatestCompleted()
   }
   let inFlight: number | null = null
@@ -128,6 +129,7 @@ export function registerScannerIpc(
     latest = {
       revision: ++revision,
       state: publicState(state),
+      snapshotUnavailable: manager.getSnapshotUnavailable(),
       latestCompleted: manager.getLatestCompleted()
     }
     return latest

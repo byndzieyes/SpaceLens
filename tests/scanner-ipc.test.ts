@@ -115,6 +115,7 @@ beforeEach(() => {
   manager = {
     getState: () => state,
     getLatestCompleted: () => null,
+    getSnapshotUnavailable: vi.fn(() => null),
     getScanSnapshot: vi.fn(() => ({ snapshot: null, unavailable: null })),
     getScanEntry: vi.fn(),
     listScanDirectory: vi.fn(),
@@ -154,6 +155,26 @@ test('retrieval uses fixed, authorized channels and forwards bounded ID-only que
   const page = { ...request, offset: 100, limit: 100 }
   invoke(IPC_CHANNELS.listScanDirectory, [page])
   expect(manager.listScanDirectory).toHaveBeenCalledExactlyOnceWith(page)
+})
+
+test('state queries and terminal notifications include retention failure metadata without entries', () => {
+  const unavailable = { scanId: id, reason: 'limit-exceeded' as const }
+  vi.mocked(manager.getSnapshotUnavailable).mockReturnValue(unavailable)
+  state = {
+    ...running(),
+    session: { ...running().session, status: 'completed', finishedAt: '2026-11-12T12:00:00Z' }
+  }
+  subscriber(state)
+  expect(renderer.send).toHaveBeenLastCalledWith(
+    IPC_CHANNELS.scanStateChanged,
+    expect.objectContaining({ snapshotUnavailable: unavailable })
+  )
+  expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
+    ok: true,
+    value: { snapshotUnavailable: unavailable }
+  })
+  expect(manager.getScanSnapshot).not.toHaveBeenCalled()
+  expect(manager.listScanDirectory).not.toHaveBeenCalled()
 })
 
 test.each([

@@ -3,6 +3,7 @@ import type { ScannerIpcErrorCode, ScanStateSnapshot } from '../../../../shared/
 import type { RecentScanSummary, ScanSessionState } from '../../../../shared/scan'
 
 interface ScanView {
+  snapshotUnavailable: NonNullable<ScanStateSnapshot['snapshotUnavailable']> | null
   latestCompleted: RecentScanSummary | null
   scan: ScanSessionState | null
   ready: boolean
@@ -13,6 +14,7 @@ interface ScanView {
 }
 
 const initialView: ScanView = {
+  snapshotUnavailable: null,
   latestCompleted: null,
   scan: null,
   ready: false,
@@ -90,6 +92,7 @@ export function useScanner(): ScanView & {
         {
           scan,
           latestCompleted: snapshot.latestCompleted ?? null,
+          snapshotUnavailable: snapshot.snapshotUnavailable ?? null,
           ready: true,
           cancelling:
             scan?.session.status === 'running' && scan.session.id === current.cancelling

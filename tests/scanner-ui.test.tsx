@@ -451,3 +451,52 @@ test('Recent Scans uses Main summaries, survives navigation and ignores stale re
   expect(recent().getByText('/new')).toBeVisible()
   expect(recent().queryByText(completed.path)).not.toBeInTheDocument()
 })
+
+test.each(['limit-exceeded', 'invalid-data'] as const)(
+  'explains summary-only completion after %s and preserves the notice across later attempts',
+  async (reason) => {
+    const completed = {
+      id: 'scan-a',
+      path: '/large',
+      completedAt: '2026-11-12T12:00:00Z',
+      totalBytes: 300_000_000,
+      fileCount: 1234,
+      errorCount: 0
+    }
+    render(<App />)
+    await screen.findByText('Ready to scan')
+    emit({
+      ...snapshot(1, 'completed'),
+      latestCompleted: completed,
+      snapshotUnavailable: { scanId: 'scan-a', reason }
+    })
+    expect(within(panel()).getByText(/this scan has no browsable snapshot/)).toBeVisible()
+    expect(within(panel()).getByText('300 MB')).toBeVisible()
+    const recent = (): ReturnType<typeof within> =>
+      within(screen.getByRole('region', { name: 'Recent Scans' }))
+    expect(recent().getByText(/filesystem entries were not retained/)).toBeVisible()
+    expect(screen.queryByText(/Results are incomplete/)).not.toBeInTheDocument()
+    for (const status of ['running', 'cancelled', 'failed'] as const) {
+      emit({
+        ...snapshot(latest.revision + 1, status, 'next'),
+        latestCompleted: completed,
+        snapshotUnavailable: { scanId: 'scan-a', reason }
+      })
+      expect(
+        within(panel()).queryByText(/this scan has no browsable snapshot/)
+      ).not.toBeInTheDocument()
+      expect(recent().getByText(/filesystem entries were not retained/)).toBeVisible()
+    }
+    fireEvent.click(screen.getByRole('button', { name: 'Explorer' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
+    await screen.findByText(/filesystem entries were not retained/)
+    emit({
+      ...snapshot(10, 'completed', 'new'),
+      latestCompleted: { ...completed, id: 'new' },
+      snapshotUnavailable: null
+    })
+    expect(screen.queryByText(/filesystem entries were not retained/)).not.toBeInTheDocument()
+    expect(api.getScanSnapshot).not.toHaveBeenCalled()
+    expect(api.listScanDirectory).not.toHaveBeenCalled()
+  }
+)

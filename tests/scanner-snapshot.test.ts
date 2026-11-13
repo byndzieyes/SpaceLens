@@ -1,7 +1,11 @@
 // @vitest-environment node
 import { expect, test } from 'vitest'
 import { resolve } from 'node:path'
-import { ScanSnapshotStorage, validateSnapshotRequest } from '../src/main/scanner/snapshot'
+import {
+  DEFAULT_SNAPSHOT_LIMITS,
+  ScanSnapshotStorage,
+  validateSnapshotRequest
+} from '../src/main/scanner/snapshot'
 import type { FileEntry } from '../src/shared/scan'
 import type { ScanDirectoryRequest } from '../src/shared/snapshot'
 import type { ScanSummaryEvent } from '../src/main/scanner/summary'
@@ -306,4 +310,60 @@ test('accepts bounded requests and rejects pagination on single-entry requests',
   expect(() => validateSnapshotRequest(request(), true)).not.toThrow()
   expect(() => validateSnapshotRequest({ scanId: 'scan', entryId: 'root' }, false)).not.toThrow()
   expect(() => validateSnapshotRequest(request(), false)).toThrow('Valid snapshot IDs')
+})
+
+test.each([0, 1])('enforces the default entry-count boundary with %i extra entries', (extra) => {
+  const store = new ScanSnapshotStorage('scan', '/r')
+  const root = { ...entry('root'), path: '/r' }
+  store.accept({ type: 'entry', entry: root })
+  // Compact paths keep this fixture below the independent estimated-byte budget.
+  for (let index = 1; index < DEFAULT_SNAPSHOT_LIMITS.maxEntries + extra; index++) {
+    const id = index.toString(36)
+    store.accept({ type: 'entry', entry: { ...entry(id, 'root', 'file', 0), path: `/r/${id}` } })
+  }
+  finalized(store, root, 0)
+  expect(store.complete(summary(DEFAULT_SNAPSHOT_LIMITS.maxEntries - 1 + extra), timestamp)).toBe(
+    extra === 0
+  )
+  if (extra === 0) expect(store.describe().entryCount).toBe(100_000)
+  else expect(store.unavailableReason).toBe('limit-exceeded')
+  store.discard()
+})
+
+function sizedEntry(id: string, bytes: number, root = false): FileEntry {
+  const value = {
+    ...entry(id, root ? null : 'root', root ? 'directory' : 'file', root ? null : 0),
+    name: ''
+  }
+  // The documented estimate counts UTF-16 strings plus 512 bytes of entry/index overhead.
+  const strings =
+    value.id.length +
+    value.scanId.length +
+    (value.parentId?.length ?? 0) +
+    value.path.length +
+    value.type.length
+  return { ...value, name: 'n'.repeat((bytes - 512) / 2 - strings) }
+}
+
+test.each([0, 2])('enforces the 64 KiB per-entry boundary with %i extra bytes', (extra) => {
+  const store = new ScanSnapshotStorage('scan', path)
+  const root = sizedEntry('root', 64 * 1024 + extra, true)
+  store.accept({ type: 'entry', entry: root })
+  finalized(store, root, 0)
+  expect(store.complete(summary(), timestamp)).toBe(extra === 0)
+  if (extra) expect(store.unavailableReason).toBe('limit-exceeded')
+})
+
+test.each([0, 1])('enforces the default 64 MiB estimate with %i extra records', (extra) => {
+  const store = new ScanSnapshotStorage('scan', path)
+  const root = sizedEntry('root', 64 * 1024, true)
+  store.accept({ type: 'entry', entry: root })
+  for (let index = 1; index < 1024 + extra; index++) {
+    store.accept({ type: 'entry', entry: sizedEntry(`f${index}`, 64 * 1024) })
+  }
+  finalized(store, root, 0)
+  expect(store.complete(summary(1023 + extra), timestamp)).toBe(extra === 0)
+  if (extra === 0) expect(store.describe().entryCount).toBe(1024)
+  else expect(store.unavailableReason).toBe('limit-exceeded')
+  store.discard()
 })
