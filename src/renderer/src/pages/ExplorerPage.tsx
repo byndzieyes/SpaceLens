@@ -1,4 +1,5 @@
 import { useExplorer } from '../features/explorer/useExplorer'
+import { DirectoryTree } from '../features/explorer/DirectoryTree'
 import type { ReactNode } from 'react'
 import { ArrowLeft, ArrowRight, ArrowUp, File, FolderTree, LayoutGrid } from 'lucide-react'
 import { Button } from '../components/ui/Button'
@@ -144,13 +145,22 @@ export function ExplorerPage(): React.JSX.Element {
       </Button>
       <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-[11rem_minmax(0,1fr)] xl:grid-cols-[minmax(11rem,1fr)_minmax(0,2fr)_minmax(12rem,1fr)]">
         <ExplorerPanel id="explorer-tree-title" title="Directory Tree">
-          <div className="min-h-40 flex-1 overflow-y-auto pt-6 md:max-h-96">
-            <FolderTree size={24} className="mb-4 text-text-secondary" aria-hidden="true" />
-            <p className="text-sm font-medium">No directories displayed</p>
-            <p className="mt-2 text-sm text-text-secondary">
-              Directory browsing is not available yet.
-            </p>
-          </div>
+          {explorer.availability?.status === 'available' ? (
+            <DirectoryTree
+              snapshot={explorer.availability.snapshot}
+              currentDirectoryId={explorer.currentDirectoryId}
+              navigationDisabled={explorer.loading}
+              onNavigate={explorer.navigateToDirectory}
+            />
+          ) : (
+            <div className="min-h-40 flex-1 overflow-y-auto pt-6 md:max-h-96">
+              <FolderTree size={24} className="mb-4 text-text-secondary" aria-hidden="true" />
+              <p className="text-sm font-medium">No directories displayed</p>
+              <p className="mt-2 text-sm text-text-secondary">
+                An available snapshot is needed to browse directories.
+              </p>
+            </div>
+          )}
         </ExplorerPanel>
 
         <ExplorerPanel id="explorer-treemap-title" title="Treemap">
