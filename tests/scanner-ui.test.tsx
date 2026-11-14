@@ -496,7 +496,7 @@ test.each(['limit-exceeded', 'invalid-data'] as const)(
       snapshotUnavailable: null
     })
     expect(screen.queryByText(/filesystem entries were not retained/)).not.toBeInTheDocument()
-    expect(api.getScanSnapshot).not.toHaveBeenCalled()
+    expect(api.getScanSnapshot).toHaveBeenCalledOnce()
     expect(api.listScanDirectory).not.toHaveBeenCalled()
   }
 )

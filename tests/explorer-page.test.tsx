@@ -19,6 +19,10 @@ const api: SpaceLensAPI = {
 beforeEach(() => {
   vi.clearAllMocks()
   vi.mocked(api.getScanState).mockResolvedValue({ ok: true, value: { revision: 0, state: null } })
+  vi.mocked(api.getScanSnapshot).mockResolvedValue({
+    ok: true,
+    value: { snapshot: null, unavailable: null }
+  })
   vi.stubGlobal('spaceLens', api)
   Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: vi.fn() })
 })
@@ -46,7 +50,8 @@ test('shows honest empty states without scan requests, paths, or file rows', () 
   expect(container.textContent).not.toMatch(/[A-Z]:\\|\/home\/|\/Users\//)
   expect(screen.queryByRole('treeitem')).not.toBeInTheDocument()
   expect(screen.queryByRole('link')).not.toBeInTheDocument()
-  for (const method of Object.values(api)) expect(method).not.toHaveBeenCalled()
+  expect(api.getScanSnapshot).toHaveBeenCalledOnce()
+  expect(api.listScanDirectory).not.toHaveBeenCalled()
 })
 
 test('reserves navigation and pagination with disabled, named controls', () => {
@@ -55,7 +60,7 @@ test('reserves navigation and pagination with disabled, named controls', () => {
   for (const name of ['Back', 'Forward', 'Up']) {
     expect(navigation.getByRole('button', { name })).toBeDisabled()
   }
-  expect(screen.getByText('Directory navigation is not available yet.')).toBeVisible()
+  expect(screen.getByText('Loading snapshot?')).toBeVisible()
   const pagination = within(screen.getByRole('group', { name: 'Directory contents pagination' }))
   for (const name of ['Previous page', 'Next page']) {
     expect(pagination.getByRole('button', { name })).toBeDisabled()
@@ -106,7 +111,7 @@ test('starts on Overview and switches to Explorer and back using existing naviga
   )
   expect(screen.queryByRole('heading', { name: 'Storage Overview' })).not.toBeInTheDocument()
   expect(api.getScanState).toHaveBeenCalledTimes(1)
-  expect(api.getScanSnapshot).not.toHaveBeenCalled()
+  expect(api.getScanSnapshot).toHaveBeenCalledOnce()
   expect(api.getScanEntry).not.toHaveBeenCalled()
   expect(api.listScanDirectory).not.toHaveBeenCalled()
 
