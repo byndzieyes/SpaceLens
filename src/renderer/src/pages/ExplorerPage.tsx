@@ -1,8 +1,9 @@
 import { DirectoryContentsTable } from '../features/explorer/DirectoryContentsTable'
+import { DetailsPanel } from '../features/explorer/DetailsPanel'
 import { useExplorer } from '../features/explorer/useExplorer'
 import { DirectoryTree } from '../features/explorer/DirectoryTree'
 import type { ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, ArrowUp, File, FolderTree, LayoutGrid } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ArrowUp, FolderTree, LayoutGrid } from 'lucide-react'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 
@@ -184,32 +185,14 @@ export function ExplorerPage(): React.JSX.Element {
           title="Details"
           className="md:col-span-2 xl:col-span-1"
         >
-          <div className="min-w-0 space-y-5 pt-6 [overflow-wrap:anywhere]">
-            <div className="flex min-w-0 items-start gap-3">
-              <div className="shrink-0 rounded-lg bg-surface-elevated p-2 text-text-secondary">
-                <File size={22} aria-hidden="true" />
-              </div>
-              <div className="min-w-0">
-                <p className="font-medium">No item selected</p>
-                <p className="mt-1 text-sm text-text-secondary">
-                  File and folder details will appear here.
-                </p>
-              </div>
-            </div>
-            <dl className="space-y-3 text-xs">
-              {['Type', 'Size', 'Modified'].map((label) => (
-                <div
-                  key={label}
-                  className="flex flex-wrap justify-between gap-x-3 gap-y-1 border-b border-separator pb-3"
-                >
-                  <dt className="text-text-secondary">{label}</dt>
-                  <dd aria-label="Not available" className="min-w-0">
-                    —
-                  </dd>
-                </div>
-              ))}
-            </dl>
-          </div>
+          <DetailsPanel
+            scanId={
+              explorer.availability?.status === 'available'
+                ? explorer.availability.snapshot.entries.scanId
+                : null
+            }
+            selectedEntryId={explorer.selectedEntryId}
+          />
         </ExplorerPanel>
       </div>
 
