@@ -1,3 +1,4 @@
+import { DirectoryContentsTable } from '../features/explorer/DirectoryContentsTable'
 import { useExplorer } from '../features/explorer/useExplorer'
 import { DirectoryTree } from '../features/explorer/DirectoryTree'
 import type { ReactNode } from 'react'
@@ -213,50 +214,18 @@ export function ExplorerPage(): React.JSX.Element {
       </div>
 
       <ExplorerPanel id="explorer-contents-title" title="Directory Contents">
-        <div
-          role="region"
-          aria-label="Directory contents table"
-          tabIndex={0}
-          className="relative min-w-0 overflow-x-auto focus-visible:-outline-offset-2"
-        >
-          <table
-            aria-describedby="explorer-contents-empty"
-            className="w-full min-w-[26rem] border-collapse text-left text-sm"
-          >
-            <caption className="sr-only">Files and directories in the displayed directory</caption>
-            <thead className="border-b border-separator text-xs text-text-secondary">
-              <tr>
-                <th scope="col" className="py-3 pr-4 font-medium">
-                  Name
-                </th>
-                <th scope="col" className="px-4 py-3 font-medium">
-                  Type
-                </th>
-                <th scope="col" className="px-4 py-3 text-right font-medium">
-                  Size
-                </th>
-                <th scope="col" className="py-3 pl-4 font-medium">
-                  Modified
-                </th>
-              </tr>
-            </thead>
-            <tbody />
-          </table>
-        </div>
-        <p id="explorer-contents-empty" className="py-10 text-center text-sm text-text-secondary">
-          No directory contents to display
-        </p>
-        <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-separator pt-4">
-          <p className="text-xs text-text-secondary">Directory paging is not available yet.</p>
-          <div className="flex gap-2" role="group" aria-label="Directory contents pagination">
-            <Button variant="secondary" disabled aria-label="Previous page">
-              Previous
-            </Button>
-            <Button variant="secondary" disabled aria-label="Next page">
-              Next
-            </Button>
-          </div>
-        </footer>
+        <DirectoryContentsTable
+          scanId={
+            explorer.availability?.status === 'available'
+              ? explorer.availability.snapshot.entries.scanId
+              : null
+          }
+          directoryId={explorer.currentDirectoryId}
+          selectedEntryId={explorer.selectedEntryId}
+          disabled={explorer.loading}
+          onSelect={explorer.selectEntry}
+          onNavigate={explorer.navigateToDirectory}
+        />
       </ExplorerPanel>
     </div>
   )

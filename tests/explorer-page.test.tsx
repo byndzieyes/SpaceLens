@@ -79,13 +79,13 @@ test('provides an accessible table with contract-backed columns and a readable e
     within(table)
       .getAllByRole('columnheader')
       .map((header) => header.textContent)
-  ).toEqual(['Name', 'Type', 'Size', 'Modified'])
+  ).toEqual(['Name', 'Type', 'Size'])
   for (const header of within(table).getAllByRole('columnheader')) {
     expect(header).toHaveAttribute('scope', 'col')
   }
   expect(within(table).getAllByRole('row')).toHaveLength(1)
   expect(within(table).queryByRole('cell')).not.toBeInTheDocument()
-  expect(table).toHaveAccessibleDescription('No directory contents to display')
+  expect(table).toHaveAccessibleDescription(/Logical file sizes/)
   expect(screen.getByRole('region', { name: 'Directory contents table' })).toHaveAttribute(
     'tabindex',
     '0'
