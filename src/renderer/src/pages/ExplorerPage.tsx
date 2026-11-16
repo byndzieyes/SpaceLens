@@ -1,9 +1,10 @@
 import { DirectoryContentsTable } from '../features/explorer/DirectoryContentsTable'
 import { DetailsPanel } from '../features/explorer/DetailsPanel'
+import { DirectoryTreemap } from '../features/explorer/DirectoryTreemap'
 import { useExplorer } from '../features/explorer/useExplorer'
 import { DirectoryTree } from '../features/explorer/DirectoryTree'
 import type { ReactNode } from 'react'
-import { ArrowLeft, ArrowRight, ArrowUp, FolderTree, LayoutGrid } from 'lucide-react'
+import { ArrowLeft, ArrowRight, ArrowUp, FolderTree } from 'lucide-react'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 
@@ -166,18 +167,14 @@ export function ExplorerPage(): React.JSX.Element {
         </ExplorerPanel>
 
         <ExplorerPanel id="explorer-treemap-title" title="Treemap">
-          <div className="relative mt-4 flex min-h-64 min-w-0 flex-1 items-center justify-center rounded-lg border border-dashed border-border bg-background/40 p-5 sm:min-h-80">
-            <div className="max-w-xs text-center">
-              <LayoutGrid size={32} className="mx-auto mb-4 text-accent" aria-hidden="true" />
-              <p className="font-medium">Your storage, at a glance</p>
-              <p className="mt-2 text-sm text-text-secondary">
-                Scan data is not displayed in Explorer yet.
-              </p>
-              <p className="mt-2 text-xs text-text-secondary">
-                This area will show how files and folders use space.
-              </p>
-            </div>
-          </div>
+          <DirectoryTreemap
+            scanId={
+              explorer.availability?.status === 'available'
+                ? explorer.availability.snapshot.entries.scanId
+                : null
+            }
+            directory={explorer.breadcrumbs.at(-1) ?? null}
+          />
         </ExplorerPanel>
 
         <ExplorerPanel

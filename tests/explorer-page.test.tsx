@@ -42,7 +42,7 @@ test('shows honest empty states without scan requests, paths, or file rows', () 
   for (const text of [
     'No directory displayed',
     'No directories displayed',
-    'Scan data is not displayed in Explorer yet.',
+    'No treemap available. An available snapshot and current directory are required.',
     'No item selected',
     'No directory contents to display'
   ])

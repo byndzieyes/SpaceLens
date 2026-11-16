@@ -209,20 +209,18 @@ test('caps retained pages and makes capacity available after collapsing a branch
   }))
   list.mockResolvedValueOnce(page(children)).mockResolvedValue(page([]))
   mount()
-  fireEvent.click(screen.getByRole('button', { name: 'Expand Root' }))
+  fireEvent.click(screen.getByLabelText('Expand Root'))
   await screen.findByText('Directory 0')
   for (let i = 0; i < 31; i++) {
-    await act(async () =>
-      fireEvent.click(screen.getByRole('button', { name: `Expand Directory ${i}` }))
-    )
+    // The explicit label avoids recalculating accessible names for every button
+    // in the growing tree on each of these 31 setup steps.
+    await act(async () => fireEvent.click(screen.getByLabelText(`Expand Directory ${i}`)))
   }
-  fireEvent.click(screen.getByRole('button', { name: 'Expand Directory 31' }))
+  fireEvent.click(screen.getByLabelText('Expand Directory 31'))
   expect(await screen.findByRole('alert')).toHaveTextContent('Tree page limit reached')
   expect(list).toHaveBeenCalledTimes(32)
-  fireEvent.click(screen.getByRole('button', { name: 'Collapse Root' }))
-  fireEvent.click(screen.getByRole('button', { name: 'Expand Root' }))
-  await act(async () =>
-    fireEvent.click(screen.getByRole('button', { name: 'Expand Directory 31' }))
-  )
+  fireEvent.click(screen.getByLabelText('Collapse Root'))
+  fireEvent.click(screen.getByLabelText('Expand Root'))
+  await act(async () => fireEvent.click(screen.getByLabelText('Expand Directory 31')))
   expect(list).toHaveBeenCalledTimes(33)
 })
