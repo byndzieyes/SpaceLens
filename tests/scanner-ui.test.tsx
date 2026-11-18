@@ -76,6 +76,7 @@ beforeEach(() => {
     getScanSnapshot: vi.fn(),
     getScanEntry: vi.fn(),
     listScanDirectory: vi.fn(),
+    getScanDirectoryTreemap: vi.fn(),
     onScanStateChanged: vi.fn((listener) => {
       listeners.add(listener)
       return () => {

@@ -7,11 +7,10 @@ import {
   type RefObject
 } from 'react'
 import type { FileEntry } from '../../../../shared/scan'
-import { MAX_SCAN_DIRECTORY_PAGE_SIZE } from '../../../../shared/snapshot'
+import { MAX_SCAN_TREEMAP_ENTRIES } from '../../../../shared/snapshot'
 import { Button } from '../../components/ui/Button'
-import { listExplorerDirectoryPage } from './data'
 import { createTreemapData, type TreemapData } from './treemapData'
-import { Treemap } from './Treemap'
+import { Treemap, OtherSummary } from './Treemap'
 
 type Interactions = Omit<ComponentProps<typeof Treemap>, 'data'>
 
@@ -21,7 +20,6 @@ type Props = Interactions & {
 }
 type State =
   | { status: 'loading' }
-  | { status: 'unsupported' }
   | { status: 'error'; code: string; message: string }
   | { status: 'ready'; data: TreemapData }
 
@@ -79,41 +77,38 @@ function TreemapRequest({
     queueMicrotask(async () => {
       if (!active) return
       try {
-        const result = await listExplorerDirectoryPage(
-          { scanId, entryId: directory.id },
-          { offset: 0, limit: MAX_SCAN_DIRECTORY_PAGE_SIZE }
-        )
+        const result = await window.spaceLens.getScanDirectoryTreemap({
+          scanId,
+          entryId: directory.id
+        })
         if (!active) return
         if (!result.ok) {
           setState({ status: 'error', ...result.error })
           return
         }
-        const page = result.value
+        const summary = result.value
         if (
-          page.scanId !== scanId ||
-          page.directoryId !== directory.id ||
+          summary.scanId !== scanId ||
+          summary.directoryId !== directory.id ||
           directory.scanId !== scanId ||
-          !Number.isSafeInteger(page.totalCount) ||
-          page.totalCount < 0 ||
-          page.entries.length > MAX_SCAN_DIRECTORY_PAGE_SIZE
+          !Number.isSafeInteger(summary.totalCount) ||
+          summary.totalCount < 0 ||
+          summary.individualCount !== Math.min(summary.totalCount, MAX_SCAN_TREEMAP_ENTRIES) ||
+          summary.individualCount !== summary.entries.length ||
+          summary.individualCount + (summary.other?.count ?? 0) !== summary.totalCount
         ) {
           setState({
             status: 'error',
             code: 'INVALID_REQUEST',
-            message: 'Directory page metadata does not match this snapshot request.'
+            message: 'Treemap metadata does not match this snapshot request.'
           })
           return
         }
-        if (
-          page.totalCount > MAX_SCAN_DIRECTORY_PAGE_SIZE ||
-          page.nextOffset !== null ||
-          page.entries.length !== page.totalCount
-        ) {
-          setState({ status: 'unsupported' })
-          return
-        }
         try {
-          setState({ status: 'ready', data: createTreemapData(directory, page.entries) })
+          const data = createTreemapData(directory, summary.entries, summary.other)
+          if (data.unknownCount !== summary.unknownCount)
+            throw new Error('Invalid unknown-size count.')
+          setState({ status: 'ready', data })
         } catch (error) {
           setState({
             status: 'error',
@@ -139,13 +134,6 @@ function TreemapRequest({
     return (
       <p role="status" className="py-6 text-sm text-text-secondary">
         Loading treemap…
-      </p>
-    )
-  if (state.status === 'unsupported')
-    return (
-      <p className="py-6 text-sm text-text-secondary">
-        A complete listing of up to 100 direct entries is required for this treemap. Large
-        directories are not supported yet; full visualization will be enabled in a later update.
       </p>
     )
   if (state.status === 'error')
@@ -175,7 +163,8 @@ function TreemapRequest({
     return (
       <div className="space-y-2 py-6 text-sm text-text-secondary">
         <p>
-          {state.data.unknownCount === state.data.children.length
+          {state.data.unknownCount ===
+          state.data.children.length + (state.data.other?.aggregate.count ?? 0)
             ? 'No sizes available for this directory.'
             : 'No measurable known usage in this directory.'}
         </p>
@@ -188,6 +177,7 @@ function TreemapRequest({
         {state.data.zeroCount > 0 && (
           <p>{state.data.zeroCount} entries have a known size of 0 B.</p>
         )}
+        {state.data.other && <OtherSummary other={state.data.other.aggregate} />}
       </div>
     )
   return <Treemap data={state.data} {...interactions} />

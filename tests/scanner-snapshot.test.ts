@@ -143,6 +143,153 @@ test('orders equal names by ID and UTF-16 names independently of locale', () => 
   ])
 })
 
+test('ranks logical and finalized aggregate bytes, breaks ties in snapshot order, and groups the remainder', () => {
+  const store = new ScanSnapshotStorage('scan', path)
+  const root = entry('root')
+  const nested = entry('nested', 'root')
+  for (const item of [
+    root,
+    nested,
+    entry('descendant', 'nested', 'file', 8),
+    { ...entry('b', 'root', 'file', 3), name: 'A' },
+    { ...entry('a', 'root', 'file', 3), name: 'A' },
+    { ...entry('l', 'root', 'file', 3), name: 'a' },
+    entry('zero', 'root', 'file', 0),
+    entry('link', 'root', 'symlink'),
+    entry('other', 'root', 'other'),
+    entry('missing-size', 'root', 'file')
+  ])
+    store.accept({ type: 'entry', entry: item })
+  store.accept({ type: 'error', error: { path, code: null, message: 'Unavailable file size' } })
+  finalized(store, nested, 8)
+  finalized(store, root, 17)
+  expect(store.complete(summary(6, 2, 17, 1), timestamp)).toBe(true)
+  const query = { scanId: 'scan', entryId: 'root', limit: 3 }
+  const result = store.getDirectoryTreemap(query)
+  expect(result.entries.map(({ id }) => id)).toEqual(['nested', 'a', 'b'])
+  expect(result).toMatchObject({
+    scanId: 'scan',
+    directoryId: 'root',
+    totalCount: 8,
+    individualCount: 3,
+    unknownCount: 3,
+    other: { count: 5, knownBytes: 3, unknownCount: 3, zeroCount: 1 }
+  })
+  expect(store.getDirectoryTreemap({ ...query, limit: 4 }).other).toEqual({
+    count: 4,
+    knownBytes: 0,
+    unknownCount: 3,
+    zeroCount: 1
+  })
+  expect(store.getDirectoryTreemap({ ...query, limit: 5 }).entries.at(-1)?.id).toBe('zero')
+  const complete = store.getDirectoryTreemap({ scanId: 'scan', entryId: 'root' })
+  expect(complete.entries).toHaveLength(8)
+  expect(complete.other).toBeNull()
+  Object.assign(result.entries[0], { name: 'changed' })
+  expect(store.getDirectoryTreemap(query).entries[0].name).toBe('nested')
+  expect(store.listDirectory(request()).entries.map(({ id }) => id)).toEqual([
+    'a',
+    'b',
+    'l',
+    'link',
+    'missing-size',
+    'nested',
+    'other',
+    'zero'
+  ])
+  expect(() => store.getDirectoryTreemap({ ...query, entryId: 'a' })).toThrow('not a directory')
+  expect(() => store.getDirectoryTreemap({ ...query, entryId: 'removed' })).toThrow(
+    'does not exist'
+  )
+  expect(() => store.getDirectoryTreemap({ ...query, scanId: 'old' })).toThrow(
+    'no longer available'
+  )
+})
+
+test('retains exact byte sums up to the safe integer boundary and cannot query an overflowed snapshot', () => {
+  const max = Number.MAX_SAFE_INTEGER
+  const root = entry('root')
+  const query = { scanId: 'scan', entryId: 'root', limit: 1 }
+  for (const firstSize of [max - 10, max - 9]) {
+    const store = new ScanSnapshotStorage('scan', path)
+    store.accept({ type: 'entry', entry: root })
+    expect(() => store.getDirectoryTreemap(query)).toThrow('unavailable')
+    store.accept({ type: 'entry', entry: entry('first', 'root', 'file', firstSize) })
+    store.accept({ type: 'entry', entry: entry('second', 'root', 'file', 10) })
+    if (firstSize === max - 10) {
+      finalized(store, root, max)
+      expect(store.complete(summary(2, 1, max), timestamp)).toBe(true)
+      const result = store.getDirectoryTreemap(query)
+      expect(result.other?.knownBytes).toBe(10)
+      expect(result.entries[0].sizeBytes! + result.other!.knownBytes).toBe(max)
+    } else {
+      expect(store.unavailableReason).toBe('invalid-data')
+      expect(() => store.getDirectoryTreemap(query)).toThrow('unavailable')
+    }
+  }
+})
+
+test.each([0, 100, 101, 10_000, 99_999])(
+  'summarizes %i children with at most 100 results',
+  (count) => {
+    const root = { ...entry('root'), path: '/bench' }
+    const store = new ScanSnapshotStorage('scan', root.path)
+    store.accept({ type: 'entry', entry: root })
+    // Increasing sizes exercise heap replacement at every visit after the first 100.
+    for (let i = 1; i <= count; i++) {
+      const id = String(i).padStart(5, '0')
+      store.accept({
+        type: 'entry',
+        entry: {
+          ...root,
+          id,
+          parentId: root.id,
+          name: id,
+          path: `/bench/${id}`,
+          type: 'file',
+          sizeBytes: i
+        }
+      })
+    }
+    const total = (count * (count + 1)) / 2
+    finalized(store, root, total)
+    expect(store.complete(summary(count, 1, total), timestamp)).toBe(true)
+    const query = { scanId: 'scan', entryId: root.id }
+    const start = performance.now()
+    const result = store.getDirectoryTreemap(query)
+    const firstMs = performance.now() - start
+    const selected = Math.min(count, 100)
+    expect(result.individualCount).toBe(selected)
+    expect(result.totalCount).toBe(count)
+    expect(result.entries.map(({ sizeBytes }) => sizeBytes)).toEqual(
+      Array.from({ length: selected }, (_, i) => count - i)
+    )
+    const grouped = count - selected
+    expect(result.other).toEqual(
+      grouped === 0
+        ? null
+        : {
+            count: grouped,
+            knownBytes: (grouped * (grouped + 1)) / 2,
+            unknownCount: 0,
+            zeroCount: 0
+          }
+    )
+    if (count >= 10_000) {
+      const samples = Array.from({ length: 9 }, () => {
+        const before = performance.now()
+        store.getDirectoryTreemap(query)
+        return performance.now() - before
+      }).sort((a, b) => a - b)
+      const bytes = Buffer.byteLength(JSON.stringify(result))
+      expect(bytes).toBeLessThan(32_768)
+      console.info(
+        `Treemap ${count} children: first ${firstMs.toFixed(2)} ms, median ${samples[4].toFixed(2)} ms, ${bytes} JSON bytes`
+      )
+    }
+  }
+)
+
 test('retains known bytes and nullable metadata with explicit incompleteness after recoverable errors', () => {
   const store = new ScanSnapshotStorage('scan', path)
   const root = entry('root')

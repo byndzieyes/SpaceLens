@@ -2,6 +2,7 @@ import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { SpaceLensAPI } from '../src/shared/ipc'
 import type { FileEntry } from '../src/shared/scan'
+import { treemapSummary } from './treemap-fixtures'
 import { DirectoryContentsTable } from '../src/renderer/src/features/explorer/DirectoryContentsTable'
 import App from '../src/renderer/src/App'
 const list = vi.fn<SpaceLensAPI['listScanDirectory']>()
@@ -190,6 +191,13 @@ test('table navigation synchronizes breadcrumbs, history and visible tree highli
   const root = { ...folder, id: 'root', name: 'Root', parentId: null }
   vi.stubGlobal('spaceLens', {
     listScanDirectory: list,
+    getScanDirectoryTreemap: async ({ scanId, entryId }: { scanId: string; entryId: string }) => ({
+      ok: true,
+      value: treemapSummary(entryId === 'root' ? [file, folder] : [], {
+        scanId,
+        directoryId: entryId
+      })
+    }),
     getScanState: vi.fn(async () => ({ ok: true, value: { revision: 0, state: null } })),
     onScanStateChanged: vi.fn(() => () => {}),
     getScanSnapshot: vi.fn(async () => ({

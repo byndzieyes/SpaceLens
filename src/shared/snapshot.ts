@@ -42,9 +42,45 @@ export interface ScanDirectoryPage {
   readonly nextOffset: number | null
 }
 
+export const MAX_SCAN_TREEMAP_ENTRIES = 100
+
+export interface ScanDirectoryTreemapRequest extends ScanEntryRequest {
+  /** Defaults to MAX_SCAN_TREEMAP_ENTRIES; accepts integers from 1 through that limit. */
+  readonly limit?: number
+}
+
+export interface ScanTreemapOther {
+  readonly count: number
+  readonly knownBytes: number
+  readonly unknownCount: number
+  readonly zeroCount: number
+}
+
+export interface ScanDirectoryTreemap {
+  readonly scanId: string
+  readonly directoryId: string
+  /** Descending known size, then snapshot name/ID order. Unknown sizes rank after known zero. */
+  readonly entries: readonly FileEntry[]
+  readonly totalCount: number
+  readonly individualCount: number
+  readonly unknownCount: number
+  readonly other: ScanTreemapOther | null
+}
+
+export function knownTreemapBytes(entry: FileEntry): number | null {
+  const bytes =
+    entry.type === 'file'
+      ? entry.sizeBytes
+      : entry.type === 'directory'
+        ? entry.aggregatedSizeBytes
+        : null
+  return bytes !== null && Number.isSafeInteger(bytes) && bytes >= 0 ? bytes : null
+}
+
 export type SnapshotAccessErrorCode =
   | 'INVALID_REQUEST'
   | 'SNAPSHOT_UNAVAILABLE'
   | 'SNAPSHOT_EXPIRED'
   | 'ENTRY_NOT_FOUND'
   | 'NOT_DIRECTORY'
+  | 'SIZE_OVERFLOW'

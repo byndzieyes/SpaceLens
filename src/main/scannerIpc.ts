@@ -18,7 +18,11 @@ import {
 } from '../shared/ipc'
 import type { ScanSessionState } from '../shared/scan'
 import type { ScanDirectoryRequest, ScanEntryRequest } from '../shared/snapshot'
-import { SnapshotAccessError, validateSnapshotRequest } from './scanner/snapshot'
+import {
+  SnapshotAccessError,
+  validateSnapshotRequest,
+  validateTreemapRequest
+} from './scanner/snapshot'
 import type { ScanSessionManager } from './scanner/sessionManager'
 import {
   inspectScanDirectory,
@@ -229,7 +233,8 @@ export function registerScannerIpc(
   const snapshotChannels = [
     IPC_CHANNELS.getScanSnapshot,
     IPC_CHANNELS.getScanEntry,
-    IPC_CHANNELS.listScanDirectory
+    IPC_CHANNELS.listScanDirectory,
+    IPC_CHANNELS.getScanDirectoryTreemap
   ] as const
   for (const channel of snapshotChannels) {
     ipcMain.handle(channel, (event, ...args: unknown[]) => {
@@ -243,6 +248,11 @@ export function registerScannerIpc(
         }
         if (args.length !== 1)
           return failure('INVALID_REQUEST', 'One snapshot request is required.')
+        if (channel === IPC_CHANNELS.getScanDirectoryTreemap) {
+          const request = args[0]
+          validateTreemapRequest(request)
+          return { ok: true, value: manager.getScanDirectoryTreemap(request) }
+        }
         const request = args[0] as ScanEntryRequest | ScanDirectoryRequest
         validateSnapshotRequest(request, channel === IPC_CHANNELS.listScanDirectory)
         return {

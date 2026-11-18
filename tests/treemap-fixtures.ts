@@ -1,5 +1,9 @@
 import type { FileEntry } from '../src/shared/scan'
-import type { ScanDirectoryPage } from '../src/shared/snapshot'
+import {
+  knownTreemapBytes,
+  type ScanDirectoryPage,
+  type ScanDirectoryTreemap
+} from '../src/shared/snapshot'
 
 export const treemapRoot: FileEntry = {
   id: 'root',
@@ -41,6 +45,22 @@ export function treemapPage(
     entries,
     totalCount: entries.length,
     nextOffset: null,
+    ...extra
+  }
+}
+
+export function treemapSummary(
+  entries: readonly FileEntry[] = [treemapFile, treemapFolder],
+  extra: Partial<ScanDirectoryTreemap> = {}
+): ScanDirectoryTreemap {
+  return {
+    scanId: 'published',
+    directoryId: 'root',
+    entries,
+    totalCount: entries.length,
+    individualCount: entries.length,
+    unknownCount: entries.filter((entry) => knownTreemapBytes(entry) === null).length,
+    other: null,
     ...extra
   }
 }

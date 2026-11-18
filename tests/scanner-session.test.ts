@@ -444,6 +444,9 @@ test('publishes storage only after settlement, preserves it across attempts, and
   expect(instance.listScanDirectory({ ...reference, offset: 0, limit: 10 }).entries).toEqual([
     entry(first.run, 'file', 300)
   ])
+  expect(instance.getScanDirectoryTreemap(reference).entries).toEqual([
+    entry(first.run, 'file', 300)
+  ])
   for (const outcome of ['cancelled', 'failed']) {
     const next = await begin(instance)
     await root(next.run)
@@ -462,6 +465,7 @@ test('publishes storage only after settlement, preserves it across attempts, and
   await next.done
   expect(instance.getScanSnapshot().snapshot!.entries.scanId).toBe(next.run.id)
   expect(() => instance.getScanEntry(reference)).toThrow('no longer available')
+  expect(() => instance.getScanDirectoryTreemap(reference)).toThrow('no longer available')
   expect(() => instance.getScanEntry({ scanId: next.run.id, entryId: 'file' })).toThrow(
     'does not exist'
   )
@@ -494,6 +498,12 @@ test('retention limits preserve previous entries while new statistics finish suc
     snapshot: previous,
     unavailable: { scanId: next.run.id, reason: 'limit-exceeded' }
   })
+  expect(
+    instance.getScanDirectoryTreemap({ scanId: first.run.id, entryId: 'directory' })
+  ).toMatchObject({ scanId: first.run.id, totalCount: 0 })
+  expect(() =>
+    instance.getScanDirectoryTreemap({ scanId: next.run.id, entryId: 'directory' })
+  ).toThrow('no available snapshot')
   expect(() => instance.getScanEntry({ scanId: next.run.id, entryId: 'directory' })).toThrow(
     'no available snapshot'
   )

@@ -47,7 +47,7 @@ export async function resolveExplorerSnapshot(): Promise<ScannerIpcResult<Explor
 /**
  * Fetch exactly one page, defaulting to the first 100 direct children.
  * Follow nextOffset explicitly with the same IDs; never treat one page as a
- * complete tree/treemap. Main's UTF-16 name/ID order and page metadata pass
+ * complete directory. Main's UTF-16 name/ID order and page metadata pass
  * through unchanged. No cache, prefetch, sorting, or snapshot-sized collection.
  */
 export async function listExplorerDirectoryPage(

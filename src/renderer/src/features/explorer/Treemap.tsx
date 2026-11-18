@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import type { ScanTreemapOther } from '../../../../shared/snapshot'
 import { formatBytes } from '../../lib/storage'
-import type { TreemapData } from './treemapData'
+import { treemapItemKey, type TreemapData } from './treemapData'
 import { calculateTreemap } from './treemapLayout'
 
 interface Props {
@@ -9,6 +10,18 @@ interface Props {
   onSelect: (id: string) => void
   onNavigate: (id: string) => Promise<void>
   disabled?: boolean
+}
+
+export function OtherSummary({ other }: { other: ScanTreemapOther }): React.JSX.Element {
+  return (
+    <p>
+      Other groups {other.count.toLocaleString('en-US')} {other.count === 1 ? 'entry' : 'entries'}{' '}
+      with {formatBytes(other.knownBytes)} in known sizes.
+      {other.unknownCount > 0 &&
+        ` Sizes unavailable for ${other.unknownCount.toLocaleString('en-US')}.`}{' '}
+      Browse grouped entries in Directory Contents.
+    </p>
+  )
 }
 
 export function Treemap({
@@ -44,8 +57,8 @@ export function Treemap({
       }),
     [data, size]
   )
-  const hoveredTile = rectangles.find(({ item }) => item.entry.id === hoveredId)
-  const focusedTile = rectangles.find(({ item }) => item.entry.id === focusedId)
+  const hoveredTile = rectangles.find(({ item }) => treemapItemKey(item) === hoveredId)
+  const focusedTile = rectangles.find(({ item }) => treemapItemKey(item) === focusedId)
   // Resizing can collapse a small tile. Clear its context so it doesn't reappear unprompted.
   if (hoveredId !== null && !hoveredTile) setHoveredId(null)
   if (focusedId !== null && !focusedTile) setFocusedId(null)
@@ -71,14 +84,15 @@ export function Treemap({
         >
           {rectangles.map(({ item, x, y, width, height, formattedSize }, index) => {
             const clip = `${id}-clip-${index}`
+            const entry = item.kind === 'entry' ? item.entry : null
             return (
-              <g key={item.entry.id} data-entry-id={item.entry.id}>
+              <g key={treemapItemKey(item)} data-entry-id={entry?.id}>
                 <rect
                   x={x}
                   y={y}
                   width={width}
                   height={height}
-                  fill={item.entry.type === 'directory' ? '#28515a' : '#34436b'}
+                  fill={entry ? (entry.type === 'directory' ? '#28515a' : '#34436b') : '#475569'}
                 />
                 {width >= 80 && height >= 58 && (
                   <>
@@ -94,9 +108,9 @@ export function Treemap({
                       className="fill-text-primary text-xs"
                       aria-hidden="true"
                     >
-                      <tspan>{item.entry.name}</tspan>
+                      <tspan>{entry?.name ?? 'Other'}</tspan>
                       <tspan x={x + 8} dy={18}>
-                        {item.entry.type} · {formattedSize}
+                        {entry ? entry.type : 'Grouped entries'} · {formattedSize}
                       </tspan>
                     </text>
                   </>
@@ -105,33 +119,55 @@ export function Treemap({
             )
           })}
         </svg>
-        {/* Native buttons share the SVG viewBox's bounds and provide standard focus and semantics. */}
+        {/* Tile focus targets share the SVG viewBox's bounds. Only real entries are buttons. */}
         {rectangles.map(({ item, x, y, width, height, formattedSize }) => {
+          const tileKey = treemapItemKey(item)
+          const tile = {
+            style: {
+              left: `${(x / size.width) * 100}%`,
+              top: `${(y / size.height) * 100}%`,
+              width: `${(width / size.width) * 100}%`,
+              height: `${(height / size.height) * 100}%`
+            },
+            onPointerEnter: () => setHoveredId(tileKey),
+            onPointerLeave: () => setHoveredId(null),
+            onFocus: () => {
+              setHoveredId((current) => (current === tileKey ? current : null))
+              setFocusedId(tileKey)
+            },
+            onBlur: () => setFocusedId(null)
+          }
+          const focusStyle =
+            'absolute focus-visible:-outline-offset-4 focus-visible:outline-dotted focus-visible:outline-text-primary'
+          const hoverStyle =
+            tileKey === hoveredId
+              ? 'after:pointer-events-none after:absolute after:inset-0.5 after:border after:border-dashed after:border-text-primary'
+              : ''
+          if (item.kind === 'other') {
+            const { count, unknownCount } = item.aggregate
+            return (
+              <div
+                key={tileKey}
+                {...tile}
+                role="img"
+                tabIndex={0}
+                aria-label={`Other, summary of ${count} grouped entries, ${formattedSize} in known sizes${unknownCount ? `, ${unknownCount} sizes unavailable` : ''}. Browse grouped entries in Directory Contents.`}
+                className={`${focusStyle} ${hoverStyle}`}
+              />
+            )
+          }
           const { id: entryId, name, type } = item.entry
           const selected = entryId === selectedEntryId
-          const hovered = entryId === hoveredId
           return (
             <button
-              key={entryId}
+              key={tileKey}
+              {...tile}
               type="button"
               data-entry-id={entryId}
               aria-label={`${name}, ${type}, ${formattedSize}`}
               aria-pressed={selected}
               aria-disabled={disabled || undefined}
-              style={{
-                left: `${(x / size.width) * 100}%`,
-                top: `${(y / size.height) * 100}%`,
-                width: `${(width / size.width) * 100}%`,
-                height: `${(height / size.height) * 100}%`
-              }}
-              className={`absolute cursor-pointer p-0 focus-visible:-outline-offset-4 focus-visible:outline-dotted focus-visible:outline-text-primary aria-disabled:cursor-default ${selected ? 'inset-ring-2 inset-ring-accent-hover' : ''} ${hovered ? 'after:pointer-events-none after:absolute after:inset-0.5 after:border after:border-dashed after:border-text-primary' : ''}`}
-              onPointerEnter={() => setHoveredId(entryId)}
-              onPointerLeave={() => setHoveredId(null)}
-              onFocus={() => {
-                setHoveredId((current) => (current === entryId ? current : null))
-                setFocusedId(entryId)
-              }}
-              onBlur={() => setFocusedId(null)}
+              className={`${focusStyle} ${hoverStyle} cursor-pointer p-0 aria-disabled:cursor-default ${selected ? 'inset-ring-2 inset-ring-accent-hover' : ''}`}
               onClick={() => {
                 if (!disabled) onSelect(entryId)
               }}
@@ -152,9 +188,14 @@ export function Treemap({
       <div
         role="group"
         aria-label="Treemap entry information"
-        className="h-20 min-w-0 rounded-md bg-surface-elevated px-3 py-2 text-xs [overflow-wrap:anywhere]"
+        className="h-20 min-w-0 overflow-y-auto rounded-md bg-surface-elevated px-3 py-2 text-xs [overflow-wrap:anywhere]"
       >
-        {context ? (
+        {context?.item.kind === 'other' ? (
+          <>
+            <p className="font-medium">Other · Grouped entries</p>
+            <OtherSummary other={context.item.aggregate} />
+          </>
+        ) : context?.item.kind === 'entry' ? (
           <>
             <p className="line-clamp-2 font-medium">{context.item.entry.name}</p>
             <p className="mt-1 text-text-secondary">
@@ -184,6 +225,7 @@ export function Treemap({
         {data.unknownCount > 0 &&
           ` Sizes unavailable or invalid for ${data.unknownCount} entries; excluded from the distribution.`}
         {data.zeroCount > 0 && ` ${data.zeroCount} zero-byte entries have no area.`}
+        {data.other && <OtherSummary other={data.other.aggregate} />}
         <span className="mt-1 block">
           Click or press Space to select. Double-click or press Enter to open a directory.
         </span>

@@ -1,5 +1,8 @@
 import { expect, test } from 'vitest'
-import { createTreemapData } from '../src/renderer/src/features/explorer/treemapData'
+import {
+  createTreemapData,
+  treemapItemKey
+} from '../src/renderer/src/features/explorer/treemapData'
 import { calculateTreemap } from '../src/renderer/src/features/explorer/treemapLayout'
 import {
   treemapFile as file,
@@ -61,9 +64,9 @@ test('rejects nested/foreign/duplicate entries and unsafe total sizes', () => {
 test('D3 areas are proportional to known bytes with no root or descendant double-counting', () => {
   const data = createTreemapData(root, [file, folder])
   const rectangles = calculateTreemap(data, 600, 400, 0)
-  expect(rectangles.map((rect) => rect.item.entry.id)).toEqual(['folder', 'file'])
+  expect(rectangles.map((rect) => treemapItemKey(rect.item))).toEqual(['folder', 'file'])
   const area = (id: string): number => {
-    const rect = rectangles.find((rect) => rect.item.entry.id === id)!
+    const rect = rectangles.find((rect) => treemapItemKey(rect.item) === id)!
     return rect.width * rect.height
   }
   expect(area('folder') / area('file')).toBeCloseTo(3, 8)
@@ -99,7 +102,7 @@ test('zero and unknown entries do not acquire visible area, even beside large va
     { ...file, id: 'unknown', sizeBytes: null },
     { ...file, id: 'big', sizeBytes: Number.MAX_SAFE_INTEGER - 1000 }
   ])
-  expect(calculateTreemap(data, 640, 320).map((rect) => rect.item.entry.id)).toEqual([
+  expect(calculateTreemap(data, 640, 320).map((rect) => treemapItemKey(rect.item))).toEqual([
     'big',
     'file'
   ])
@@ -120,4 +123,22 @@ test('empty and all-zero layouts have no rectangles', () => {
   expect(calculateTreemap(createTreemapData(root, [{ ...file, sizeBytes: 0 }]), 640, 320)).toEqual(
     []
   )
+})
+
+test('Other gets proportional area for its known sizes and has no area when all grouped sizes are zero or unknown', () => {
+  const other = { count: 4, knownBytes: 3000, unknownCount: 2, zeroCount: 1 }
+  const data = createTreemapData(root, [file], other)
+  expect(data).toMatchObject({ totalBytes: 4000, unknownCount: 2, zeroCount: 1 })
+  for (const width of [400, 900, 1280]) {
+    const [grouped, individual] = calculateTreemap(data, width, 320, 0)
+    expect(grouped.item).toMatchObject({ kind: 'other', aggregate: other })
+    expect((grouped.width * grouped.height) / (individual.width * individual.height)).toBeCloseTo(3)
+    expect(grouped.x + grouped.width).toBeLessThanOrEqual(width)
+    expect(grouped.y + grouped.height).toBeLessThanOrEqual(320)
+  }
+  const zero = createTreemapData(root, [file], { ...other, knownBytes: 0, zeroCount: 2 })
+  expect(calculateTreemap(zero, 640, 320).map(({ item }) => item.kind)).toEqual(['entry'])
+  expect(() =>
+    createTreemapData(root, [file], { ...other, knownBytes: Number.MAX_SAFE_INTEGER })
+  ).toThrow(/byte total/)
 })

@@ -47,6 +47,8 @@ const api: SpaceLensAPI = {
   getScanSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.getScanSnapshot),
   getScanEntry: (request) => ipcRenderer.invoke(IPC_CHANNELS.getScanEntry, request),
   listScanDirectory: (request) => ipcRenderer.invoke(IPC_CHANNELS.listScanDirectory, request),
+  getScanDirectoryTreemap: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getScanDirectoryTreemap, request),
   cancelScan: (request) => ipcRenderer.invoke(IPC_CHANNELS.cancelScan, request),
   onScanStateChanged: (callback) => {
     if (typeof callback !== 'function') throw new TypeError('A scan state callback is required.')

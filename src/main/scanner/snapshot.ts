@@ -1,8 +1,12 @@
 import type { FileEntry } from '../../shared/scan'
 import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
+  MAX_SCAN_TREEMAP_ENTRIES,
+  knownTreemapBytes,
   type ScanDirectoryPage,
   type ScanDirectoryRequest,
+  type ScanDirectoryTreemap,
+  type ScanDirectoryTreemapRequest,
   type ScanEntryRequest,
   type ScanSnapshot,
   type ScanSnapshotAvailability,
@@ -75,6 +79,64 @@ interface DirectoryIndex {
   children: string[]
   knownBytes: number
   pendingDirectories: number
+}
+
+export function validateTreemapRequest(
+  request: unknown
+): asserts request is ScanDirectoryTreemapRequest {
+  if (request && typeof request === 'object' && !Array.isArray(request)) {
+    const fields = request as Record<string, unknown>
+    const hasLimit = Object.hasOwn(fields, 'limit')
+    if (
+      Object.keys(fields).length === (hasLimit ? 3 : 2) &&
+      Object.hasOwn(fields, 'scanId') &&
+      id(fields.scanId) &&
+      Object.hasOwn(fields, 'entryId') &&
+      id(fields.entryId) &&
+      (!hasLimit ||
+        (integer(fields.limit) && fields.limit >= 1 && fields.limit <= MAX_SCAN_TREEMAP_ENTRIES))
+    )
+      return
+  }
+  throw new SnapshotAccessError(
+    'INVALID_REQUEST',
+    `Valid snapshot IDs and an optional Treemap limit from 1 to ${MAX_SCAN_TREEMAP_ENTRIES} are required.`
+  )
+}
+
+interface RankedEntry {
+  entry: FileEntry
+  bytes: number | null
+  order: number
+}
+
+/** A negative result means weaker rank. The directory index already orders ties by name and ID. */
+function compareRank(a: RankedEntry, b: RankedEntry): number {
+  return (a.bytes ?? -1) - (b.bytes ?? -1) || b.order - a.order
+}
+
+function retainLargest(heap: RankedEntry[], candidate: RankedEntry, limit: number): void {
+  if (heap.length < limit) {
+    let index = heap.length
+    while (index > 0) {
+      const parent = (index - 1) >>> 1
+      if (compareRank(heap[parent], candidate) <= 0) break
+      heap[index] = heap[parent]
+      index = parent
+    }
+    heap[index] = candidate
+    return
+  }
+  let index = 0
+  while (index * 2 + 1 < heap.length) {
+    const left = index * 2 + 1
+    const right = left + 1
+    const child = right < heap.length && compareRank(heap[right], heap[left]) < 0 ? right : left
+    if (compareRank(candidate, heap[child]) <= 0) break
+    heap[index] = heap[child]
+    index = child
+  }
+  heap[index] = candidate
 }
 
 /** Incremental builder, sealed before publication. No event history or tree copies. */
@@ -277,6 +339,61 @@ export class ScanSnapshotStorage {
       entries: children.slice(request.offset, end).map((id) => ({ ...this.entries.get(id)! })),
       totalCount: children.length,
       nextOffset: end < children.length ? end : null
+    }
+  }
+
+  getDirectoryTreemap(request: ScanDirectoryTreemapRequest): ScanDirectoryTreemap {
+    validateTreemapRequest(request)
+    if (request.scanId !== this.scanId)
+      throw new SnapshotAccessError(
+        'SNAPSHOT_EXPIRED',
+        'This snapshot reference is no longer available.'
+      )
+    const directory = this.getEntry(request.entryId)
+    if (directory.type !== 'directory')
+      throw new SnapshotAccessError('NOT_DIRECTORY', 'Entry is not a directory.')
+    const { children } = this.directories.get(directory.id)!
+    const limit = request.limit ?? MAX_SCAN_TREEMAP_ENTRIES
+    const heap: RankedEntry[] = []
+    let knownBytes = 0
+    let unknownCount = 0
+    let zeroCount = 0
+    for (let order = 0; order < children.length; order++) {
+      const entry = this.entries.get(children[order])!
+      const bytes = knownTreemapBytes(entry)
+      if (bytes === null) unknownCount++
+      else {
+        if (bytes > Number.MAX_SAFE_INTEGER - knownBytes)
+          throw new SnapshotAccessError(
+            'SIZE_OVERFLOW',
+            'The directory exceeds the supported byte total.'
+          )
+        knownBytes += bytes
+        if (bytes === 0) zeroCount++
+      }
+      // Later ties cannot beat an already retained entry at the cutoff.
+      if (heap.length < limit || (bytes ?? -1) > (heap[0].bytes ?? -1))
+        retainLargest(heap, { entry, bytes, order }, limit)
+    }
+    const grouped = { count: children.length - heap.length, knownBytes, unknownCount, zeroCount }
+    const entries = heap
+      .sort((a, b) => compareRank(b, a))
+      .map(({ entry, bytes }) => {
+        if (bytes === null) grouped.unknownCount--
+        else {
+          grouped.knownBytes -= bytes
+          if (bytes === 0) grouped.zeroCount--
+        }
+        return { ...entry }
+      })
+    return {
+      scanId: this.scanId,
+      directoryId: directory.id,
+      entries,
+      totalCount: children.length,
+      individualCount: entries.length,
+      unknownCount,
+      other: grouped.count > 0 ? grouped : null
     }
   }
 }

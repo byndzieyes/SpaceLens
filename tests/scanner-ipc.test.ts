@@ -119,6 +119,7 @@ beforeEach(() => {
     getScanSnapshot: vi.fn(() => ({ snapshot: null, unavailable: null })),
     getScanEntry: vi.fn(),
     listScanDirectory: vi.fn(),
+    getScanDirectoryTreemap: vi.fn(),
     start,
     cancel,
     dispose,
@@ -155,6 +156,22 @@ test('retrieval uses fixed, authorized channels and forwards bounded ID-only que
   const page = { ...request, offset: 100, limit: 100 }
   invoke(IPC_CHANNELS.listScanDirectory, [page])
   expect(manager.listScanDirectory).toHaveBeenCalledExactlyOnceWith(page)
+  const treemap = { ...request, limit: 100 }
+  const aggregated = {
+    scanId: id,
+    directoryId: otherId,
+    totalCount: 0,
+    individualCount: 0,
+    unknownCount: 0,
+    entries: [],
+    other: null
+  }
+  vi.mocked(manager.getScanDirectoryTreemap).mockReturnValue(aggregated)
+  expect(invoke(IPC_CHANNELS.getScanDirectoryTreemap, [treemap])).toEqual({
+    ok: true,
+    value: aggregated
+  })
+  expect(manager.getScanDirectoryTreemap).toHaveBeenCalledExactlyOnceWith(treemap)
 })
 
 test('state queries and terminal notifications include retention failure metadata without entries', () => {
@@ -180,7 +197,8 @@ test('state queries and terminal notifications include retention failure metadat
 test.each([
   IPC_CHANNELS.getScanSnapshot,
   IPC_CHANNELS.getScanEntry,
-  IPC_CHANNELS.listScanDirectory
+  IPC_CHANNELS.listScanDirectory,
+  IPC_CHANNELS.getScanDirectoryTreemap
 ])(
   'rejects foreign senders, subframes, navigated documents, and shutdown on %s',
   async (channel) => {
@@ -199,6 +217,7 @@ test.each([
     expect(manager.getScanSnapshot).not.toHaveBeenCalled()
     expect(manager.getScanEntry).not.toHaveBeenCalled()
     expect(manager.listScanDirectory).not.toHaveBeenCalled()
+    expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
   }
 )
 
@@ -232,6 +251,43 @@ test('rejects path access, extra arguments, invalid IDs and unbounded pagination
   })
   expect(manager.getScanEntry).not.toHaveBeenCalled()
   expect(manager.listScanDirectory).not.toHaveBeenCalled()
+})
+
+test('validates Treemap requests before dispatch and preserves structured failures', () => {
+  const valid = { scanId: id, entryId: otherId }
+  for (const args of [
+    [],
+    [null],
+    [{ ...valid, entryId: '../folder' }],
+    [{ ...valid, scanId: '' }],
+    [{ ...valid, path: rootPath }],
+    [{ ...valid, offset: 0 }],
+    [valid, 'extra'],
+    ...[undefined, null, NaN, Infinity, -1, 0, 1.5, 101, '100'].map((limit) => [
+      { ...valid, limit }
+    ])
+  ]) {
+    expect(invoke(IPC_CHANNELS.getScanDirectoryTreemap, args)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+  }
+  expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
+  for (const code of [
+    'NOT_DIRECTORY',
+    'SNAPSHOT_EXPIRED',
+    'SNAPSHOT_UNAVAILABLE',
+    'ENTRY_NOT_FOUND',
+    'SIZE_OVERFLOW'
+  ] as const) {
+    vi.mocked(manager.getScanDirectoryTreemap).mockImplementationOnce(() => {
+      throw new SnapshotAccessError(code, 'Public message')
+    })
+    expect(invoke(IPC_CHANNELS.getScanDirectoryTreemap, [valid])).toEqual({
+      ok: false,
+      error: { code, message: 'Public message' }
+    })
+  }
 })
 
 test.each([
@@ -505,7 +561,8 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(replacement.listenerCount('did-finish-load')).toBe(0)
   expect(replacement.listenerCount('destroyed')).toBe(0)
   expect(ipcMain.listenerCount(IPC_CHANNELS.acknowledgeScanState)).toBe(0)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(7)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getScanDirectoryTreemap)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(8)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

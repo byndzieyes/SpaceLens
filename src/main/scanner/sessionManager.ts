@@ -9,11 +9,14 @@ import {
   ScanSnapshotStorage,
   SnapshotAccessError,
   validateSnapshotRequest,
+  validateTreemapRequest,
   type SnapshotLimits
 } from './snapshot'
 import type {
   ScanDirectoryPage,
   ScanDirectoryRequest,
+  ScanDirectoryTreemap,
+  ScanDirectoryTreemapRequest,
   ScanEntryRequest,
   ScanSnapshotAvailability
 } from '../../shared/snapshot'
@@ -90,6 +93,11 @@ export class ScanSessionManager {
   listScanDirectory(request: ScanDirectoryRequest): ScanDirectoryPage {
     validateSnapshotRequest(request, true)
     return this.snapshotFor(request.scanId).listDirectory(request)
+  }
+
+  getScanDirectoryTreemap(request: ScanDirectoryTreemapRequest): ScanDirectoryTreemap {
+    validateTreemapRequest(request)
+    return this.snapshotFor(request.scanId).getDirectoryTreemap(request)
   }
 
   private snapshotFor(scanId: string): ScanSnapshotStorage {

@@ -2,6 +2,8 @@ import type { FileEntry, RecentScanSummary, ScanSessionState } from './scan'
 import type {
   ScanDirectoryPage,
   ScanDirectoryRequest,
+  ScanDirectoryTreemap,
+  ScanDirectoryTreemapRequest,
   ScanEntryRequest,
   ScanSnapshotAvailability,
   SnapshotAccessErrorCode
@@ -21,6 +23,9 @@ export interface SpaceLensAPI {
   getScanSnapshot: () => Promise<ScannerIpcResult<ScanSnapshotAvailability>>
   getScanEntry: (request: ScanEntryRequest) => Promise<ScannerIpcResult<FileEntry>>
   listScanDirectory: (request: ScanDirectoryRequest) => Promise<ScannerIpcResult<ScanDirectoryPage>>
+  getScanDirectoryTreemap: (
+    request: ScanDirectoryTreemapRequest
+  ) => Promise<ScannerIpcResult<ScanDirectoryTreemap>>
   cancelScan: (request: CancelScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
   onScanStateChanged: (callback: (snapshot: ScanStateSnapshot) => void) => () => void
 }
@@ -33,6 +38,7 @@ export const IPC_CHANNELS = {
   getScanSnapshot: 'spacelens:get-scan-snapshot',
   getScanEntry: 'spacelens:get-scan-entry',
   listScanDirectory: 'spacelens:list-scan-directory',
+  getScanDirectoryTreemap: 'spacelens:get-scan-directory-treemap',
   cancelScan: 'spacelens:cancel-scan',
   scanStateChanged: 'spacelens:scan-state-changed',
   acknowledgeScanState: 'spacelens:acknowledge-scan-state'

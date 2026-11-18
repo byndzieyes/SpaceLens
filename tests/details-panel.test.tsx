@@ -6,6 +6,7 @@ import type { FileEntry } from '../src/shared/scan'
 import type { ScanSnapshot } from '../src/shared/snapshot'
 import { DetailsPanel } from '../src/renderer/src/features/explorer/DetailsPanel'
 import { ExplorerPage } from '../src/renderer/src/pages/ExplorerPage'
+import { treemapSummary } from './treemap-fixtures'
 
 const file: FileEntry = {
   id: 'file',
@@ -265,6 +266,15 @@ function mountExplorer(): {
   vi.stubGlobal('spaceLens', {
     getScanSnapshot: getSnapshot,
     getScanEntry: getEntry,
+    getScanDirectoryTreemap: vi.fn<SpaceLensAPI['getScanDirectoryTreemap']>(
+      async ({ scanId, entryId }) => ({
+        ok: true,
+        value: treemapSummary(
+          entryId === 'root' ? [file, folder].map((entry) => ({ ...entry, scanId })) : [],
+          { scanId, directoryId: entryId }
+        )
+      })
+    ),
     listScanDirectory: vi
       .fn<SpaceLensAPI['listScanDirectory']>()
       .mockImplementation(async ({ scanId, entryId, offset }) => ({

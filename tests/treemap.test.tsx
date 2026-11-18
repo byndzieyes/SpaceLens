@@ -12,15 +12,16 @@ import {
   treemapFile as file,
   treemapFolder as folder,
   treemapRoot as root,
-  treemapPage as page
+  treemapPage as page,
+  treemapSummary as summary
 } from './treemap-fixtures'
 
-const list = vi.fn<SpaceLensAPI['listScanDirectory']>()
+const list = vi.fn<SpaceLensAPI['getScanDirectoryTreemap']>()
 const onSelect = vi.fn<(id: string) => void>()
 const onNavigate = vi.fn<(id: string) => Promise<void>>()
 const interactions = { selectedEntryId: null, onSelect, onNavigate }
 const props = { scanId: 'published', directory: root, ...interactions }
-type PageResult = Awaited<ReturnType<SpaceLensAPI['listScanDirectory']>>
+type PageResult = Awaited<ReturnType<SpaceLensAPI['getScanDirectoryTreemap']>>
 function deferred(): { promise: Promise<PageResult>; resolve: (result: PageResult) => void } {
   let resolve!: (result: PageResult) => void
   const promise = new Promise<PageResult>((done) => {
@@ -36,8 +37,8 @@ async function flush(): Promise<void> {
 beforeEach(() => {
   vi.resetAllMocks()
   vi.stubGlobal('ResizeObserver', undefined)
-  vi.stubGlobal('spaceLens', { listScanDirectory: list })
-  list.mockResolvedValue({ ok: true, value: page() })
+  vi.stubGlobal('spaceLens', { getScanDirectoryTreemap: list })
+  list.mockResolvedValue({ ok: true, value: summary() })
 })
 afterEach(() => vi.unstubAllGlobals())
 
@@ -208,39 +209,44 @@ test('resizing clears information for tiles that disappear, without requesting d
   expect(disconnect).toHaveBeenCalledOnce()
 })
 
-test('loads one complete page with actual published scan ID and no entry-detail or recursive requests', async () => {
+test('loads one summary with the published scan ID and no page requests', async () => {
+  const listPages = vi.fn()
+  vi.stubGlobal('spaceLens', { getScanDirectoryTreemap: list, listScanDirectory: listPages })
   render(<DirectoryTreemap {...props} />)
   expect(screen.getByRole('status')).toHaveTextContent('Loading treemap')
   await screen.findByRole('figure')
   expect(list).toHaveBeenCalledExactlyOnceWith({
     scanId: 'published',
-    entryId: 'root',
-    offset: 0,
-    limit: 100
+    entryId: 'root'
   })
+  expect(listPages).not.toHaveBeenCalled()
 })
 
 test.each([
-  page([file], { totalCount: 101, nextOffset: 100 }),
-  page([file], { totalCount: 101, nextOffset: null }),
-  page([file], { totalCount: 2, nextOffset: 1 }),
-  page([file], { totalCount: 2, nextOffset: null })
-])('never renders an incomplete page or loads additional pages (%o)', async (value) => {
-  list.mockResolvedValue({ ok: true, value })
-  render(<DirectoryTreemap {...props} />)
-  expect(await screen.findByText(/Large directories are not supported yet/)).toBeVisible()
-  expect(screen.queryByRole('figure')).not.toBeInTheDocument()
-  expect(list).toHaveBeenCalledTimes(1)
-})
+  summary([file], { totalCount: 101 }),
+  summary([file], { other: { count: 1, knownBytes: 0, unknownCount: 1, zeroCount: 0 } }),
+  summary([file], { individualCount: 2, totalCount: 2 }),
+  summary([file], { unknownCount: 1 })
+])(
+  'rejects inconsistent summary metadata without rendering a partial chart (%o)',
+  async (value) => {
+    list.mockResolvedValue({ ok: true, value })
+    render(<DirectoryTreemap {...props} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent('INVALID_REQUEST')
+    expect(screen.queryByRole('figure')).not.toBeInTheDocument()
+    expect(list).toHaveBeenCalledTimes(1)
+  }
+)
 
-test('exactly 100 direct entries are supported when pagination metadata is complete', async () => {
+test('exactly 100 direct entries fit without an Other tile', async () => {
   list.mockResolvedValue({
     ok: true,
-    value: page(Array.from({ length: 100 }, (_, i) => ({ ...file, id: `file-${i}` })))
+    value: summary(Array.from({ length: 100 }, (_, i) => ({ ...file, id: `file-${i}` })))
   })
   const { container } = render(<DirectoryTreemap {...props} />)
   await screen.findByRole('figure')
   expect(container.querySelectorAll('svg g[data-entry-id]')).toHaveLength(100)
+  expect(screen.queryByRole('img', { name: /Other/ })).not.toBeInTheDocument()
   expect(list).toHaveBeenCalledTimes(1)
 })
 
@@ -256,7 +262,7 @@ test.each([
 })
 
 test('distinguishes empty, zero-total, unknown-only, and mixed known/unknown size states', async () => {
-  list.mockResolvedValueOnce({ ok: true, value: page([]) })
+  list.mockResolvedValueOnce({ ok: true, value: summary([]) })
   const view = render(<DirectoryTreemap {...props} />)
   await screen.findByText('This directory is empty. No treemap to display.')
   for (const entries of [
@@ -265,7 +271,7 @@ test('distinguishes empty, zero-total, unknown-only, and mixed known/unknown siz
     [file, { ...folder, aggregatedSizeBytes: null }, { ...file, id: 'zero', sizeBytes: 0 }]
   ]) {
     view.rerender(<DirectoryTreemap {...interactions} scanId={null} directory={null} />)
-    list.mockResolvedValueOnce({ ok: true, value: page(entries) })
+    list.mockResolvedValueOnce({ ok: true, value: summary(entries) })
     view.rerender(<DirectoryTreemap {...props} />)
     await flush()
     if (entries[0].sizeBytes === 0) {
@@ -284,23 +290,25 @@ test('distinguishes empty, zero-total, unknown-only, and mixed known/unknown siz
   }
 })
 
-test.each(['SNAPSHOT_EXPIRED', 'SNAPSHOT_UNAVAILABLE', 'ENTRY_NOT_FOUND'] as const)(
-  'preserves %s and retries without claiming an empty directory',
-  async (code) => {
-    list.mockResolvedValueOnce({ ok: false, error: { code, message: 'Original error' } })
-    render(<DirectoryTreemap {...props} />)
-    expect(await screen.findByRole('alert')).toHaveTextContent(`${code}: Original error`)
-    expect(screen.queryByText(/This directory is empty/)).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Retry treemap' }))
-    await screen.findByRole('figure')
-    expect(list).toHaveBeenCalledTimes(2)
-  }
-)
+test.each([
+  'SNAPSHOT_EXPIRED',
+  'SNAPSHOT_UNAVAILABLE',
+  'ENTRY_NOT_FOUND',
+  'SIZE_OVERFLOW'
+] as const)('preserves %s and retries without claiming an empty directory', async (code) => {
+  list.mockResolvedValueOnce({ ok: false, error: { code, message: 'Original error' } })
+  render(<DirectoryTreemap {...props} />)
+  expect(await screen.findByRole('alert')).toHaveTextContent(`${code}: Original error`)
+  expect(screen.queryByText(/This directory is empty/)).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: 'Retry treemap' }))
+  await screen.findByRole('figure')
+  expect(list).toHaveBeenCalledTimes(2)
+})
 
-test('transport failures are recoverable and invalid page identity does not produce a chart', async () => {
+test('transport failures are recoverable and invalid summary identity does not produce a chart', async () => {
   list
     .mockRejectedValueOnce(new Error('Disconnected'))
-    .mockResolvedValueOnce({ ok: true, value: page([], { directoryId: 'wrong' }) })
+    .mockResolvedValueOnce({ ok: true, value: summary([], { directoryId: 'wrong' }) })
   render(<DirectoryTreemap {...props} />)
   expect(await screen.findByRole('alert')).toHaveTextContent('TRANSPORT_ERROR')
   fireEvent.click(screen.getByRole('button', { name: 'Retry treemap' }))
@@ -316,19 +324,17 @@ test.each([
   list.mockReturnValueOnce(old.promise)
   list.mockResolvedValueOnce({
     ok: true,
-    value: page([], { scanId: identity.scanId, directoryId: identity.directory.id })
+    value: summary([], { scanId: identity.scanId, directoryId: identity.directory.id })
   })
   const view = render(<DirectoryTreemap {...props} />)
   await flush()
   view.rerender(<DirectoryTreemap {...interactions} {...identity} />)
   await screen.findByText('This directory is empty. No treemap to display.')
-  await act(async () => old.resolve({ ok: true, value: page() }))
+  await act(async () => old.resolve({ ok: true, value: summary() }))
   expect(screen.queryByRole('figure')).not.toBeInTheDocument()
   expect(list).toHaveBeenLastCalledWith({
     scanId: identity.scanId,
-    entryId: identity.directory.id,
-    offset: 0,
-    limit: 100
+    entryId: identity.directory.id
   })
 })
 
@@ -363,7 +369,7 @@ test('a replaced snapshot clears a hovered selection and disconnects the old til
   expect(oldTile).toHaveAttribute('aria-pressed', 'true')
 
   const nextFile = { ...file, scanId: 'next' }
-  list.mockResolvedValue({ ok: true, value: page([nextFile], { scanId: 'next' }) })
+  list.mockResolvedValue({ ok: true, value: summary([nextFile], { scanId: 'next' }) })
   view.rerender(
     <DirectoryTreemap {...interactions} scanId="next" directory={{ ...root, scanId: 'next' }} />
   )
@@ -392,9 +398,14 @@ test('Explorer shares Treemap selection and navigation with Contents, Details, b
     ok: true,
     value: { snapshot, unavailable: { scanId: 'summary-only', reason: 'limit-exceeded' } }
   })
-  list.mockImplementation(async ({ entryId }) => ({
+  const listPages = vi.fn<SpaceLensAPI['listScanDirectory']>()
+  listPages.mockImplementation(async ({ entryId }) => ({
     ok: true,
     value: page(entryId === 'root' ? [file, folder] : [child], { directoryId: entryId })
+  }))
+  list.mockImplementation(async ({ entryId }) => ({
+    ok: true,
+    value: summary(entryId === 'root' ? [file, folder] : [child], { directoryId: entryId })
   }))
   const getEntry = vi.fn<SpaceLensAPI['getScanEntry']>()
   getEntry.mockImplementation(async ({ entryId }) => ({
@@ -402,7 +413,8 @@ test('Explorer shares Treemap selection and navigation with Contents, Details, b
     value: entryId === 'folder' ? folder : file
   }))
   vi.stubGlobal('spaceLens', {
-    listScanDirectory: list,
+    getScanDirectoryTreemap: list,
+    listScanDirectory: listPages,
     getScanSnapshot: getSnapshot,
     getScanEntry: getEntry
   })
@@ -429,7 +441,8 @@ test('Explorer shares Treemap selection and navigation with Contents, Details, b
   expect(folderTile).toHaveAttribute('aria-pressed', 'true')
   expect(fileTile).toHaveAttribute('aria-pressed', 'false')
   expect(chart.getByRole('figure', { name: 'Storage distribution in Root' })).toBeVisible()
-  expect(list).toHaveBeenCalledTimes(2)
+  expect(list).toHaveBeenCalledExactlyOnceWith({ scanId: 'published', entryId: 'root' })
+  expect(listPages).toHaveBeenCalledTimes(1)
 
   act(() => folderTile.focus())
   expect(chart.getByText(/Aggregated size/)).toBeVisible()
@@ -475,4 +488,70 @@ test('Explorer shares Treemap selection and navigation with Contents, Details, b
   fireEvent.click(screen.getByRole('button', { name: 'Refresh snapshot' }))
   await chart.findByText(/No treemap available/)
   expect(chart.queryByRole('figure')).not.toBeInTheDocument()
+})
+
+test('a large directory renders Other as focusable information and preserves real entry actions', async () => {
+  const top = [
+    file,
+    folder,
+    ...Array.from({ length: 98 }, (_, i) => ({
+      ...file,
+      id: `top-${i}`,
+      sizeBytes: 1000
+    }))
+  ]
+  const detail = vi.fn()
+  list.mockResolvedValue({
+    ok: true,
+    value: summary(top, {
+      totalCount: 2000,
+      unknownCount: 2,
+      other: { count: 1900, knownBytes: 160000, unknownCount: 2, zeroCount: 1 }
+    })
+  })
+  vi.stubGlobal('spaceLens', { getScanDirectoryTreemap: list, getScanEntry: detail })
+  render(<DirectoryTreemap {...props} selectedEntryId={file.id} />)
+  const aggregate = await screen.findByRole('img', {
+    name: /Other.*1900 grouped entries.*160 KB.*2 sizes unavailable/
+  })
+  const context = within(screen.getByRole('group', { name: 'Treemap entry information' }))
+  expect(aggregate).toHaveAttribute('tabindex', '0')
+  expect(aggregate).not.toHaveAttribute('aria-pressed')
+  fireEvent.pointerEnter(aggregate)
+  expect(context.getByText(/Other groups 1,900 entries with 160 KB in known sizes/)).toBeVisible()
+  expect(context.getByText(/Sizes unavailable for 2/)).toBeVisible()
+  fireEvent.pointerLeave(aggregate)
+  act(() => aggregate.focus())
+  expect(aggregate).toHaveFocus()
+  expect(context.getByText(/Browse grouped entries in Directory Contents/)).toBeVisible()
+  fireEvent.click(aggregate)
+  fireEvent.doubleClick(aggregate)
+  fireEvent.keyDown(aggregate, { key: 'Enter' })
+  fireEvent.keyDown(aggregate, { key: ' ' })
+  expect(onSelect).not.toHaveBeenCalled()
+  expect(onNavigate).not.toHaveBeenCalled()
+  expect(detail).not.toHaveBeenCalled()
+  const realTile = screen.getByRole('button', { name: 'Documents, directory, 3 KB' })
+  fireEvent.click(realTile)
+  fireEvent.doubleClick(realTile)
+  expect(onSelect).toHaveBeenCalledExactlyOnceWith(folder.id)
+  expect(onNavigate).toHaveBeenCalledExactlyOnceWith(folder.id)
+  expect(list).toHaveBeenCalledOnce()
+})
+
+test('keeps grouped counts visible with no Other tile when grouped bytes are zero or unknown', async () => {
+  const zeros = Array.from({ length: 100 }, (_, i) => ({ ...file, id: `empty-${i}`, sizeBytes: 0 }))
+  list.mockResolvedValue({
+    ok: true,
+    value: summary(zeros, {
+      totalCount: 101,
+      unknownCount: 1,
+      other: { count: 1, knownBytes: 0, unknownCount: 1, zeroCount: 0 }
+    })
+  })
+  render(<DirectoryTreemap {...props} />)
+  expect(await screen.findByText(/Other groups 1 entry with 0 B in known sizes/)).toBeVisible()
+  expect(screen.getByText(/No measurable known usage/)).toBeVisible()
+  expect(screen.queryByRole('img', { name: /Other/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('figure')).not.toBeInTheDocument()
 })

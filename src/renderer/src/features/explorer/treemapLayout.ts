@@ -1,5 +1,5 @@
 import { hierarchy, treemap, treemapSquarify } from 'd3-hierarchy'
-import type { TreemapData, TreemapItem } from './treemapData'
+import { treemapItemKey, type TreemapData, type TreemapItem } from './treemapData'
 
 export interface TreemapRectangle {
   readonly item: TreemapItem
@@ -32,18 +32,20 @@ export function calculateTreemap(
     data.totalBytes <= 0
   )
     return []
+  const items: TreemapItem[] = [...data.children]
+  if (data.other) items.push(data.other)
   const root = hierarchy<LayoutNode>({
     item: null,
-    children: data.children
+    children: items
       .filter((item) => item.bytes !== null && item.bytes > 0)
       .map((item) => ({ item }))
   })
     .sum((node) => node.item?.bytes ?? 0)
-    .sort(
-      (a, b) =>
-        (b.value ?? 0) - (a.value ?? 0) ||
-        ((a.data.item?.entry.id ?? '') < (b.data.item?.entry.id ?? '') ? -1 : 1)
-    )
+    .sort((a, b) => {
+      const aKey = a.data.item ? treemapItemKey(a.data.item) : ''
+      const bKey = b.data.item ? treemapItemKey(b.data.item) : ''
+      return (b.value ?? 0) - (a.value ?? 0) || (aKey < bKey ? -1 : aKey > bKey ? 1 : 0)
+    })
   const layout = treemap<LayoutNode>()
     .tile(treemapSquarify)
     .size([width, height])

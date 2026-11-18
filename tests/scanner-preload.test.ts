@@ -35,6 +35,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   expect(Object.keys(api).sort()).toEqual([
     'cancelScan',
     'getAppInfo',
+    'getScanDirectoryTreemap',
     'getScanEntry',
     'getScanSnapshot',
     'getScanState',
@@ -62,6 +63,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   await api.getScanSnapshot()
   await api.getScanEntry({ scanId: 'scan', entryId: 'entry' })
   await api.listScanDirectory({ scanId: 'scan', entryId: 'root', offset: 100, limit: 50 })
+  await api.getScanDirectoryTreemap({ scanId: 'scan', entryId: 'root' })
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(6, IPC_CHANNELS.getScanSnapshot)
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(7, IPC_CHANNELS.getScanEntry, {
     scanId: 'scan',
@@ -72,6 +74,10 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     entryId: 'root',
     offset: 100,
     limit: 50
+  })
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(9, IPC_CHANNELS.getScanDirectoryTreemap, {
+    scanId: 'scan',
+    entryId: 'root'
   })
 })
 
