@@ -143,8 +143,11 @@ test('transport failure on subsequent page keeps previous rows and retries that 
   fireEvent.click(screen.getByText('Next'))
   expect(await screen.findByRole('alert')).toHaveTextContent('TRANSPORT_ERROR')
   expect(screen.getByText('zero.txt')).toBeVisible()
+  fireEvent.click(screen.getByRole('button', { name: 'zero.txt' }))
+  expect(select).toHaveBeenLastCalledWith('file')
   fireEvent.click(screen.getByText('Retry directory contents'))
   await screen.findByText('Folder')
+  expect(select).toHaveBeenLastCalledWith(null)
   expect(list).toHaveBeenLastCalledWith({
     scanId: 'scan',
     entryId: 'root',

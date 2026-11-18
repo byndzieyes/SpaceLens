@@ -186,7 +186,11 @@ function ContentsPage({
           <Button
             variant="secondary"
             disabled={loading || disabled}
-            onClick={() => void load(retryOffset.current)}
+            onClick={() => {
+              const requested = retryOffset.current
+              if (requested !== offset) changePage(requested)
+              else void load(requested)
+            }}
           >
             Retry directory contents
           </Button>

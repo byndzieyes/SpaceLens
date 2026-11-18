@@ -488,7 +488,12 @@ test.each(['limit-exceeded', 'invalid-data'] as const)(
       ).not.toBeInTheDocument()
       expect(recent().getByText(/filesystem entries were not retained/)).toBeVisible()
     }
+    vi.mocked(api.getScanSnapshot).mockResolvedValue({
+      ok: true,
+      value: { snapshot: null, unavailable: { scanId: 'scan-a', reason } }
+    })
     fireEvent.click(screen.getByRole('button', { name: 'Explorer' }))
+    await screen.findByText(/Summary only\. (The temporary|Filesystem entries)/)
     fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
     await screen.findByText(/filesystem entries were not retained/)
     emit({

@@ -1,0 +1,430 @@
+import { StrictMode } from 'react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { afterEach, expect, test, vi, type Mocked } from 'vitest'
+import { ScanSnapshotStorage, SnapshotAccessError } from '../src/main/scanner/snapshot'
+import App from '../src/renderer/src/App'
+import type { ScannerIpcResult, ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
+import type { FileEntry, ScanSessionState, ScanStatus } from '../src/shared/scan'
+import type { ScanSnapshotAvailability } from '../src/shared/snapshot'
+
+const timestamp = '2026-11-18T14:00:00Z'
+
+function retained(scanId: string, name: string, errors = 0, extras = 0): ScanSnapshotStorage {
+  const path = `/scans/${name}`
+  const store = new ScanSnapshotStorage(scanId, path)
+  const root: FileEntry = {
+    id: 'root',
+    scanId,
+    parentId: null,
+    name,
+    path,
+    type: 'directory',
+    sizeBytes: null,
+    aggregatedSizeBytes: null,
+    createdAt: null,
+    modifiedAt: null
+  }
+  const folder = {
+    ...root,
+    parentId: root.id,
+    id: 'folder',
+    name: 'Nested',
+    path: `${path}/Nested`
+  }
+  const file = (id: string, parent: FileEntry, name: string, sizeBytes: number): FileEntry => ({
+    ...root,
+    id,
+    parentId: parent.id,
+    name,
+    path: `${parent.path}/${name}`,
+    sizeBytes,
+    type: 'file'
+  })
+  const fileEntries = [
+    file('report', root, `${name}.txt`, 3000),
+    file('nested', folder, 'inside.bin', 2000)
+  ]
+  for (let i = 0; i < extras; i++) {
+    const name = `sample-${String(i).padStart(3, '0')}.bin`
+    fileEntries.push(file(name.replace('.', '-'), root, name, 100 + i))
+  }
+  for (const entry of [root, folder, ...fileEntries]) store.accept({ type: 'entry', entry })
+  for (let count = 0; count < errors; count++)
+    store.accept({ type: 'error', error: { path, code: 'EACCES', message: 'Access denied.' } })
+  const totalBytes = fileEntries.reduce((total, entry) => total + entry.sizeBytes!, 0)
+  store.accept({ type: 'directory-finalized', entry: { ...folder, aggregatedSizeBytes: 2000 } })
+  store.accept({ type: 'directory-finalized', entry: { ...root, aggregatedSizeBytes: totalBytes } })
+  expect(
+    store.complete(
+      {
+        type: 'summary',
+        scanId,
+        rootEntryId: root.id,
+        summary: {
+          fileCount: fileEntries.length,
+          directoryCount: 2,
+          totalBytes,
+          errorCount: errors
+        }
+      },
+      timestamp
+    )
+  ).toBe(true)
+  return store
+}
+
+function mockApp(): {
+  api: Mocked<SpaceLensAPI>
+  listeners: Set<(snapshot: ScanStateSnapshot) => void>
+  publish: (storage: ScanSnapshotStorage) => void
+  runNext: (id: string) => void
+  reportSummaryOnly: (scanId: string) => void
+} {
+  let published: ScanSnapshotStorage | null = null
+  let state: ScanStateSnapshot = { revision: 0, state: null }
+  const listeners = new Set<(snapshot: ScanStateSnapshot) => void>()
+  const activeScan = (id: string, status: ScanStatus, rootPath: string): ScanSessionState => {
+    const stats =
+      published?.scanId === id
+        ? published.describe().summary
+        : {
+            fileCount: 0,
+            directoryCount: 1,
+            totalBytes: 0,
+            errorCount: 0
+          }
+    const session = { id, rootPath, startedAt: timestamp, summary: stats }
+    return {
+      session:
+        status === 'running'
+          ? { ...session, status, finishedAt: null }
+          : { ...session, status, finishedAt: timestamp },
+      progress: {
+        scanId: id,
+        processedFileCount: stats.fileCount,
+        processedDirectoryCount: stats.directoryCount,
+        processedBytes: stats.totalBytes,
+        currentPath: rootPath
+      },
+      failure:
+        status === 'failed' ? { name: 'Error', code: 'SCAN_FAILED', message: 'Scan failed.' } : null
+    }
+  }
+  const emit = (patch: Partial<ScanStateSnapshot>): void => {
+    state = { ...state, ...patch, revision: state.revision + 1 }
+    for (const listener of listeners) listener(state)
+  }
+  const publish = (storage: ScanSnapshotStorage): void => {
+    published = storage
+    const { root, summary } = storage.describe()
+    emit({
+      state: activeScan(storage.scanId, 'completed', root.path),
+      latestCompleted: {
+        id: storage.scanId,
+        path: root.path,
+        completedAt: timestamp,
+        totalBytes: summary.totalBytes,
+        fileCount: summary.fileCount,
+        errorCount: summary.errorCount
+      },
+      snapshotUnavailable: null
+    })
+  }
+  function read<T>(scanId: string, load: (store: ScanSnapshotStorage) => T): ScannerIpcResult<T> {
+    if (published?.scanId !== scanId)
+      return {
+        ok: false,
+        error: {
+          code: published ? 'SNAPSHOT_EXPIRED' : 'SNAPSHOT_UNAVAILABLE',
+          message: 'Snapshot is no longer available.'
+        }
+      }
+    try {
+      return { ok: true, value: load(published) }
+    } catch (error) {
+      if (error instanceof SnapshotAccessError)
+        return { ok: false, error: { code: error.code, message: error.message } }
+      throw error
+    }
+  }
+  let nextId = 'scan-a'
+  const api: Mocked<SpaceLensAPI> = {
+    getAppInfo: vi.fn<SpaceLensAPI['getAppInfo']>(),
+    getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: state })),
+    getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
+      ok: true,
+      value: {
+        snapshot: published?.describe() ?? null,
+        unavailable: state.snapshotUnavailable ?? null
+      }
+    })),
+    getScanEntry: vi.fn<SpaceLensAPI['getScanEntry']>(async (request) =>
+      read(request.scanId, (store) => store.getEntry(request.entryId))
+    ),
+    getScanDirectoryTreemap: vi.fn<SpaceLensAPI['getScanDirectoryTreemap']>(async (request) =>
+      read(request.scanId, (store) => store.getDirectoryTreemap(request))
+    ),
+    listScanDirectory: vi.fn<SpaceLensAPI['listScanDirectory']>(async (request) =>
+      read(request.scanId, (store) => store.listDirectory(request))
+    ),
+    onScanStateChanged: vi.fn<SpaceLensAPI['onScanStateChanged']>((listener) => {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    }),
+    selectScanDirectory: vi.fn<SpaceLensAPI['selectScanDirectory']>(async () => ({
+      ok: true,
+      value: { cancelled: false, rootPath: '/scans/Alpha' }
+    })),
+    startScan: vi.fn<SpaceLensAPI['startScan']>(async ({ rootPath }) => {
+      emit({ state: activeScan(nextId, 'running', rootPath) })
+      return { ok: true, value: { scanId: nextId } }
+    }),
+    cancelScan: vi.fn<SpaceLensAPI['cancelScan']>(async ({ scanId }) => {
+      emit({ state: activeScan(scanId, 'cancelled', '/scans/Beta') })
+      return { ok: true, value: { scanId } }
+    })
+  }
+  vi.stubGlobal('spaceLens', api)
+  vi.stubGlobal('ResizeObserver', undefined)
+  Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: vi.fn() })
+  return {
+    api,
+    listeners,
+    publish,
+    runNext: (id: string) => {
+      nextId = id
+    },
+    reportSummaryOnly: (scanId: string) =>
+      emit({
+        state: activeScan(scanId, 'completed', '/scans/Summary'),
+        latestCompleted: {
+          id: scanId,
+          path: '/scans/Summary',
+          completedAt: timestamp,
+          totalBytes: 1500,
+          fileCount: 220
+        },
+        snapshotUnavailable: { scanId, reason: 'limit-exceeded' }
+      })
+  }
+}
+
+afterEach(() => vi.unstubAllGlobals())
+
+const panel = (name: string): ReturnType<typeof within> =>
+  within(screen.getByRole('region', { name }))
+const button = (name: string): HTMLElement => screen.getByRole('button', { name })
+function open(page: 'Overview' | 'Explorer'): void {
+  fireEvent.click(
+    within(screen.getByRole('navigation', { name: 'Main navigation' })).getByRole('button', {
+      name: page
+    })
+  )
+}
+async function chart(directory: string): Promise<HTMLElement> {
+  return panel('Treemap').findByRole('figure', { name: `Storage distribution in ${directory}` })
+}
+async function start(): Promise<void> {
+  await waitFor(() => expect(button('Scan Folder')).toBeEnabled())
+  fireEvent.click(button('Scan Folder'))
+  await screen.findByText('Scanning')
+}
+
+test('a settled scan opens Explorer with one published identity across all four panels', async () => {
+  const { api, listeners, publish } = mockApp()
+  const alpha = retained('scan-a', 'Alpha', 1)
+  render(
+    <StrictMode>
+      <App />
+    </StrictMode>
+  )
+  expect(screen.getByRole('heading', { name: 'Storage Overview' })).toBeVisible()
+  await start()
+  expect(api.selectScanDirectory).toHaveBeenCalledOnce()
+  expect(api.startScan).toHaveBeenCalledExactlyOnceWith({ rootPath: '/scans/Alpha' })
+  expect(listeners.size).toBe(1)
+  expect(api.getScanSnapshot).not.toHaveBeenCalled()
+  expect(screen.queryByRole('button', { name: 'Open in Explorer' })).not.toBeInTheDocument()
+  act(() => publish(alpha))
+  fireEvent.click(button('Open in Explorer'))
+  await chart('Alpha')
+  expect(screen.getByText('Incomplete snapshot: known sizes may be partial.')).toBeVisible()
+  expect(listeners.size).toBe(0)
+  expect(api.getScanSnapshot).toHaveBeenCalledOnce()
+  fireEvent.click(button('Expand Alpha'))
+  const treeFolder = await panel('Directory Tree').findByRole('button', { name: 'Nested' })
+  fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'Alpha.txt' }))
+  await panel('Details').findByRole('heading', { name: 'Alpha.txt' })
+  expect(panel('Treemap').getByRole('button', { name: 'Alpha.txt, file, 3 KB' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  fireEvent.doubleClick(panel('Treemap').getByRole('button', { name: 'Nested, directory, 2 KB' }))
+  await chart('Nested')
+  expect(treeFolder).toHaveAttribute('aria-current', 'location')
+  expect(
+    await panel('Directory Contents').findByRole('button', { name: 'inside.bin' })
+  ).toBeVisible()
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+  expect(api.getScanDirectoryTreemap.mock.calls.map(([request]) => request.scanId)).toEqual([
+    'scan-a',
+    'scan-a'
+  ])
+  expect(api.getScanEntry.mock.calls.map(([request]) => request.scanId)).toEqual([
+    'scan-a',
+    'scan-a'
+  ])
+  expect(api.listScanDirectory.mock.calls.map(([request]) => request.scanId)).toEqual([
+    'scan-a',
+    'scan-a',
+    'scan-a'
+  ])
+  expect(api.getScanSnapshot).toHaveBeenCalledOnce()
+  open('Overview')
+  await screen.findByText('Completed with errors')
+  expect(listeners.size).toBe(1)
+  open('Explorer')
+  await chart('Alpha')
+  expect(button('Back')).toBeDisabled()
+  expect(button('Expand Alpha')).toHaveAttribute('aria-expanded', 'false')
+  expect(api.getScanSnapshot).toHaveBeenCalledTimes(2)
+  expect(api.cancelScan).not.toHaveBeenCalled()
+})
+
+test('an older snapshot stays browsable during a scan, after cancellation, and after summary-only completion', async () => {
+  const main = mockApp()
+  main.publish(retained('scan-a', 'Alpha'))
+  main.runNext('scan-b')
+  render(<App />)
+  await start()
+  open('Explorer')
+  await chart('Alpha')
+  fireEvent.doubleClick(await panel('Directory Contents').findByRole('button', { name: 'Nested' }))
+  await chart('Nested')
+  expect(main.api.cancelScan).not.toHaveBeenCalled()
+  open('Overview')
+  await screen.findByText('Scanning')
+  fireEvent.click(button('Cancel Scan'))
+  await screen.findByText('Scan cancelled')
+  expect(main.api.cancelScan).toHaveBeenCalledExactlyOnceWith({ scanId: 'scan-b' })
+  open('Explorer')
+  await chart('Alpha')
+  fireEvent.doubleClick(panel('Treemap').getByRole('button', { name: 'Nested, directory, 2 KB' }))
+  await chart('Nested')
+  fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'inside.bin' }))
+  await panel('Details').findByRole('heading', { name: 'inside.bin' })
+  const calls = main.api.getScanDirectoryTreemap.mock.calls.length
+  act(() => main.reportSummaryOnly('scan-c'))
+  expect(screen.queryByText(/newer scan has summary-only results/)).not.toBeInTheDocument()
+  fireEvent.click(button('Refresh snapshot'))
+  await screen.findByText(/newer scan has summary-only results/)
+  expect(panel('Details').getByRole('heading', { name: 'inside.bin' })).toBeVisible()
+  expect(button('Back')).toBeEnabled()
+  expect(main.api.getScanDirectoryTreemap).toHaveBeenCalledTimes(calls)
+  open('Overview')
+  await screen.findByText(/scan has no browsable snapshot/)
+  expect(screen.queryByRole('button', { name: 'Open in Explorer' })).not.toBeInTheDocument()
+  expect(screen.getByText('220')).toBeVisible()
+})
+
+test('replacement is explicit after expiration and ignores late panel data from the old snapshot', async () => {
+  const main = mockApp()
+  const alpha = retained('scan-a', 'Alpha')
+  const beta = retained('scan-b', 'Beta')
+  main.publish(alpha)
+  render(<App />)
+  open('Explorer')
+  await chart('Alpha')
+  fireEvent.click(button('Expand Alpha'))
+  const folder = await panel('Directory Tree').findByRole('button', { name: 'Nested' })
+  fireEvent.click(folder)
+  await chart('Nested')
+  fireEvent.click(button('Back'))
+  await chart('Alpha')
+  expect(button('Forward')).toBeEnabled()
+  const pending = Promise.withResolvers<ScannerIpcResult<FileEntry>>()
+  main.api.getScanEntry.mockReturnValueOnce(pending.promise)
+  fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'Alpha.txt' }))
+  await panel('Details').findByText('Loading item details…')
+  await waitFor(() =>
+    expect(main.api.getScanEntry).toHaveBeenLastCalledWith({ scanId: 'scan-a', entryId: 'report' })
+  )
+  act(() => main.publish(beta))
+  fireEvent.click(button('Forward'))
+  await screen.findByText(/SNAPSHOT_EXPIRED.*Use Refresh snapshot/)
+  expect(main.api.getScanSnapshot).toHaveBeenCalledOnce()
+  expect(button('Forward')).toBeEnabled()
+  fireEvent.click(button('Refresh snapshot'))
+  await chart('Beta')
+  await act(async () => pending.resolve({ ok: true, value: alpha.getEntry('report') }))
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+  expect(button('Forward')).toBeDisabled()
+  expect(button('Back')).toBeDisabled()
+  expect(button('Expand Beta')).toHaveAttribute('aria-expanded', 'false')
+  expect(await panel('Directory Contents').findByRole('button', { name: 'Beta.txt' })).toBeVisible()
+  expect(main.api.getScanDirectoryTreemap).toHaveBeenLastCalledWith({
+    scanId: 'scan-b',
+    entryId: 'root'
+  })
+})
+
+test('leaving Explorer ignores its pending availability response and a new app session can be summary-only', async () => {
+  const main = mockApp()
+  const late = Promise.withResolvers<ScannerIpcResult<ScanSnapshotAvailability>>()
+  main.api.getScanSnapshot.mockReturnValueOnce(late.promise)
+  render(<App />)
+  await start()
+  open('Explorer')
+  await waitFor(() => expect(main.api.getScanSnapshot).toHaveBeenCalledOnce())
+  expect(screen.queryByText('No directories displayed')).not.toBeInTheDocument()
+  open('Overview')
+  await screen.findByText('Scanning')
+  await act(async () =>
+    late.resolve({
+      ok: true,
+      value: { snapshot: retained('old', 'Old').describe(), unavailable: null }
+    })
+  )
+  expect(main.api.listScanDirectory).not.toHaveBeenCalled()
+  expect(main.api.getScanDirectoryTreemap).not.toHaveBeenCalled()
+  open('Explorer')
+  await screen.findByText(/No published snapshot yet/)
+  act(() => main.reportSummaryOnly('scan-a'))
+  fireEvent.click(button('Refresh snapshot'))
+  await screen.findByText(/temporary snapshot storage limit was reached/)
+  expect(main.api.listScanDirectory).not.toHaveBeenCalled()
+  expect(main.api.getScanDirectoryTreemap).not.toHaveBeenCalled()
+  expect(main.api.cancelScan).not.toHaveBeenCalled()
+})
+
+test('Top-N and inert Other coexist with independent Contents pagination and selection resets', async () => {
+  const main = mockApp()
+  main.publish(retained('large', 'Large', 0, 104))
+  render(<App />)
+  open('Explorer')
+  const figure = await chart('Large')
+  const tiles = within(figure)
+  const group = tiles.getByRole('img', { name: /Other.*6 grouped entries/ })
+  fireEvent.click(tiles.getByRole('button', { name: 'Large.txt, file, 3 KB' }))
+  await panel('Details').findByRole('heading', { name: 'Large.txt' })
+  fireEvent.doubleClick(group)
+  fireEvent.keyDown(group, { key: 'Enter' })
+  expect(panel('Details').getByRole('heading', { name: 'Large.txt' })).toBeVisible()
+  expect(main.api.getScanEntry).toHaveBeenCalledExactlyOnceWith({
+    scanId: 'large',
+    entryId: 'report'
+  })
+  expect(button('Back')).toBeDisabled()
+  fireEvent.click(button('Next page'))
+  await panel('Directory Contents').findByText(/Page 2.*106 entries/)
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+  expect(tiles.getByRole('button', { name: 'Large.txt, file, 3 KB' })).toHaveAttribute(
+    'aria-pressed',
+    'false'
+  )
+  expect(main.api.getScanDirectoryTreemap).toHaveBeenCalledExactlyOnceWith({
+    scanId: 'large',
+    entryId: 'root'
+  })
+  expect(main.api.listScanDirectory.mock.calls.map(([query]) => query.offset)).toEqual([0, 100])
+})

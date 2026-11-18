@@ -301,7 +301,7 @@ test('table selection updates details; directory navigation, history and tree na
   mountExplorer()
   const details = within(screen.getByRole('region', { name: 'Details' }))
   const contents = within(screen.getByRole('region', { name: 'Directory Contents' }))
-  expect(details.getByText('No item selected')).toBeVisible()
+  expect(await details.findByText('No item selected')).toBeVisible()
   fireEvent.click(await contents.findByRole('button', { name: 'report.txt' }))
   await details.findByRole('heading', { name: 'report.txt' })
   fireEvent.click(contents.getByRole('button', { name: 'Documents' }))

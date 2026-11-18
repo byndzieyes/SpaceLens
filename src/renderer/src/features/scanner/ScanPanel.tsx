@@ -7,9 +7,11 @@ import { formatBytes } from '../../lib/storage'
 const counts = new Intl.NumberFormat('en-US')
 
 export function ScanPanel({
-  scanner
+  scanner,
+  onOpenExplorer
 }: {
   scanner: ReturnType<typeof useScanner>
+  onOpenExplorer?: () => void
 }): React.JSX.Element {
   const { scan, cancelling, pending, ready, notice, error } = scanner
   const running = scan?.session.status === 'running'
@@ -19,6 +21,12 @@ export function ScanPanel({
     status === 'completed' && scanner.snapshotUnavailable?.scanId === scan?.session.id
       ? scanner.snapshotUnavailable
       : null
+  const canBrowse =
+    ready &&
+    !pending &&
+    scan?.session.status === 'completed' &&
+    !unavailable &&
+    scanner.latestCompleted?.id === scan.session.id
   const label = cancelling
     ? 'Cancellation requested'
     : running
@@ -81,6 +89,11 @@ export function ScanPanel({
         {running && (
           <Button variant="secondary" onClick={scanner.cancel} disabled={!!cancelling}>
             {cancelling ? 'Cancelling…' : 'Cancel Scan'}
+          </Button>
+        )}
+        {canBrowse && onOpenExplorer && (
+          <Button variant="secondary" onClick={onOpenExplorer}>
+            Open in Explorer
           </Button>
         )}
       </div>

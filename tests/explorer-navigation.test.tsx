@@ -130,7 +130,7 @@ test('replacement resets navigation and selection', async () => {
   expect(result.current.selectedEntryId).toBeNull()
 })
 test.each(['ENTRY_NOT_FOUND', 'SNAPSHOT_EXPIRED', 'SNAPSHOT_UNAVAILABLE'] as const)(
-  'preserves %s and refreshes stale availability',
+  'preserves %s without replacing the current snapshot until a refresh',
   async (code) => {
     const { result } = await mount()
     const error = { code, message: 'Original message' }
@@ -138,7 +138,7 @@ test.each(['ENTRY_NOT_FOUND', 'SNAPSHOT_EXPIRED', 'SNAPSHOT_UNAVAILABLE'] as con
     await act(() => result.current.navigateToDirectory('child'))
     expect(result.current.error).toEqual(error)
     expect(result.current.currentDirectoryId).toBe('root')
-    expect(api.getScanSnapshot).toHaveBeenCalledTimes(code === 'ENTRY_NOT_FOUND' ? 1 : 2)
+    expect(api.getScanSnapshot).toHaveBeenCalledOnce()
   }
 )
 test('ignores out-of-order navigation and responses from a replaced snapshot', async () => {

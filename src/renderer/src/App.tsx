@@ -6,8 +6,7 @@ import { ExplorerPage } from './pages/ExplorerPage'
 import { InsightsPage } from './pages/InsightsPage'
 import { HistoryPage } from './pages/HistoryPage'
 
-const pageComponents: Record<PageId, ComponentType> = {
-  overview: OverviewPage,
+const pageComponents: Record<Exclude<PageId, 'overview'>, ComponentType> = {
   explorer: ExplorerPage,
   insights: InsightsPage,
   history: HistoryPage
@@ -15,11 +14,11 @@ const pageComponents: Record<PageId, ComponentType> = {
 
 function App(): React.JSX.Element {
   const [activePage, setActivePage] = useState<PageId>('overview')
-  const Page = pageComponents[activePage]
+  const Page = activePage === 'overview' ? null : pageComponents[activePage]
 
   return (
     <AppShell activePage={activePage} onNavigate={setActivePage}>
-      <Page />
+      {Page ? <Page /> : <OverviewPage onOpenExplorer={() => setActivePage('explorer')} />}
     </AppShell>
   )
 }

@@ -7,7 +7,11 @@ import { RecentScans } from '../features/overview/RecentScans'
 import { ScanPanel } from '../features/scanner/ScanPanel'
 import { useScanner } from '../features/scanner/useScanner'
 
-export function OverviewPage(): React.JSX.Element {
+export function OverviewPage({
+  onOpenExplorer
+}: {
+  onOpenExplorer?: () => void
+}): React.JSX.Element {
   const scanner = useScanner()
   return (
     <div className="space-y-8 sm:space-y-10">
@@ -29,7 +33,7 @@ export function OverviewPage(): React.JSX.Element {
         </div>
       </header>
 
-      <ScanPanel scanner={scanner} />
+      <ScanPanel scanner={scanner} onOpenExplorer={onOpenExplorer} />
 
       <section aria-labelledby="storage-devices-title" className="space-y-4">
         <div className="flex flex-wrap items-center gap-3">

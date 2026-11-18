@@ -42,6 +42,7 @@ export function useExplorer(): ExplorerState & {
     setState(next)
   }
   const refreshSnapshot = async (): Promise<void> => {
+    if (!mounted.current) return
     const ticket = ++sequence.current
     publish({ ...current.current, loading: true, error: null })
     try {
@@ -83,7 +84,11 @@ export function useExplorer(): ExplorerState & {
   useEffect(() => {
     const requests = sequence
     mounted.current = true
-    void refreshSnapshot()
+    const ticket = requests.current
+    // A discarded Strict Mode mount does not need its own availability request.
+    queueMicrotask(() => {
+      if (requests.current === ticket) void refreshSnapshot()
+    })
     return () => {
       mounted.current = false
       requests.current++
@@ -97,7 +102,7 @@ export function useExplorer(): ExplorerState & {
     mode: 'new' | 'back' | 'forward' = 'new'
   ): Promise<void> => {
     const before = current.current
-    if (before.availability?.status !== 'available') return
+    if (!mounted.current || before.availability?.status !== 'available') return
     const snapshot = before.availability.snapshot
     const oldId = before.breadcrumbs.at(-1)?.id
     const ticket = ++sequence.current
@@ -165,11 +170,6 @@ export function useExplorer(): ExplorerState & {
               message: 'Directory could not be loaded. Retry the request.'
             }
       publish({ ...before, loading: false, error: failure })
-      if (failure.code === 'SNAPSHOT_EXPIRED' || failure.code === 'SNAPSHOT_UNAVAILABLE') {
-        await refreshSnapshot()
-        if (mounted.current && sequence.current === ticket + 1)
-          publish({ ...current.current, error: current.current.error ?? failure })
-      }
     }
   }
   return {

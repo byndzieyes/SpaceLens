@@ -38,8 +38,11 @@ test('renders the Explorer heading and four named workspace panels', () => {
   }
 })
 
-test('shows honest empty states without scan requests, paths, or file rows', () => {
+test('shows resolved empty states without scan requests, paths, or file rows', async () => {
   const { container } = render(<ExplorerPage />)
+  expect(screen.getByRole('status')).toHaveTextContent('Loading snapshot…')
+  expect(screen.queryByText('No directories displayed')).not.toBeInTheDocument()
+  await screen.findByText(/No published snapshot yet/)
   for (const text of [
     'No directory displayed',
     'No directories displayed',
@@ -55,25 +58,39 @@ test('shows honest empty states without scan requests, paths, or file rows', () 
   expect(api.listScanDirectory).not.toHaveBeenCalled()
 })
 
-test('reserves navigation and pagination with disabled, named controls', () => {
+test('a failed availability check stays distinct from an empty result and can be refreshed', async () => {
+  vi.mocked(api.getScanSnapshot).mockRejectedValueOnce(new Error('Disconnected'))
+  render(<ExplorerPage />)
+  expect(await screen.findByRole('alert')).toHaveTextContent(/Use Refresh snapshot/)
+  expect(screen.queryByText(/No published snapshot yet/)).not.toBeInTheDocument()
+  expect(screen.queryByText('No directories displayed')).not.toBeInTheDocument()
+  expect(api.listScanDirectory).not.toHaveBeenCalled()
+  expect(api.getScanDirectoryTreemap).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Refresh snapshot' }))
+  await screen.findByText(/No published snapshot yet/)
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(api.getScanSnapshot).toHaveBeenCalledTimes(2)
+})
+
+test('keeps navigation disabled until availability resolves and disables empty pagination', async () => {
   render(<ExplorerPage />)
   const navigation = within(screen.getByRole('group', { name: 'Directory navigation' }))
   for (const name of ['Back', 'Forward', 'Up']) {
     expect(navigation.getByRole('button', { name })).toBeDisabled()
   }
-  expect(screen.getByText('Loading snapshot?')).toBeVisible()
-  const pagination = within(screen.getByRole('group', { name: 'Directory contents pagination' }))
+  expect(screen.getByText('Loading snapshot…')).toBeVisible()
+  const pagination = within(
+    await screen.findByRole('group', { name: 'Directory contents pagination' })
+  )
   for (const name of ['Previous page', 'Next page']) {
     expect(pagination.getByRole('button', { name })).toBeDisabled()
   }
-  expect(screen.getAllByRole('button').every((button) => button.hasAttribute('disabled'))).toBe(
-    true
-  )
+  expect(screen.getByRole('button', { name: 'Refresh snapshot' })).toBeEnabled()
 })
 
-test('provides an accessible table with contract-backed columns and a readable empty description', () => {
+test('provides an accessible table with contract-backed columns and a readable empty description', async () => {
   render(<ExplorerPage />)
-  const table = screen.getByRole('table', {
+  const table = await screen.findByRole('table', {
     name: 'Files and directories in the displayed directory'
   })
   expect(
@@ -111,6 +128,7 @@ test('starts on Overview and switches to Explorer and back using existing naviga
     'page'
   )
   expect(screen.queryByRole('heading', { name: 'Storage Overview' })).not.toBeInTheDocument()
+  await screen.findByText(/No published snapshot yet/)
   expect(api.getScanState).toHaveBeenCalledTimes(1)
   expect(api.getScanSnapshot).toHaveBeenCalledOnce()
   expect(api.getScanEntry).not.toHaveBeenCalled()
