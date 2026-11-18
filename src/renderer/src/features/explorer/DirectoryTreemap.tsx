@@ -1,4 +1,11 @@
-import { useEffect, useState } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+  type ComponentProps,
+  type RefObject
+} from 'react'
 import type { FileEntry } from '../../../../shared/scan'
 import { MAX_SCAN_DIRECTORY_PAGE_SIZE } from '../../../../shared/snapshot'
 import { Button } from '../../components/ui/Button'
@@ -6,7 +13,9 @@ import { listExplorerDirectoryPage } from './data'
 import { createTreemapData, type TreemapData } from './treemapData'
 import { Treemap } from './Treemap'
 
-interface Props {
+type Interactions = Omit<ComponentProps<typeof Treemap>, 'data'>
+
+type Props = Interactions & {
   scanId: string | null
   directory: FileEntry | null
 }
@@ -16,14 +25,23 @@ type State =
   | { status: 'error'; code: string; message: string }
   | { status: 'ready'; data: TreemapData }
 
-export function DirectoryTreemap({ scanId, directory }: Props): React.JSX.Element {
+export function DirectoryTreemap({ scanId, directory, ...interactions }: Props): React.JSX.Element {
+  const focusTarget = useRef<HTMLDivElement>(null)
   return (
-    <div className="mt-4 min-h-64 min-w-0 flex-1 [overflow-wrap:anywhere]">
+    <div
+      ref={focusTarget}
+      role="group"
+      aria-label="Treemap visualization"
+      tabIndex={-1}
+      className="mt-4 min-h-64 min-w-0 flex-1 [overflow-wrap:anywhere]"
+    >
       {scanId && directory ? (
         <TreemapRequest
           key={JSON.stringify([scanId, directory.id])}
           scanId={scanId}
           directory={directory}
+          focusTarget={focusTarget}
+          {...interactions}
         />
       ) : (
         <p className="py-6 text-sm text-text-secondary">
@@ -36,13 +54,26 @@ export function DirectoryTreemap({ scanId, directory }: Props): React.JSX.Elemen
 
 function TreemapRequest({
   scanId,
-  directory
-}: {
+  directory,
+  focusTarget,
+  ...interactions
+}: Interactions & {
   scanId: string
   directory: FileEntry
+  focusTarget: RefObject<HTMLDivElement | null>
 }): React.JSX.Element {
   const [state, setState] = useState<State>({ status: 'loading' })
   const [attempt, setAttempt] = useState(0)
+  useLayoutEffect(
+    () => () => {
+      const target = focusTarget.current
+      const focused = target?.ownerDocument.activeElement
+      // Keep the next Tab in this panel after a focused tile is removed.
+      if (target && focused !== target && target.contains(focused ?? null))
+        target.focus({ preventScroll: true })
+    },
+    [focusTarget]
+  )
   useEffect(() => {
     let active = true
     queueMicrotask(async () => {
@@ -159,5 +190,5 @@ function TreemapRequest({
         )}
       </div>
     )
-  return <Treemap data={state.data} />
+  return <Treemap data={state.data} {...interactions} />
 }

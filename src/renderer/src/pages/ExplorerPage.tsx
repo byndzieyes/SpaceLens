@@ -174,6 +174,10 @@ export function ExplorerPage(): React.JSX.Element {
                 : null
             }
             directory={explorer.breadcrumbs.at(-1) ?? null}
+            selectedEntryId={explorer.selectedEntryId}
+            onSelect={explorer.selectEntry}
+            onNavigate={explorer.navigateToDirectory}
+            disabled={explorer.loading}
           />
         </ExplorerPanel>
 
