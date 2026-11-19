@@ -78,7 +78,7 @@ test.each([
   expect(getEntry).not.toHaveBeenCalled()
 })
 
-test('loads only the selected entry and shows file metadata with consistent UTC timestamps', async () => {
+test('shows local timestamps with preserved UTC details', async () => {
   render(<DetailsPanel {...props} />)
   expect(screen.getByRole('status')).toHaveTextContent('Loading item details')
   await screen.findByRole('heading', { name: 'report.txt', level: 4 })
@@ -87,8 +87,18 @@ test('loads only the selected entry and shows file metadata with consistent UTC 
   for (const value of ['file', 'Logical size', '1.5 KB', '/root/report.txt', 'Created', 'Modified'])
     expect(panel.getByText(value)).toBeVisible()
   expect(panel.getByText('1.5 KB')).toHaveAttribute('title', '1,500 bytes')
-  expect(panel.getByText(/12:30:00 PM UTC/)).toHaveAttribute('datetime', file.createdAt)
-  expect(panel.getByText(/1:30:00 PM UTC/)).toHaveAttribute('datetime', file.modifiedAt)
+  const localDateTime = new Intl.DateTimeFormat(undefined, {
+    dateStyle: 'medium',
+    timeStyle: 'short'
+  })
+  for (const [stored, utc] of [
+    ['2026-11-16T12:30:00Z', '2026-11-16T12:30:00.000Z'],
+    ['2026-11-16T15:30:00+02:00', '2026-11-16T13:30:00.000Z']
+  ]) {
+    const timestamp = panel.getByTitle(utc)
+    expect(timestamp).toHaveAttribute('datetime', stored)
+    expect(timestamp).toHaveTextContent(localDateTime.format(new Date(stored)))
+  }
 })
 
 test('shows directory aggregation and unavailable timestamps without inferring metadata', async () => {
@@ -178,17 +188,26 @@ test('unchanged selection avoids duplicate requests during loading and after suc
 })
 
 test.each(['ENTRY_NOT_FOUND', 'SNAPSHOT_EXPIRED', 'SNAPSHOT_UNAVAILABLE'] as const)(
-  'preserves %s and retries the same selected entry',
+  'offers the appropriate recovery for %s in Details',
   async (code) => {
     getEntry.mockResolvedValueOnce({ ok: false, error: { code, message: 'Original failure' } })
-    render(<DetailsPanel {...props} />)
+    const refresh = vi.fn()
+    render(<DetailsPanel {...props} onRefresh={refresh} />)
     expect(await screen.findByRole('alert')).toHaveTextContent(`${code}: Original failure`)
     expect(screen.queryByText('No item selected')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'Retry item details' }))
-    expect(screen.getByRole('status')).toBeVisible()
-    await screen.findByRole('heading', { name: 'report.txt' })
-    expect(getEntry).toHaveBeenCalledTimes(2)
-    expect(getEntry).toHaveBeenLastCalledWith({ scanId: 'published', entryId: 'file' })
+    if (code === 'ENTRY_NOT_FOUND') {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry item details' }))
+      expect(screen.getByRole('status')).toBeVisible()
+      expect(screen.getByRole('group', { name: 'Item details' })).toHaveFocus()
+      await screen.findByRole('heading', { name: 'report.txt' })
+      expect(getEntry).toHaveBeenCalledTimes(2)
+      expect(getEntry).toHaveBeenLastCalledWith({ scanId: 'published', entryId: 'file' })
+    } else {
+      expect(screen.getByRole('alert')).toHaveTextContent('Use Refresh snapshot')
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh snapshot for Details' }))
+      expect(refresh).toHaveBeenCalledOnce()
+      expect(getEntry).toHaveBeenCalledOnce()
+    }
   }
 )
 

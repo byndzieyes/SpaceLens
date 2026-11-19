@@ -3,7 +3,8 @@ import { DetailsPanel } from '../features/explorer/DetailsPanel'
 import { DirectoryTreemap } from '../features/explorer/DirectoryTreemap'
 import { useExplorer } from '../features/explorer/useExplorer'
 import { DirectoryTree } from '../features/explorer/DirectoryTree'
-import type { ReactNode } from 'react'
+import { isStaleSnapshotError } from '../features/explorer/data'
+import { useRef, type ReactNode } from 'react'
 import { ArrowLeft, ArrowRight, ArrowUp, FolderTree } from 'lucide-react'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
@@ -34,6 +35,28 @@ export function ExplorerPage(): React.JSX.Element {
   const { availability, error, loading } = explorer
   const snapshot = availability?.status === 'available' ? availability.snapshot : null
   const scanId = snapshot?.entries.scanId ?? null
+  const breadcrumb = useRef<HTMLElement>(null)
+  const refreshControl = useRef<HTMLButtonElement>(null)
+  const refresh = (): void => {
+    if (loading) return
+    refreshControl.current?.focus()
+    void explorer.refreshSnapshot()
+  }
+  const navigation = [
+    { label: 'Back', disabled: !explorer.back.length, activate: explorer.goBack, Icon: ArrowLeft },
+    {
+      label: 'Forward',
+      disabled: !explorer.forward.length,
+      activate: explorer.goForward,
+      Icon: ArrowRight
+    },
+    {
+      label: 'Up',
+      disabled: explorer.breadcrumbs.length < 2,
+      activate: explorer.goUp,
+      Icon: ArrowUp
+    }
+  ]
   return (
     <div className="min-w-0 space-y-5">
       <header className="space-y-2">
@@ -49,36 +72,32 @@ export function ExplorerPage(): React.JSX.Element {
         aria-describedby="explorer-navigation-notice"
         className="flex min-w-0 flex-wrap items-center gap-3 rounded-xl border border-border bg-surface p-3"
       >
-        <div className="flex shrink-0 gap-1">
+        <div className="flex max-w-full flex-wrap gap-1">
+          {navigation.map(({ label, disabled, activate, Icon }) => (
+            <Button
+              key={label}
+              variant="secondary"
+              aria-disabled={loading || disabled}
+              tabIndex={loading || disabled ? -1 : undefined}
+              onClick={() => {
+                if (!loading && !disabled) void activate()
+              }}
+              aria-label={label}
+              title={label}
+              className="px-3 aria-disabled:opacity-50"
+            >
+              <Icon size={16} aria-hidden="true" />
+            </Button>
+          ))}
           <Button
+            ref={refreshControl}
             variant="secondary"
-            disabled={explorer.loading || !explorer.back.length}
-            onClick={() => void explorer.goBack()}
-            aria-label="Back"
-            title="Back to the previous directory"
-            className="px-3"
+            aria-disabled={loading}
+            tabIndex={loading ? -1 : undefined}
+            className="aria-disabled:opacity-50"
+            onClick={refresh}
           >
-            <ArrowLeft size={16} aria-hidden="true" />
-          </Button>
-          <Button
-            variant="secondary"
-            disabled={explorer.loading || !explorer.forward.length}
-            onClick={() => void explorer.goForward()}
-            aria-label="Forward"
-            title="Forward to the next directory in history"
-            className="px-3"
-          >
-            <ArrowRight size={16} aria-hidden="true" />
-          </Button>
-          <Button
-            variant="secondary"
-            disabled={explorer.loading || explorer.breadcrumbs.length < 2}
-            onClick={() => void explorer.goUp()}
-            aria-label="Up"
-            title="Up to the parent directory"
-            className="px-3"
-          >
-            <ArrowUp size={16} aria-hidden="true" />
+            Refresh snapshot
           </Button>
         </div>
         <div
@@ -86,21 +105,38 @@ export function ExplorerPage(): React.JSX.Element {
           className="min-w-0 flex-1 basis-48 rounded-md border border-separator bg-background/50 px-3 py-2"
         >
           {explorer.breadcrumbs.length ? (
-            <nav aria-label="Breadcrumb" className="overflow-x-auto">
-              <ol className="flex items-center gap-2 whitespace-nowrap">
+            <nav
+              ref={breadcrumb}
+              aria-label="Breadcrumb"
+              tabIndex={-1}
+              className="max-h-[20em] overflow-y-auto rounded-sm scrollbar-none focus-visible:-outline-offset-2"
+            >
+              <ol className="flex flex-wrap items-baseline gap-x-2 gap-y-1 [overflow-wrap:anywhere]">
                 {explorer.breadcrumbs.map((entry, index) => (
-                  <li key={entry.id}>
-                    {index > 0 && <span aria-hidden="true"> / </span>}
+                  <li key={entry.id} className="flex min-w-0 items-baseline gap-2">
+                    {index > 0 && (
+                      <span aria-hidden="true" className="text-text-secondary">
+                        /
+                      </span>
+                    )}
                     {index === explorer.breadcrumbs.length - 1 ? (
-                      <span aria-current="page" title={entry.path}>
+                      <span
+                        aria-current="page"
+                        title={entry.path}
+                        className="min-w-0 font-semibold"
+                      >
                         {entry.name || entry.path}
                       </span>
                     ) : (
                       <button
                         type="button"
                         disabled={explorer.loading}
-                        className="text-accent hover:underline"
-                        onClick={() => void explorer.navigateToDirectory(entry.id)}
+                        className="min-w-0 rounded-sm px-1 text-left text-accent hover:underline focus-visible:-outline-offset-2"
+                        onClick={(event) => {
+                          if (event.currentTarget === document.activeElement)
+                            breadcrumb.current?.focus({ preventScroll: true })
+                          void explorer.navigateToDirectory(entry.id)
+                        }}
                         title={entry.path}
                       >
                         {entry.name || entry.path}
@@ -138,9 +174,7 @@ export function ExplorerPage(): React.JSX.Element {
       {error && (
         <p role="alert" className="text-error [overflow-wrap:anywhere]">
           {error.code}: {error.message}
-          {(!availability ||
-            error.code === 'SNAPSHOT_EXPIRED' ||
-            error.code === 'SNAPSHOT_UNAVAILABLE') &&
+          {(!availability || isStaleSnapshotError(error.code)) &&
             ' Use Refresh snapshot to check which results are available.'}
         </p>
       )}
@@ -152,14 +186,7 @@ export function ExplorerPage(): React.JSX.Element {
           A newer scan has summary-only results. Browsing the retained snapshot.
         </p>
       )}
-      <Button
-        variant="secondary"
-        disabled={explorer.loading}
-        onClick={() => void explorer.refreshSnapshot()}
-      >
-        Refresh snapshot
-      </Button>
-      <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-[11rem_minmax(0,1fr)] xl:grid-cols-[minmax(11rem,1fr)_minmax(0,2fr)_minmax(12rem,1fr)]">
+      <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-[13rem_minmax(0,1fr)] xl:grid-cols-[minmax(12rem,1fr)_minmax(0,2fr)_minmax(12rem,1fr)]">
         <ExplorerPanel id="explorer-tree-title" title="Directory Tree">
           {snapshot ? (
             <DirectoryTree
@@ -167,9 +194,10 @@ export function ExplorerPage(): React.JSX.Element {
               currentDirectoryId={explorer.currentDirectoryId}
               navigationDisabled={explorer.loading}
               onNavigate={explorer.navigateToDirectory}
+              onRefresh={refresh}
             />
           ) : availability ? (
-            <div className="min-h-40 flex-1 overflow-y-auto pt-6 md:max-h-96">
+            <div className="min-h-40 flex-1 overflow-y-auto pt-6 scrollbar-none md:max-h-96">
               <FolderTree size={24} className="mb-4 text-text-secondary" aria-hidden="true" />
               <p className="text-sm font-medium">No directories displayed</p>
               <p className="mt-2 text-sm text-text-secondary">
@@ -188,6 +216,7 @@ export function ExplorerPage(): React.JSX.Element {
               onSelect={explorer.selectEntry}
               onNavigate={explorer.navigateToDirectory}
               disabled={explorer.loading}
+              onRefresh={refresh}
             />
           )}
         </ExplorerPanel>
@@ -198,7 +227,12 @@ export function ExplorerPage(): React.JSX.Element {
           className="md:col-span-2 xl:col-span-1"
         >
           {availability && (
-            <DetailsPanel scanId={scanId} selectedEntryId={explorer.selectedEntryId} />
+            <DetailsPanel
+              scanId={scanId}
+              selectedEntryId={explorer.selectedEntryId}
+              disabled={loading}
+              onRefresh={refresh}
+            />
           )}
         </ExplorerPanel>
       </div>
@@ -212,6 +246,7 @@ export function ExplorerPage(): React.JSX.Element {
             disabled={explorer.loading}
             onSelect={explorer.selectEntry}
             onNavigate={explorer.navigateToDirectory}
+            onRefresh={refresh}
           />
         )}
       </ExplorerPanel>

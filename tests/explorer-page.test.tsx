@@ -75,17 +75,22 @@ test('a failed availability check stays distinct from an empty result and can be
 test('keeps navigation disabled until availability resolves and disables empty pagination', async () => {
   render(<ExplorerPage />)
   const navigation = within(screen.getByRole('group', { name: 'Directory navigation' }))
-  for (const name of ['Back', 'Forward', 'Up']) {
-    expect(navigation.getByRole('button', { name })).toBeDisabled()
+  for (const name of ['Back', 'Forward', 'Up', 'Refresh snapshot']) {
+    const control = navigation.getByRole('button', { name })
+    expect(control).toHaveAttribute('aria-disabled', 'true')
+    expect(control).toHaveAttribute('tabindex', '-1')
   }
   expect(screen.getByText('Loading snapshot…')).toBeVisible()
   const pagination = within(
     await screen.findByRole('group', { name: 'Directory contents pagination' })
   )
   for (const name of ['Previous page', 'Next page']) {
-    expect(pagination.getByRole('button', { name })).toBeDisabled()
+    expect(pagination.getByRole('button', { name })).toHaveAttribute('aria-disabled', 'true')
   }
-  expect(screen.getByRole('button', { name: 'Refresh snapshot' })).toBeEnabled()
+  expect(navigation.getByRole('button', { name: 'Refresh snapshot' })).toHaveAttribute(
+    'aria-disabled',
+    'false'
+  )
 })
 
 test('provides an accessible table with contract-backed columns and a readable empty description', async () => {
@@ -103,7 +108,7 @@ test('provides an accessible table with contract-backed columns and a readable e
   }
   expect(within(table).getAllByRole('row')).toHaveLength(1)
   expect(within(table).queryByRole('cell')).not.toBeInTheDocument()
-  expect(table).toHaveAccessibleDescription(/Logical file sizes/)
+  expect(table).toHaveAccessibleDescription(/Press Space to select an entry/)
   expect(screen.getByRole('region', { name: 'Directory contents table' })).toHaveAttribute(
     'tabindex',
     '0'

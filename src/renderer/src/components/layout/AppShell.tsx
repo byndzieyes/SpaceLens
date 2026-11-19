@@ -31,7 +31,7 @@ export function AppShell({
           ref={mainRef}
           aria-labelledby="page-title"
           tabIndex={0}
-          className="min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-4 focus-visible:-outline-offset-2 sm:p-6"
+          className={`min-h-0 min-w-0 flex-1 overflow-y-auto overscroll-contain p-4 focus-visible:-outline-offset-2 sm:p-6 ${activePage === 'explorer' ? 'scrollbar-none' : ''}`}
         >
           <div className="mx-auto w-full max-w-6xl">{children}</div>
         </main>

@@ -4,6 +4,8 @@ import { formatBytes } from '../../lib/storage'
 import { treemapItemKey, type TreemapData } from './treemapData'
 import { calculateTreemap } from './treemapLayout'
 
+const TILE_COLORS = ['#405975', '#4b6668', '#625473', '#62694f', '#775b63']
+
 interface Props {
   data: TreemapData
   selectedEntryId: string | null
@@ -18,7 +20,7 @@ export function OtherSummary({ other }: { other: ScanTreemapOther }): React.JSX.
       Other groups {other.count.toLocaleString('en-US')} {other.count === 1 ? 'entry' : 'entries'}{' '}
       with {formatBytes(other.knownBytes)} in known sizes.
       {other.unknownCount > 0 &&
-        ` Sizes unavailable for ${other.unknownCount.toLocaleString('en-US')}.`}{' '}
+        ` Sizes unavailable for ${other.unknownCount.toLocaleString('en-US')} grouped ${other.unknownCount === 1 ? 'entry' : 'entries'}.`}{' '}
       Browse grouped entries in Directory Contents.
     </p>
   )
@@ -50,10 +52,16 @@ export function Treemap({
   }, [])
   const rectangles = useMemo(
     () =>
-      calculateTreemap(data, size.width, size.height).flatMap((rectangle) => {
+      calculateTreemap(data, size.width, size.height).flatMap((rectangle, index) => {
         const { width, height, item } = rectangle
         if (width <= 0 || height <= 0 || item.bytes === null) return []
-        return [{ ...rectangle, formattedSize: formatBytes(item.bytes) }]
+        return [
+          {
+            ...rectangle,
+            formattedSize: formatBytes(item.bytes),
+            fill: item.kind === 'other' ? '#475569' : TILE_COLORS[index % TILE_COLORS.length]
+          }
+        ]
       }),
     [data, size]
   )
@@ -67,7 +75,7 @@ export function Treemap({
     <figure
       aria-labelledby={`${id}-title`}
       aria-describedby={`${id}-description`}
-      className="min-w-0 space-y-3"
+      className="relative min-w-0 space-y-3"
     >
       <p id={`${id}-title`} className="sr-only">
         Storage distribution in {data.directory.name || data.directory.path}
@@ -82,18 +90,12 @@ export function Treemap({
           preserveAspectRatio="none"
           className="pointer-events-none block h-full w-full"
         >
-          {rectangles.map(({ item, x, y, width, height, formattedSize }, index) => {
+          {rectangles.map(({ item, x, y, width, height, formattedSize, fill }, index) => {
             const clip = `${id}-clip-${index}`
             const entry = item.kind === 'entry' ? item.entry : null
             return (
               <g key={treemapItemKey(item)} data-entry-id={entry?.id}>
-                <rect
-                  x={x}
-                  y={y}
-                  width={width}
-                  height={height}
-                  fill={entry ? (entry.type === 'directory' ? '#28515a' : '#34436b') : '#475569'}
-                />
+                <rect x={x} y={y} width={width} height={height} fill={fill} />
                 {width >= 80 && height >= 58 && (
                   <>
                     <defs>
@@ -138,7 +140,7 @@ export function Treemap({
             onBlur: () => setFocusedId(null)
           }
           const focusStyle =
-            'absolute focus-visible:-outline-offset-4 focus-visible:outline-dotted focus-visible:outline-text-primary'
+            'absolute focus-visible:z-10 focus-visible:-outline-offset-4 focus-visible:outline-2 focus-visible:outline-dotted focus-visible:outline-text-primary'
           const hoverStyle =
             tileKey === hoveredId
               ? 'after:pointer-events-none after:absolute after:inset-0.5 after:border after:border-dashed after:border-text-primary'
@@ -151,7 +153,7 @@ export function Treemap({
                 {...tile}
                 role="img"
                 tabIndex={0}
-                aria-label={`Other, summary of ${count} grouped entries, ${formattedSize} in known sizes${unknownCount ? `, ${unknownCount} sizes unavailable` : ''}. Browse grouped entries in Directory Contents.`}
+                aria-label={`Other, summary of ${count} grouped ${count === 1 ? 'entry' : 'entries'}, ${formattedSize} in known sizes${unknownCount ? `, ${unknownCount} ${unknownCount === 1 ? 'size' : 'sizes'} unavailable` : ''}. Browse grouped entries in Directory Contents.`}
                 className={`${focusStyle} ${hoverStyle}`}
               />
             )
@@ -188,7 +190,7 @@ export function Treemap({
       <div
         role="group"
         aria-label="Treemap entry information"
-        className="h-20 min-w-0 overflow-y-auto rounded-md bg-surface-elevated px-3 py-2 text-xs [overflow-wrap:anywhere]"
+        className="h-[9em] min-w-0 overflow-y-auto rounded-md bg-surface-elevated px-3 py-2 text-xs [overflow-wrap:anywhere] scrollbar-none sm:h-[8em]"
       >
         {context?.item.kind === 'other' ? (
           <>
@@ -197,7 +199,9 @@ export function Treemap({
           </>
         ) : context?.item.kind === 'entry' ? (
           <>
-            <p className="line-clamp-2 font-medium">{context.item.entry.name}</p>
+            <p className="line-clamp-2 font-medium" title={context.item.entry.name}>
+              {context.item.entry.name}
+            </p>
             <p className="mt-1 text-text-secondary">
               {context.item.entry.type}
               {' · '}
@@ -223,8 +227,9 @@ export function Treemap({
         {formatBytes(data.totalBytes)}. Files use logical sizes and directories use aggregated
         sizes.
         {data.unknownCount > 0 &&
-          ` Sizes unavailable or invalid for ${data.unknownCount} entries; excluded from the distribution.`}
-        {data.zeroCount > 0 && ` ${data.zeroCount} zero-byte entries have no area.`}
+          ` Sizes unavailable or invalid for ${data.unknownCount} ${data.unknownCount === 1 ? 'entry' : 'entries'}, excluded from the distribution.`}
+        {data.zeroCount > 0 &&
+          ` ${data.zeroCount} zero-byte ${data.zeroCount === 1 ? 'entry has' : 'entries have'} no area.`}
         {data.other && <OtherSummary other={data.other.aggregate} />}
         <span className="mt-1 block">
           Click or press Space to select. Double-click or press Enter to open a directory.

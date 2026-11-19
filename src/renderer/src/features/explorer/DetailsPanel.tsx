@@ -1,41 +1,43 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { File, Folder, Link } from 'lucide-react'
-import type { ScannerIpcResult } from '../../../../shared/ipc'
 import type { FileEntry } from '../../../../shared/scan'
-import { Button } from '../../components/ui/Button'
 import { formatBytes } from '../../lib/storage'
+import { ExplorerRequestError, type ExplorerRequestFailure } from './ExplorerRequestError'
 
 interface Props {
   scanId: string | null
   selectedEntryId: string | null
+  disabled?: boolean
+  onRefresh?: () => void
 }
 
 type DetailsState =
   | { status: 'loading' }
   | { status: 'loaded'; entry: FileEntry }
-  | {
-      status: 'error'
-      error:
-        | Extract<ScannerIpcResult<never>, { ok: false }>['error']
-        | { code: 'TRANSPORT_ERROR'; message: string }
-    }
+  | { status: 'error'; error: ExplorerRequestFailure }
 
-const dates = new Intl.DateTimeFormat('en-US', {
+const dates = new Intl.DateTimeFormat(undefined, {
   dateStyle: 'medium',
-  timeStyle: 'long',
-  timeZone: 'UTC'
+  timeStyle: 'short'
 })
 
 function Timestamp({ value }: { value: string | null }): React.JSX.Element {
-  const date = value === null ? null : new Date(value)
-  return date && Number.isFinite(date.getTime()) ? (
-    <time dateTime={value!}>{dates.format(date)}</time>
+  const date = value ? new Date(value) : null
+  return date && value && Number.isFinite(date.getTime()) ? (
+    <time dateTime={value} title={date.toISOString()}>
+      {dates.format(date)}
+    </time>
   ) : (
     <span className="text-text-secondary">Not available</span>
   )
 }
 
-export function DetailsPanel({ scanId, selectedEntryId }: Props): React.JSX.Element {
+export function DetailsPanel({
+  scanId,
+  selectedEntryId,
+  disabled,
+  onRefresh
+}: Props): React.JSX.Element {
   if (!scanId || !selectedEntryId)
     return (
       <div className="py-6 text-sm">
@@ -49,13 +51,21 @@ export function DetailsPanel({ scanId, selectedEntryId }: Props): React.JSX.Elem
       key={JSON.stringify([scanId, selectedEntryId])}
       scanId={scanId}
       entryId={selectedEntryId}
+      disabled={disabled}
+      onRefresh={onRefresh}
     />
   )
 }
 
-function EntryDetails({ scanId, entryId }: { scanId: string; entryId: string }): React.JSX.Element {
+function EntryDetails({
+  scanId,
+  entryId,
+  disabled,
+  onRefresh
+}: Pick<Props, 'disabled' | 'onRefresh'> & { scanId: string; entryId: string }): React.JSX.Element {
   const [state, setState] = useState<DetailsState>({ status: 'loading' })
   const [attempt, setAttempt] = useState(0)
+  const focusTarget = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     let active = true
@@ -88,28 +98,27 @@ function EntryDetails({ scanId, entryId }: { scanId: string; entryId: string }):
     }
   }, [scanId, entryId, attempt])
 
-  if (state.status === 'loading')
+  if (state.status !== 'loaded')
     return (
-      <p role="status" className="py-6 text-sm text-text-secondary">
-        Loading item details…
-      </p>
-    )
-
-  if (state.status === 'error')
-    return (
-      <div className="space-y-4 py-6">
-        <p role="alert" className="text-sm text-error [overflow-wrap:anywhere]">
-          {state.error.code}: {state.error.message}
-        </p>
-        <Button
-          variant="secondary"
-          onClick={() => {
-            setState({ status: 'loading' })
-            setAttempt((previous) => previous + 1)
-          }}
-        >
-          Retry item details
-        </Button>
+      <div ref={focusTarget} role="group" aria-label="Item details" tabIndex={-1} className="py-3">
+        {state.status === 'loading' ? (
+          <p role="status" className="py-3 text-sm text-text-secondary">
+            Loading item details…
+          </p>
+        ) : (
+          <ExplorerRequestError
+            error={state.error}
+            actionLabel="Retry item details"
+            refreshLabel="Refresh snapshot for Details"
+            disabled={disabled}
+            onRefresh={onRefresh}
+            onRetry={() => {
+              focusTarget.current?.focus({ preventScroll: true })
+              setState({ status: 'loading' })
+              setAttempt((previous) => previous + 1)
+            }}
+          />
+        )}
       </div>
     )
 
@@ -118,10 +127,11 @@ function EntryDetails({ scanId, entryId }: { scanId: string; entryId: string }):
   const size = entry.type === 'directory' ? entry.aggregatedSizeBytes : entry.sizeBytes
   return (
     <div
+      ref={focusTarget}
       role="region"
       aria-label="Selected item metadata"
       tabIndex={0}
-      className="min-w-0 max-h-96 space-y-5 overflow-y-auto pt-6 pr-1 text-sm [overflow-wrap:anywhere] focus-visible:-outline-offset-2"
+      className="min-w-0 space-y-5 pt-6 text-sm [overflow-wrap:anywhere] scrollbar-none focus-visible:-outline-offset-2 xl:max-h-96 xl:overflow-y-auto xl:pr-1"
     >
       <div className="flex min-w-0 items-start gap-3">
         <div className="shrink-0 rounded-lg bg-surface-elevated p-2 text-text-secondary">
@@ -150,7 +160,7 @@ function EntryDetails({ scanId, entryId }: { scanId: string; entryId: string }):
         )}
         <div>
           <dt className="text-xs text-text-secondary">Full path</dt>
-          <dd className="mt-1">{entry.path}</dd>
+          <dd className="mt-1 font-mono text-xs select-text">{entry.path}</dd>
         </div>
         <div>
           <dt className="text-xs text-text-secondary">Created</dt>

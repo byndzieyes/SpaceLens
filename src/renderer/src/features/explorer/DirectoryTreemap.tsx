@@ -8,15 +8,16 @@ import {
 } from 'react'
 import type { FileEntry } from '../../../../shared/scan'
 import { MAX_SCAN_TREEMAP_ENTRIES } from '../../../../shared/snapshot'
-import { Button } from '../../components/ui/Button'
 import { createTreemapData, type TreemapData } from './treemapData'
 import { Treemap, OtherSummary } from './Treemap'
+import { ExplorerRequestError } from './ExplorerRequestError'
 
 type Interactions = Omit<ComponentProps<typeof Treemap>, 'data'>
 
 type Props = Interactions & {
   scanId: string | null
   directory: FileEntry | null
+  onRefresh?: () => void
 }
 type State =
   | { status: 'loading' }
@@ -54,11 +55,13 @@ function TreemapRequest({
   scanId,
   directory,
   focusTarget,
+  onRefresh,
   ...interactions
 }: Interactions & {
   scanId: string
   directory: FileEntry
   focusTarget: RefObject<HTMLDivElement | null>
+  onRefresh?: () => void
 }): React.JSX.Element {
   const [state, setState] = useState<State>({ status: 'loading' })
   const [attempt, setAttempt] = useState(0)
@@ -138,20 +141,18 @@ function TreemapRequest({
     )
   if (state.status === 'error')
     return (
-      <div className="space-y-4 py-6">
-        <p role="alert" className="text-sm text-error">
-          {state.code}: {state.message}
-        </p>
-        <Button
-          variant="secondary"
-          onClick={() => {
-            setState({ status: 'loading' })
-            setAttempt((old) => old + 1)
-          }}
-        >
-          Retry treemap
-        </Button>
-      </div>
+      <ExplorerRequestError
+        error={state}
+        actionLabel="Retry treemap"
+        refreshLabel="Refresh snapshot for Treemap"
+        disabled={interactions.disabled}
+        onRefresh={onRefresh}
+        onRetry={() => {
+          focusTarget.current?.focus({ preventScroll: true })
+          setState({ status: 'loading' })
+          setAttempt((old) => old + 1)
+        }}
+      />
     )
   if (state.data.children.length === 0)
     return (
@@ -170,12 +171,15 @@ function TreemapRequest({
         </p>
         {state.data.unknownCount > 0 && (
           <p>
-            Sizes unavailable or invalid for {state.data.unknownCount} entries; no positive known
-            sizes are available.
+            Sizes unavailable or invalid for {state.data.unknownCount}{' '}
+            {state.data.unknownCount === 1 ? 'entry' : 'entries'}.
           </p>
         )}
         {state.data.zeroCount > 0 && (
-          <p>{state.data.zeroCount} entries have a known size of 0 B.</p>
+          <p>
+            {state.data.zeroCount} {state.data.zeroCount === 1 ? 'entry has' : 'entries have'} a
+            known size of 0 B.
+          </p>
         )}
         {state.data.other && <OtherSummary other={state.data.other.aggregate} />}
       </div>

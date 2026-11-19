@@ -8,6 +8,10 @@ import {
   type ScanSnapshotAvailability
 } from '../../../../shared/snapshot'
 
+export function isStaleSnapshotError(code?: string): boolean {
+  return code === 'SNAPSHOT_EXPIRED' || code === 'SNAPSHOT_UNAVAILABLE'
+}
+
 /** Availability at query time, not a guarantee that a later request will succeed. */
 export type ExplorerSnapshotState =
   | {

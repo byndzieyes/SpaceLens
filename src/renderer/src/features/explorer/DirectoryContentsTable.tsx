@@ -1,9 +1,10 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { File, Folder, Link } from 'lucide-react'
 import type { ScanDirectoryPage } from '../../../../shared/snapshot'
 import { Button } from '../../components/ui/Button'
 import { formatBytes } from '../../lib/storage'
-import { listExplorerDirectoryPage } from './data'
+import { isStaleSnapshotError, listExplorerDirectoryPage } from './data'
+import { ExplorerRequestError, type ExplorerRequestFailure } from './ExplorerRequestError'
 
 interface Props {
   scanId: string | null
@@ -12,10 +13,28 @@ interface Props {
   disabled?: boolean
   onSelect: (id: string | null) => void
   onNavigate: (id: string) => Promise<void>
+  onRefresh?: () => void
 }
 
+const PAGE_SIZE = 100
+
 export function DirectoryContentsTable(props: Props): React.JSX.Element {
-  return <ContentsPage key={JSON.stringify([props.scanId, props.directoryId])} {...props} />
+  const focusTarget = useRef<HTMLDivElement>(null)
+  return (
+    <div
+      ref={focusTarget}
+      role="group"
+      aria-label="Contents panel"
+      tabIndex={-1}
+      className="min-w-0"
+    >
+      <ContentsPage
+        key={JSON.stringify([props.scanId, props.directoryId])}
+        focusTarget={focusTarget}
+        {...props}
+      />
+    </div>
+  )
 }
 
 function ContentsPage({
@@ -24,16 +43,26 @@ function ContentsPage({
   selectedEntryId,
   disabled,
   onSelect,
-  onNavigate
-}: Props): React.JSX.Element {
+  onNavigate,
+  onRefresh,
+  focusTarget
+}: Props & { focusTarget: RefObject<HTMLDivElement | null> }): React.JSX.Element {
   const [page, setPage] = useState<ScanDirectoryPage | null>(null)
   const [offset, setOffset] = useState(0)
   const [loading, setLoading] = useState(!!scanId && !!directoryId)
-  const [error, setError] = useState<string | null>(null)
+  const [error, setError] = useState<ExplorerRequestFailure | null>(null)
   const pending = useRef(false)
   const sequence = useRef(0)
   const retryOffset = useRef(0)
   const description = useId()
+  useLayoutEffect(
+    () => () => {
+      const target = focusTarget.current
+      if (target?.contains(target.ownerDocument.activeElement))
+        target.focus({ preventScroll: true })
+    },
+    [focusTarget]
+  )
   const load = async (requested: number): Promise<void> => {
     if (!scanId || !directoryId || pending.current) return
     pending.current = true
@@ -44,18 +73,18 @@ function ContentsPage({
     try {
       const result = await listExplorerDirectoryPage(
         { scanId, entryId: directoryId },
-        { offset: requested, limit: 100 }
+        { offset: requested, limit: PAGE_SIZE }
       )
       if (ticket !== sequence.current) return
       if (!result.ok) {
-        setError(`${result.error.code}: ${result.error.message}`)
+        setError(result.error)
         return
       }
       setPage(result.value)
       setOffset(requested)
     } catch {
       if (ticket === sequence.current)
-        setError('TRANSPORT_ERROR: Directory contents could not be loaded.')
+        setError({ code: 'TRANSPORT_ERROR', message: 'Directory contents could not be loaded.' })
     } finally {
       if (ticket === sequence.current) {
         pending.current = false
@@ -83,11 +112,13 @@ function ContentsPage({
     onSelect(null)
     void load(next)
   }
+  const pagingDisabled = loading || !!disabled || isStaleSnapshotError(error?.code)
+  const previousDisabled = !page || pagingDisabled || offset === 0
+  const nextDisabled = !page || pagingDisabled || page.nextOffset === null
   return (
     <>
-      <p id={description} className="py-3 text-xs text-text-secondary">
-        Logical file sizes and aggregated directory sizes. Click or Space selects; double-click or
-        Enter opens a directory.
+      <p id={description} hidden>
+        Press Space to select an entry or Enter to open a directory.
       </p>
       <div
         role="region"
@@ -102,7 +133,7 @@ function ContentsPage({
           <caption className="sr-only">Files and directories in the displayed directory</caption>
           <thead className="border-b border-separator text-xs text-text-secondary">
             <tr>
-              <th scope="col" className="w-1/2 py-3 pr-3">
+              <th scope="col" className="w-1/2 py-3 pr-3 pl-2">
                 Name
               </th>
               <th scope="col" className="px-3 py-3">
@@ -136,17 +167,20 @@ function ContentsPage({
                   }}
                   className={`border-b border-separator ${selected ? 'bg-accent/10 text-accent' : 'hover:bg-surface-hover'}`}
                 >
-                  <td className="py-1 pr-3">
+                  <td
+                    className={`py-1 pr-3 ${selected ? 'border-l-2 border-l-accent pl-1.5 font-semibold' : 'pl-2'}`}
+                  >
                     <button
                       type="button"
-                      disabled={inactive}
+                      aria-disabled={inactive || undefined}
+                      tabIndex={inactive ? -1 : undefined}
                       aria-pressed={selected}
                       title={entry.name}
-                      className="flex w-full min-w-0 items-center gap-2 rounded py-2 text-left disabled:opacity-50"
+                      className="flex w-full min-w-0 items-center gap-2 rounded px-1 py-2 text-left aria-disabled:opacity-50 focus-visible:-outline-offset-2"
                       onKeyDown={(event) => {
                         if (event.key === 'Enter' && entry.type === 'directory') {
                           event.preventDefault()
-                          void onNavigate(entry.id)
+                          if (!inactive && !event.repeat) void onNavigate(entry.id)
                         }
                       }}
                     >
@@ -156,7 +190,7 @@ function ContentsPage({
                   </td>
                   <td className="px-3 py-3">{entry.type}</td>
                   <td
-                    className="py-3 pl-3 text-right tabular-nums"
+                    className="py-3 pl-3 text-right whitespace-nowrap tabular-nums"
                     title={
                       bytes === null ? 'Size unavailable' : `${bytes.toLocaleString('en-US')} bytes`
                     }
@@ -179,22 +213,19 @@ function ContentsPage({
         </p>
       )}
       {error && (
-        <div className="py-4">
-          <p role="alert" className="text-error [overflow-wrap:anywhere]">
-            {error}
-          </p>
-          <Button
-            variant="secondary"
-            disabled={loading || disabled}
-            onClick={() => {
-              const requested = retryOffset.current
-              if (requested !== offset) changePage(requested)
-              else void load(requested)
-            }}
-          >
-            Retry directory contents
-          </Button>
-        </div>
+        <ExplorerRequestError
+          error={error}
+          actionLabel="Retry directory contents"
+          refreshLabel="Refresh snapshot for Directory Contents"
+          disabled={loading || disabled}
+          onRefresh={onRefresh}
+          onRetry={() => {
+            focusTarget.current?.focus({ preventScroll: true })
+            const requested = retryOffset.current
+            if (requested !== offset) changePage(requested)
+            else void load(requested)
+          }}
+        />
       )}
       {!loading && !error && (!page || !page.entries.length) && (
         <p className="py-8 text-center text-text-secondary">
@@ -206,26 +237,36 @@ function ContentsPage({
         </p>
       )}
       <footer className="flex flex-wrap items-center justify-between gap-3 border-t border-separator pt-4">
-        <p className="text-xs text-text-secondary">
+        <p aria-live="polite" className="text-xs text-text-secondary">
           {page
-            ? `Page ${Math.floor(offset / 100) + 1} · ${page.totalCount.toLocaleString('en-US')} entries`
+            ? `Page ${Math.floor(offset / PAGE_SIZE) + 1} of ${Math.max(1, Math.ceil(page.totalCount / PAGE_SIZE))} · ${page.totalCount.toLocaleString('en-US')} entries`
             : 'No page loaded'}
         </p>
-        <div role="group" aria-label="Directory contents pagination" className="flex gap-2">
+        <div
+          role="group"
+          aria-label="Directory contents pagination"
+          className="flex flex-wrap gap-2"
+        >
           <Button
             variant="secondary"
             aria-label="Previous page"
-            disabled={!page || loading || disabled || offset === 0}
-            onClick={() => changePage(Math.max(0, offset - 100))}
+            aria-disabled={previousDisabled}
+            tabIndex={previousDisabled ? -1 : undefined}
+            className="aria-disabled:opacity-50"
+            onClick={() => {
+              if (!previousDisabled) changePage(offset - PAGE_SIZE)
+            }}
           >
             Previous
           </Button>
           <Button
             variant="secondary"
             aria-label="Next page"
-            disabled={!page || loading || disabled || page.nextOffset === null}
+            aria-disabled={nextDisabled}
+            tabIndex={nextDisabled ? -1 : undefined}
+            className="aria-disabled:opacity-50"
             onClick={() => {
-              if (page?.nextOffset != null) changePage(page.nextOffset)
+              if (!nextDisabled && page?.nextOffset != null) changePage(page.nextOffset)
             }}
           >
             Next

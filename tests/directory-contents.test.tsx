@@ -104,12 +104,18 @@ test('explicit pagination clears selection, respects nextOffset and retains just
     .mockResolvedValueOnce(response([file], 100, 101))
   render(<DirectoryContentsTable {...props} selectedEntryId="file" />)
   await screen.findByText('zero.txt')
-  fireEvent.click(screen.getByRole('button', { name: 'Next page' }))
+  const next = screen.getByRole('button', { name: 'Next page' })
+  next.focus()
+  fireEvent.click(next)
+  expect(next).toHaveFocus()
   await screen.findByText('Folder')
   expect(select).toHaveBeenCalledWith(null)
   expect(screen.queryByText('zero.txt')).not.toBeInTheDocument()
-  expect(screen.getByText(/Page 2.*101 entries/)).toBeVisible()
-  expect(screen.getByRole('button', { name: 'Next page' })).toBeDisabled()
+  expect(screen.getByText('Page 2 of 2 · 101 entries')).toBeVisible()
+  expect(next).toHaveAttribute('aria-disabled', 'true')
+  expect(next).toHaveFocus()
+  fireEvent.click(next)
+  expect(list).toHaveBeenCalledTimes(2)
   expect(list).toHaveBeenLastCalledWith({
     scanId: 'scan',
     entryId: 'root',
@@ -121,16 +127,26 @@ test('explicit pagination clears selection, respects nextOffset and retains just
   expect(list).toHaveBeenCalledTimes(3)
 })
 test.each(['SNAPSHOT_EXPIRED', 'SNAPSHOT_UNAVAILABLE', 'ENTRY_NOT_FOUND'] as const)(
-  'preserves %s and retries without claiming emptiness',
+  'offers the appropriate recovery for %s without claiming emptiness',
   async (code) => {
     list
       .mockResolvedValueOnce({ ok: false, error: { code, message: 'Original message' } })
       .mockResolvedValueOnce(response([]))
-    render(<DirectoryContentsTable {...props} />)
+    const refresh = vi.fn()
+    render(<DirectoryContentsTable {...props} onRefresh={refresh} />)
     expect(await screen.findByRole('alert')).toHaveTextContent(`${code}: Original message`)
     expect(screen.queryByText('This directory is empty.')).not.toBeInTheDocument()
-    fireEvent.click(screen.getByText('Retry directory contents'))
-    await screen.findByText('This directory is empty.')
+    if (code === 'ENTRY_NOT_FOUND') {
+      fireEvent.click(screen.getByText('Retry directory contents'))
+      await screen.findByText('This directory is empty.')
+    } else {
+      expect(screen.getByRole('alert')).toHaveTextContent('Use Refresh snapshot')
+      fireEvent.click(
+        screen.getByRole('button', { name: 'Refresh snapshot for Directory Contents' })
+      )
+      expect(refresh).toHaveBeenCalledOnce()
+      expect(list).toHaveBeenCalledOnce()
+    }
   }
 )
 test('transport failure on subsequent page keeps previous rows and retries that offset', async () => {
@@ -228,8 +244,11 @@ test('table navigation synchronizes breadcrumbs, history and visible tree highli
   const tree = within(screen.getByRole('region', { name: 'Directory Tree' }))
   await tree.findByRole('button', { name: 'Folder' })
   const contents = within(screen.getByRole('region', { name: 'Directory Contents' }))
-  fireEvent.doubleClick(contents.getByRole('button', { name: 'Folder' }))
+  const directory = contents.getByRole('button', { name: 'Folder' })
+  directory.focus()
+  fireEvent.keyDown(directory, { key: 'Enter' })
   await screen.findByText('This directory is empty.')
+  expect(contents.getByRole('group', { name: 'Contents panel' })).toHaveFocus()
   expect(tree.getByRole('button', { name: 'Folder' })).toHaveAttribute('aria-current', 'location')
   expect(
     within(screen.getByRole('navigation', { name: 'Breadcrumb' })).getByText('Folder')

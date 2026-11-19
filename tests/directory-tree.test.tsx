@@ -64,7 +64,11 @@ test('loads only on expansion, filters files and preserves separate navigation',
   mount()
   expect(list).not.toHaveBeenCalled()
   expect(screen.getByRole('button', { name: 'Root' })).toHaveAttribute('aria-current', 'location')
-  fireEvent.click(screen.getByRole('button', { name: 'Expand Root' }))
+  const expander = screen.getByRole('button', { name: 'Expand Root' })
+  expander.focus()
+  fireEvent.click(expander)
+  expect(expander).toHaveFocus()
+  expect(expander).toHaveAttribute('aria-expanded', 'true')
   await screen.findByRole('button', { name: 'Child' })
   expect(screen.queryByText('file.txt')).not.toBeInTheDocument()
   expect(navigate).not.toHaveBeenCalled()
@@ -90,8 +94,14 @@ test('file-only pages retain explicit next/previous paging without accumulation'
   await screen.findByText(/More entries are available/)
   expect(screen.queryByText('No subdirectories')).not.toBeInTheDocument()
   expect(list).toHaveBeenCalledTimes(1)
-  fireEvent.click(within(screen.getByRole('group', { name: 'Pages for Root' })).getByText('Next'))
+  const next = within(screen.getByRole('group', { name: 'Pages for Root' })).getByRole('button', {
+    name: 'Next'
+  })
+  next.focus()
+  fireEvent.click(next)
   await screen.findByRole('button', { name: 'Child' })
+  expect(next).toHaveFocus()
+  expect(screen.getByText('Page 2 of 3 · 201 entries')).toBeVisible()
   expect(list).toHaveBeenLastCalledWith({
     scanId: 'scan',
     entryId: 'root',
@@ -102,16 +112,25 @@ test('file-only pages retain explicit next/previous paging without accumulation'
   await screen.findByText(/More entries are available/)
   expect(screen.queryByRole('button', { name: 'Child' })).not.toBeInTheDocument()
 })
-test('reports complete empty listings and structured failures separately and retries', async () => {
-  list
-    .mockResolvedValueOnce({ ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Expired' } })
-    .mockResolvedValueOnce(page([]))
-  mount()
+test('offers snapshot refresh for expiration without retrying the expired tree', async () => {
+  list.mockResolvedValueOnce({ ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Expired' } })
+  const refresh = vi.fn()
+  render(
+    <DirectoryTree
+      snapshot={snapshot}
+      currentDirectoryId="root"
+      onNavigate={navigate}
+      onRefresh={refresh}
+    />
+  )
   fireEvent.click(screen.getByRole('button', { name: 'Expand Root' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('SNAPSHOT_EXPIRED: Expired')
   expect(screen.queryByText('No subdirectories')).not.toBeInTheDocument()
-  fireEvent.click(screen.getByText('Retry Root'))
-  await screen.findByText('No subdirectories')
+  fireEvent.click(
+    screen.getByRole('button', { name: 'Refresh snapshot for Root in Directory Tree' })
+  )
+  expect(refresh).toHaveBeenCalledOnce()
+  expect(list).toHaveBeenCalledOnce()
 })
 test('deduplicates pending expansion and ignores old-snapshot responses', async () => {
   let finish!: (value: Awaited<ReturnType<SpaceLensAPI['listScanDirectory']>>) => void
@@ -157,6 +176,12 @@ test('failed page changes retain directories and retry the requested offset', as
   expect(screen.getByText('Child')).toBeVisible()
   fireEvent.click(screen.getByText('Retry Root'))
   await screen.findByText('No directories on this page.')
+  const pagination = within(screen.getByRole('group', { name: 'Pages for Root' }))
+  expect(pagination.getByRole('button', { name: 'Previous' })).toHaveAttribute(
+    'aria-disabled',
+    'false'
+  )
+  expect(pagination.getByRole('button', { name: 'Next' })).toHaveAttribute('aria-disabled', 'true')
   expect(list).toHaveBeenLastCalledWith({
     scanId: 'scan',
     entryId: 'root',
@@ -175,6 +200,8 @@ test('nested nodes load independently and collapse releases descendants', async 
   await screen.findByText('Child')
   fireEvent.click(screen.getByRole('button', { name: 'Expand Child' }))
   await screen.findByText('No subdirectories')
+  expect(screen.queryByRole('group', { name: 'Pages for Root' })).not.toBeInTheDocument()
+  expect(screen.queryByRole('group', { name: 'Pages for Child' })).not.toBeInTheDocument()
   expect(list).toHaveBeenLastCalledWith({ scanId: 'scan', entryId: 'child', offset: 0, limit: 100 })
   fireEvent.click(screen.getByRole('button', { name: 'Collapse Root' }))
   expect(list).toHaveBeenCalledTimes(2)

@@ -275,17 +275,17 @@ test('distinguishes empty, zero-total, unknown-only, and mixed known/unknown siz
     view.rerender(<DirectoryTreemap {...props} />)
     await flush()
     if (entries[0].sizeBytes === 0) {
-      expect(screen.getByText('1 entries have a known size of 0 B.')).toBeVisible()
+      expect(screen.getByText('1 entry has a known size of 0 B.')).toBeVisible()
       expect(screen.queryByText(/Sizes unavailable/)).not.toBeInTheDocument()
     } else if (entries[0].sizeBytes === null) {
       expect(screen.getByText('No sizes available for this directory.')).toBeVisible()
-      expect(screen.getByText(/Sizes unavailable or invalid for 1 entries/)).toBeVisible()
+      expect(screen.getByText(/Sizes unavailable or invalid for 1 entry/)).toBeVisible()
     } else {
       expect(screen.getByRole('figure')).toBeVisible()
       expect(screen.getAllByRole('button')).toHaveLength(1)
       expect(screen.getByRole('button', { name: 'report.txt, file, 1 KB' })).toBeVisible()
-      expect(screen.getByText(/Sizes unavailable or invalid for 1 entries; excluded/)).toBeVisible()
-      expect(screen.getByText(/1 zero-byte entries have no area/)).toBeVisible()
+      expect(screen.getByText(/Sizes unavailable or invalid for 1 entry, excluded/)).toBeVisible()
+      expect(screen.getByText(/1 zero-byte entry has no area/)).toBeVisible()
     }
   }
 })
@@ -295,15 +295,26 @@ test.each([
   'SNAPSHOT_UNAVAILABLE',
   'ENTRY_NOT_FOUND',
   'SIZE_OVERFLOW'
-] as const)('preserves %s and retries without claiming an empty directory', async (code) => {
-  list.mockResolvedValueOnce({ ok: false, error: { code, message: 'Original error' } })
-  render(<DirectoryTreemap {...props} />)
-  expect(await screen.findByRole('alert')).toHaveTextContent(`${code}: Original error`)
-  expect(screen.queryByText(/This directory is empty/)).not.toBeInTheDocument()
-  fireEvent.click(screen.getByRole('button', { name: 'Retry treemap' }))
-  await screen.findByRole('figure')
-  expect(list).toHaveBeenCalledTimes(2)
-})
+] as const)(
+  'offers the appropriate recovery for %s without claiming an empty directory',
+  async (code) => {
+    list.mockResolvedValueOnce({ ok: false, error: { code, message: 'Original error' } })
+    const refresh = vi.fn()
+    render(<DirectoryTreemap {...props} onRefresh={refresh} />)
+    expect(await screen.findByRole('alert')).toHaveTextContent(`${code}: Original error`)
+    expect(screen.queryByText(/This directory is empty/)).not.toBeInTheDocument()
+    if (code === 'SNAPSHOT_EXPIRED' || code === 'SNAPSHOT_UNAVAILABLE') {
+      expect(screen.getByRole('alert')).toHaveTextContent('Use Refresh snapshot')
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh snapshot for Treemap' }))
+      expect(refresh).toHaveBeenCalledOnce()
+      expect(list).toHaveBeenCalledOnce()
+    } else {
+      fireEvent.click(screen.getByRole('button', { name: 'Retry treemap' }))
+      await screen.findByRole('figure')
+      expect(list).toHaveBeenCalledTimes(2)
+    }
+  }
+)
 
 test('transport failures are recoverable and invalid summary identity does not produce a chart', async () => {
   list
