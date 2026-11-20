@@ -1,13 +1,23 @@
 import { DatabaseSync, type SQLOutputValue, type StatementSync } from 'node:sqlite'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
+  isSnapshotId,
+  validateBuildingScan,
+  validateScanPublication,
   validateStorageBatch,
+  type BuildingScan,
+  type CompletedScan,
   type FinalizedDirectory,
   type StorageBatchOperation
 } from './payloads'
+import { prepareSnapshotValidation } from './publication'
 import { initializeSchema } from './schema'
 
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
+const SELECT_SCAN = `
+  SELECT id, root_path, status, started_at, finished_at, total_bytes, file_count,
+         directory_count, error_count FROM scans
+`
 
 function bindInteger(value: number, column: string): bigint {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -39,6 +49,32 @@ function readFilesystemText(value: SQLOutputValue, column: string): string {
     throw new TypeError(`Stored ${column} must be a UTF-16 BLOB.`)
   }
   return Buffer.from(value).swap16().toString('utf16le')
+}
+
+function readScan(row: Record<string, SQLOutputValue>): ScanSession {
+  const scan = {
+    id: readText(row.id, 'scan ID'),
+    rootPath: readFilesystemText(row.root_path, 'root path'),
+    startedAt: readText(row.started_at, 'startedAt'),
+    summary: {
+      totalBytes: readInteger(row.total_bytes, 'totalBytes'),
+      fileCount: readInteger(row.file_count, 'fileCount'),
+      directoryCount: readInteger(row.directory_count, 'directoryCount'),
+      errorCount: readInteger(row.error_count, 'errorCount')
+    }
+  }
+
+  switch (row.status) {
+    case 'running':
+      if (row.finished_at !== null) throw new Error('Stored running scan has a finish time.')
+      return { ...scan, status: row.status, finishedAt: null }
+    case 'completed':
+    case 'cancelled':
+    case 'failed':
+      return { ...scan, status: row.status, finishedAt: readText(row.finished_at, 'finishedAt') }
+    default:
+      throw new Error('Stored scan has an invalid status.')
+  }
 }
 
 function inTransaction(connection: DatabaseSync, operation: () => undefined): void {
@@ -73,6 +109,11 @@ export class ScanDatabase {
   private readonly connection: DatabaseSync
   private readonly insertScanStatement: StatementSync
   private readonly selectScanStatement: StatementSync
+  private readonly selectPublishedStatement: StatementSync
+  private readonly selectOtherBuildingStatement: StatementSync
+  private readonly completeScanStatement: StatementSync
+  private readonly deleteScanStatement: StatementSync
+  private readonly validateSnapshot: (scan: CompletedScan) => void
   private readonly insertEntryStatement: StatementSync
   private readonly selectEntryStatement: StatementSync
   private readonly selectFinalizedDirectoryStatement: StatementSync
@@ -98,12 +139,24 @@ export class ScanDatabase {
           directory_count, error_count
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
-      this.selectScanStatement = this.connection.prepare(`
-        SELECT id, root_path, status, started_at, finished_at, total_bytes, file_count,
-               directory_count, error_count
-        FROM scans WHERE id = ?
-      `)
+      this.selectScanStatement = this.connection.prepare(`${SELECT_SCAN} WHERE id = ?`)
       this.selectScanStatement.setReadBigInts(true)
+      this.selectPublishedStatement = this.connection.prepare(
+        `${SELECT_SCAN} WHERE status = 'completed' LIMIT 2`
+      )
+      this.selectPublishedStatement.setReadBigInts(true)
+      this.selectOtherBuildingStatement = this.connection.prepare(`
+        SELECT id FROM scans WHERE status = 'running' AND id <> ? LIMIT 1
+      `)
+      this.completeScanStatement = this.connection.prepare(`
+        UPDATE scans SET status = 'completed', finished_at = ?, total_bytes = ?,
+                         file_count = ?, directory_count = ?, error_count = ?
+        WHERE id = ? AND status = 'running'
+      `)
+      this.deleteScanStatement = this.connection.prepare(
+        'DELETE FROM scans WHERE id = ? AND status = ?'
+      )
+      this.validateSnapshot = prepareSnapshotValidation(this.connection)
 
       this.insertEntryStatement = this.connection.prepare(`
         INSERT INTO entries (
@@ -163,31 +216,84 @@ export class ScanDatabase {
   getScan(id: string): ScanSession | null {
     this.requireOpen()
     const row = this.selectScanStatement.get(id)
-    if (!row) return null
+    return row ? readScan(row) : null
+  }
 
-    const scan = {
-      id: readText(row.id, 'scan ID'),
-      rootPath: readFilesystemText(row.root_path, 'root path'),
-      startedAt: readText(row.started_at, 'startedAt'),
-      summary: {
-        totalBytes: readInteger(row.total_bytes, 'totalBytes'),
-        fileCount: readInteger(row.file_count, 'fileCount'),
-        directoryCount: readInteger(row.directory_count, 'directoryCount'),
-        errorCount: readInteger(row.error_count, 'errorCount')
+  beginScan(scan: BuildingScan): void {
+    validateBuildingScan(scan)
+    this.transaction(() => {
+      if (this.getScan(scan.id)) throw new Error(`Scan ${scan.id} already exists.`)
+      this.requireOnlyBuildingScan(scan.id)
+      this.getPublishedScan() // Refuse an ambiguous pre-existing publication before starting work.
+      this.insertScan(scan)
+    })
+  }
+
+  publishScan(scan: CompletedScan, rootEntryId: string): void {
+    validateScanPublication({ scan, rootEntryId })
+    this.transaction(() => {
+      const building = this.getScan(scan.id)
+      if (!building || building.status !== 'running') {
+        throw new Error(`Scan ${scan.id} is not a building scan.`)
       }
-    }
+      this.requireOnlyBuildingScan(scan.id)
+      if (scan.rootPath !== building.rootPath || scan.startedAt !== building.startedAt) {
+        throw new Error('Completed scan metadata does not match the building scan.')
+      }
 
-    switch (row.status) {
-      case 'running':
-        if (row.finished_at !== null) throw new Error('Stored running scan has a finish time.')
-        return { ...scan, status: row.status, finishedAt: null }
-      case 'completed':
-      case 'cancelled':
-      case 'failed':
-        return { ...scan, status: row.status, finishedAt: readText(row.finished_at, 'finishedAt') }
-      default:
-        throw new Error('Stored scan has an invalid status.')
-    }
+      const root = this.getEntry(scan.id, rootEntryId)
+      if (
+        !root ||
+        root.type !== 'directory' ||
+        root.parentId !== null ||
+        root.path !== scan.rootPath
+      ) {
+        throw new Error('The expected scan root directory is missing or invalid.')
+      }
+      if (root.aggregatedSizeBytes !== scan.summary.totalBytes) {
+        throw new Error('The scan root is unfinished or its total differs from the scan summary.')
+      }
+      this.validateSnapshot(scan)
+
+      const previous = this.getPublishedScan()
+      const { totalBytes, fileCount, directoryCount, errorCount } = scan.summary
+      const result = this.completeScanStatement.run(
+        scan.finishedAt,
+        bindInteger(totalBytes, 'totalBytes'),
+        bindInteger(fileCount, 'fileCount'),
+        bindInteger(directoryCount, 'directoryCount'),
+        bindInteger(errorCount, 'errorCount'),
+        scan.id
+      )
+      if (result.changes !== 1) throw new Error(`Could not promote scan ${scan.id}.`)
+      if (previous && this.deleteScanStatement.run(previous.id, 'completed').changes !== 1) {
+        throw new Error(`Could not retire published scan ${previous.id}.`)
+      }
+    })
+  }
+
+  discardBuildingScan(scanId: string): void {
+    if (!isSnapshotId(scanId)) throw new TypeError('Discard requires a valid scan ID.')
+    this.transaction(() => {
+      if (this.deleteScanStatement.run(scanId, 'running').changes !== 1) {
+        throw new Error(`Scan ${scanId} is not a building scan.`)
+      }
+    })
+  }
+
+  getPublishedScan(): CompletedScan | null {
+    this.requireOpen()
+    const rows = this.selectPublishedStatement.all()
+    if (rows.length > 1) throw new Error('The database has more than one completed scan.')
+    if (!rows[0]) return null
+    const scan = readScan(rows[0])
+    if (scan.status !== 'completed') throw new Error('Invalid persisted publication status.')
+    return { ...scan, status: scan.status }
+  }
+
+  private requireOnlyBuildingScan(scanId: string): void {
+    const other = this.selectOtherBuildingStatement.get(scanId)
+    if (other) throw new Error(`Building scan ${other.id} is already active.`)
   }
 
   insertEntry(entry: FileEntry): void {

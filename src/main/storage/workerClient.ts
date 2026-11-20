@@ -1,6 +1,6 @@
 import type { Worker } from 'node:worker_threads'
 import type { FileEntry, ScanSession } from '../../shared/scan'
-import type { StorageBatchOperation } from './payloads'
+import type { BuildingScan, CompletedScan, StorageBatchOperation } from './payloads'
 import {
   parseStorageResponse,
   type StorageFailure,
@@ -62,6 +62,22 @@ export class StorageWorkerClient {
 
   async insertScan(scan: ScanSession): Promise<void> {
     await this.run('insertScan', scan)
+  }
+
+  async beginScan(scan: BuildingScan): Promise<void> {
+    await this.run('beginScan', scan)
+  }
+
+  async publishScan(scan: CompletedScan, rootEntryId: string): Promise<void> {
+    await this.run('publishScan', { scan, rootEntryId })
+  }
+
+  async discardBuildingScan(scanId: string): Promise<void> {
+    await this.run('discardBuildingScan', { scanId })
+  }
+
+  getPublishedScan(): Promise<CompletedScan | null> {
+    return this.run('getPublishedScan', null)
   }
 
   getScan(id: string): Promise<ScanSession | null> {

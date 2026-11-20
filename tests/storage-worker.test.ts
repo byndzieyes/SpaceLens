@@ -11,7 +11,11 @@ import { resolveConfig } from 'electron-vite'
 import { build } from 'vite'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
-import type { StorageBatchOperation } from '../src/main/storage/payloads'
+import type {
+  BuildingScan,
+  CompletedScan,
+  StorageBatchOperation
+} from '../src/main/storage/payloads'
 import {
   STORAGE_REQUEST_TIMEOUT_MS,
   STORAGE_SHUTDOWN_TIMEOUT_MS,
@@ -313,6 +317,107 @@ test('keeps batches single-in-flight and stops accepting them once disposal star
   await expect(client.applyBatch(scan.id, [])).rejects.toThrow('closing or closed')
   await committed
   await closing
+})
+
+function lifecycleScan(id: string): BuildingScan {
+  return { ...scan, id, status: 'running', finishedAt: null }
+}
+
+function readyMetadata(pending: BuildingScan): CompletedScan {
+  return {
+    ...pending,
+    status: 'completed',
+    finishedAt: '2026-11-20T12:00:00.000Z',
+    summary: { fileCount: 1, directoryCount: 1, totalBytes: 0, errorCount: 0 }
+  }
+}
+
+async function preparePublication(
+  client: StorageWorkerClient,
+  pending: BuildingScan
+): Promise<CompletedScan> {
+  await client.beginScan(pending)
+  await client.applyBatch(pending.id, [
+    { type: 'entry', entry: { ...root, scanId: pending.id } },
+    { type: 'entry', entry: { ...file, scanId: pending.id } },
+    {
+      type: 'directory-finalized',
+      entry: { ...root, scanId: pending.id, type: 'directory', aggregatedSizeBytes: 0 }
+    }
+  ])
+  return readyMetadata(pending)
+}
+
+test('publishes over the worker boundary after commit and reopens the replacement', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await expect(client.getPublishedScan()).resolves.toBeNull()
+  const previous = await preparePublication(client, lifecycleScan('previous'))
+  await expect(client.getPublishedScan()).resolves.toBeNull()
+  await client.publishScan(previous, root.id)
+  const next = await preparePublication(client, lifecycleScan('next'))
+  await expect(client.getPublishedScan()).resolves.toEqual(previous)
+
+  await expect(
+    client.publishScan({ ...next, summary: { ...next.summary, directoryCount: 2 } }, root.id)
+  ).rejects.toMatchObject({
+    name: 'Error',
+    message: expect.stringContaining('differ from the scan summary'),
+    code: null
+  })
+  await expect(client.getPublishedScan()).resolves.toEqual(previous)
+  const publishing = client.publishScan(next, root.id)
+  await expect(client.getPublishedScan()).rejects.toThrow('already in flight')
+  await publishing
+
+  const observer = new DatabaseSync(databasePath, { readOnly: true })
+  try {
+    expect(observer.prepare('SELECT id, status FROM scans').all()).toEqual([
+      { id: next.id, status: 'completed' }
+    ])
+    expect(
+      observer.prepare('SELECT COUNT(*) AS count FROM entries WHERE scan_id = ?').get(previous.id)
+        ?.count
+    ).toBe(0)
+  } finally {
+    observer.close()
+  }
+  await client.dispose()
+
+  const reopened = bundled()
+  await reopened.initialize(databasePath)
+  await expect(reopened.getPublishedScan()).resolves.toEqual(next)
+  await expect(reopened.getEntry(next.id, file.id)).resolves.toEqual({ ...file, scanId: next.id })
+})
+
+test('validates lifecycle payloads and scopes discard and stale requests to their scan', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  const pending = lifecycleScan('pending')
+  await expect(client.beginScan({ ...pending, startedAt: 'bad' })).rejects.toMatchObject({
+    name: 'TypeError',
+    message: expect.stringContaining('valid running scan metadata'),
+    code: null
+  })
+  const previous = await preparePublication(client, lifecycleScan('previous'))
+  await client.publishScan(previous, root.id)
+  const rejected = await preparePublication(client, pending)
+  await expect(client.publishScan(rejected, 'invalid root ID')).rejects.toMatchObject({
+    name: 'TypeError',
+    message: expect.stringContaining('valid root entry ID'),
+    code: null
+  })
+  await expect(client.discardBuildingScan(previous.id)).rejects.toThrow('not a building scan')
+  await client.discardBuildingScan(rejected.id)
+  const next = await preparePublication(client, lifecycleScan('next'))
+  await expect(client.discardBuildingScan(rejected.id)).rejects.toThrow('not a building scan')
+  await expect(client.publishScan(rejected, root.id)).rejects.toThrow('not a building scan')
+  await expect(client.getEntry(rejected.id, root.id)).resolves.toBeNull()
+  await expect(client.getPublishedScan()).resolves.toEqual(previous)
+  await client.publishScan(next, root.id)
+  await expect(client.getPublishedScan()).resolves.toEqual(next)
+  await client.dispose()
+  await expect(client.getPublishedScan()).rejects.toThrow('closing or closed')
 })
 
 test('propagates a constraint error and accepts subsequent requests on the same connection', async () => {

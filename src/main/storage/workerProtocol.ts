@@ -1,17 +1,28 @@
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
   integer,
+  isSnapshotId,
   isStorageEntry,
+  isStorageScan,
   nonempty,
   nullableString,
   record,
+  validateBuildingScan,
+  validateScanPublication,
   validateStorageBatch,
+  type BuildingScan,
+  type CompletedScan,
+  type ScanPublication,
   type StorageBatch
 } from './payloads'
 
 interface StorageCommands {
   initialize: { payload: { databasePath: string }; result: null }
   insertScan: { payload: ScanSession; result: null }
+  beginScan: { payload: BuildingScan; result: null }
+  publishScan: { payload: ScanPublication; result: null }
+  discardBuildingScan: { payload: { scanId: string }; result: null }
+  getPublishedScan: { payload: null; result: CompletedScan | null }
   getScan: { payload: { id: string }; result: ScanSession | null }
   insertEntry: { payload: FileEntry; result: null }
   applyBatch: { payload: StorageBatch; result: null }
@@ -45,23 +56,6 @@ export type StorageResponse<T extends StorageOperation = StorageOperation> = {
   | { readonly ok: false; readonly error: StorageFailure }
 )
 
-function scan(value: unknown): value is ScanSession {
-  if (!record(value) || !nonempty(value.id) || !nonempty(value.rootPath)) return false
-  const { status, summary, startedAt, finishedAt } = value
-  return (
-    typeof startedAt === 'string' &&
-    (status === 'running'
-      ? finishedAt === null
-      : (status === 'completed' || status === 'cancelled' || status === 'failed') &&
-        typeof finishedAt === 'string') &&
-    record(summary) &&
-    integer(summary.fileCount) &&
-    integer(summary.directoryCount) &&
-    integer(summary.totalBytes) &&
-    integer(summary.errorCount)
-  )
-}
-
 export function storageRequestId(value: unknown): number | undefined {
   if (record(value) && integer(value.requestId) && value.requestId > 0) return value.requestId
   return undefined
@@ -79,7 +73,21 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       }
       break
     case 'insertScan':
-      if (scan(payload)) return { requestId, operation, payload }
+      if (isStorageScan(payload)) return { requestId, operation, payload }
+      break
+    case 'beginScan':
+      validateBuildingScan(payload)
+      return { requestId, operation, payload }
+    case 'publishScan':
+      validateScanPublication(payload)
+      return { requestId, operation, payload }
+    case 'discardBuildingScan':
+      if (record(payload) && isSnapshotId(payload.scanId)) {
+        return { requestId, operation, payload: { scanId: payload.scanId } }
+      }
+      break
+    case 'getPublishedScan':
+      if (payload === null) return { requestId, operation, payload }
       break
     case 'getScan':
       if (record(payload) && nonempty(payload.id)) {
@@ -114,7 +122,12 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
   {
     initialize: isNull,
     insertScan: isNull,
-    getScan: (value): value is ScanSession | null => value === null || scan(value),
+    beginScan: isNull,
+    publishScan: isNull,
+    discardBuildingScan: isNull,
+    getPublishedScan: (value): value is CompletedScan | null =>
+      value === null || (isStorageScan(value) && value.status === 'completed'),
+    getScan: (value): value is ScanSession | null => value === null || isStorageScan(value),
     insertEntry: isNull,
     applyBatch: isNull,
     getEntry: (value): value is FileEntry | null => value === null || isStorageEntry(value),

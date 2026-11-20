@@ -33,6 +33,17 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
     case 'insertScan':
       requireDatabase().insertScan(request.payload)
       return null
+    case 'beginScan':
+      requireDatabase().beginScan(request.payload)
+      return null
+    case 'publishScan':
+      requireDatabase().publishScan(request.payload.scan, request.payload.rootEntryId)
+      return null
+    case 'discardBuildingScan':
+      requireDatabase().discardBuildingScan(request.payload.scanId)
+      return null
+    case 'getPublishedScan':
+      return requireDatabase().getPublishedScan()
     case 'getScan':
       return requireDatabase().getScan(request.payload.id)
     case 'insertEntry':

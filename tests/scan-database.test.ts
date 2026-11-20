@@ -7,7 +7,11 @@ import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
 import { ScanDatabase } from '../src/main/storage/database'
-import type { StorageBatchOperation } from '../src/main/storage/payloads'
+import type {
+  BuildingScan,
+  CompletedScan,
+  StorageBatchOperation
+} from '../src/main/storage/payloads'
 import type { FileEntry, ScanSession, ScanStatus } from '../src/shared/scan'
 
 const rootPath = resolve('fixture')
@@ -563,4 +567,300 @@ test('rejects oversized and malformed batches without retaining an insert', () =
     )
     expect(db.getEntry('scan-a', 'root')).toBeNull()
   }
+})
+
+function building(id = 'scan-a'): BuildingScan {
+  return {
+    id,
+    rootPath,
+    startedAt,
+    status: 'running',
+    finishedAt: null,
+    summary: { fileCount: 0, directoryCount: 0, totalBytes: 0, errorCount: 0 }
+  }
+}
+
+function completed(
+  scan: BuildingScan,
+  summary: Partial<CompletedScan['summary']> = {}
+): CompletedScan {
+  return {
+    ...scan,
+    status: 'completed',
+    finishedAt,
+    summary: { fileCount: 1, directoryCount: 1, totalBytes: 20, errorCount: 0, ...summary }
+  }
+}
+
+function readyScan(db: ScanDatabase, id = 'scan-a'): CompletedScan {
+  const pending = building(id)
+  db.beginScan(pending)
+  db.applyBatch(id, [discover(root(id)), discover(file(id)), finalize(root(id), 20)])
+  return completed(pending)
+}
+
+test('begins one building scan with empty counters and rejects invalid or conflicting metadata', () => {
+  const db = open()
+  const pending = building()
+  for (const invalid of [
+    { ...pending, id: ' ' },
+    { ...pending, rootPath: 'relative' },
+    { ...pending, startedAt: '2026-11-20T15:00:00' },
+    { ...pending, startedAt: '2026-02-30T15:00:00Z' },
+    { ...pending, summary: { ...pending.summary, errorCount: 1 } },
+    completed(pending)
+  ]) {
+    expect(() => Reflect.apply(db.beginScan, db, [invalid])).toThrow(/building scan/)
+  }
+  expect(db.getScan(pending.id)).toBeNull()
+  db.beginScan(pending)
+  expect(db.getScan(pending.id)).toEqual(pending)
+  expect(db.getPublishedScan()).toBeNull()
+  expect(() => db.beginScan(pending)).toThrow('already exists')
+  expect(() => db.beginScan(building('different'))).toThrow('already active')
+  expect(db.getScan('different')).toBeNull()
+})
+
+test('publishes a first scan with recoverable errors and persists exact scanner accounting', () => {
+  const db = open()
+  const pending = building()
+  const directory = {
+    ...root(),
+    id: 'nested',
+    parentId: 'root',
+    name: 'nested',
+    path: join(rootPath, 'nested')
+  }
+  const max = Number.MAX_SAFE_INTEGER
+  db.beginScan(pending)
+  db.applyBatch(pending.id, [
+    discover(root()),
+    discover(directory),
+    discover({ ...file(), parentId: directory.id, sizeBytes: max }),
+    finalize(directory, max),
+    discover({ ...file(pending.id, 'empty'), sizeBytes: 0 }),
+    discover({ ...file(pending.id, 'unknown-size'), sizeBytes: null }),
+    ...(['symlink', 'other', 'unknown'] as const).map((type) =>
+      discover({ ...file(pending.id, type), type, sizeBytes: null })
+    ),
+    finalize(root(), max)
+  ])
+  const final = completed(pending, {
+    fileCount: 3,
+    directoryCount: 2,
+    totalBytes: max,
+    errorCount: 7
+  })
+  expect(() =>
+    db.publishScan({ ...final, summary: { ...final.summary, errorCount: 0 } }, 'root')
+  ).toThrow('Unknown file metadata requires a reported scan error')
+  db.publishScan(final, 'root')
+  db.close()
+
+  const reopened = open()
+  expect(reopened.getPublishedScan()).toEqual(final)
+  expect(reopened.getEntry(pending.id, 'unknown-size')?.sizeBytes).toBeNull()
+  expect(reopened.getEntry(pending.id, 'empty')?.sizeBytes).toBe(0)
+  expect(reopened.getEntry(pending.id, directory.id)?.aggregatedSizeBytes).toBe(max)
+})
+
+test('keeps the old snapshot while the new one builds and retires it after successful publication', () => {
+  const db = open()
+  const previous = readyScan(db)
+  db.publishScan(previous, 'root')
+  const next = readyScan(db, 'scan-b')
+  db.close()
+
+  const reopened = open()
+  expect(reopened.getPublishedScan()).toEqual(previous)
+  expect(reopened.getScan(next.id)?.status).toBe('running')
+  expect(() => reopened.beginScan(building('scan-c'))).toThrow('already active')
+  reopened.publishScan(next, 'root')
+  expect(reopened.getPublishedScan()).toEqual(next)
+  expect(reopened.getScan(previous.id)).toBeNull()
+  expect(reopened.getEntry(previous.id, 'root')).toBeNull()
+  expect(reopened.getEntry(previous.id, 'file')).toBeNull()
+  expect(reopened.getEntry(next.id, 'file')).toEqual(file(next.id))
+})
+
+test('validates publication identity, timestamps, and final summary while preserving the old snapshot', () => {
+  const db = open()
+  const previous = readyScan(db)
+  db.publishScan(previous, 'root')
+  const next = readyScan(db, 'scan-b')
+  for (const [invalid, rootId, message] of [
+    [{ ...next, id: 'absent' }, 'root', 'not a building scan'],
+    [previous, 'root', 'not a building scan'],
+    [{ ...next, rootPath: join(rootPath, 'different') }, 'root', 'does not match'],
+    [{ ...next, startedAt: finishedAt }, 'root', 'does not match'],
+    [{ ...next, finishedAt: '2026-11-20T15:01:00+03:00' }, 'root', 'start-to-finish order'],
+    [{ ...next, finishedAt: '2026-11-20T14:00:00' }, 'root', 'start-to-finish order'],
+    [
+      { ...next, summary: { ...next.summary, fileCount: 2 } },
+      'root',
+      'differ from the scan summary'
+    ],
+    [
+      { ...next, summary: { ...next.summary, directoryCount: 2 } },
+      'root',
+      'differ from the scan summary'
+    ],
+    [
+      { ...next, summary: { ...next.summary, totalBytes: 40 } },
+      'root',
+      'root is unfinished or its total differs'
+    ],
+    [
+      { ...next, summary: { ...next.summary, errorCount: -1 } },
+      'root',
+      'valid completed scan metadata'
+    ],
+    [next, 'file', 'root directory is missing or invalid'],
+    [next, 'wrong', 'root directory is missing or invalid']
+  ] as const) {
+    expect(() => db.publishScan(invalid, rootId)).toThrow(message)
+    expect(db.getPublishedScan()).toEqual(previous)
+    expect(db.getScan(next.id)?.status).toBe('running')
+  }
+  db.publishScan(next, 'root')
+  expect(db.getPublishedScan()).toEqual(next)
+})
+
+test('rejects a missing or unfinished root and an unfinished nested directory even with a finalized root', () => {
+  const db = open()
+  const pending = building()
+  const final = completed(pending, { fileCount: 0, directoryCount: 2, totalBytes: 0 })
+  db.beginScan(pending)
+  expect(() => db.publishScan(final, 'root')).toThrow('root directory is missing or invalid')
+  db.applyBatch(pending.id, [discover(root())])
+  expect(() => db.publishScan(final, 'root')).toThrow('root is unfinished')
+  db.applyBatch(pending.id, [finalize(root(), 0)])
+  // The prior low-level insertion API allows a fixture that bypasses batch finalization order.
+  db.insertEntry({ ...root(), id: 'child', parentId: 'root', aggregatedSizeBytes: null })
+  expect(() => db.publishScan(final, 'root')).toThrow('Directory child is unfinished')
+  expect(db.getPublishedScan()).toBeNull()
+})
+
+test('detects wrong nested aggregates even if they cancel out at the root', () => {
+  const db = open()
+  const pending = building()
+  const left = { ...root(), id: 'left', parentId: 'root', path: join(rootPath, 'left') }
+  const right = { ...root(), id: 'right', parentId: 'root', path: join(rootPath, 'right') }
+  db.beginScan(pending)
+  db.applyBatch(pending.id, [
+    discover(root()),
+    discover(left),
+    discover({ ...file(pending.id, 'a'), sizeBytes: 5, parentId: left.id }),
+    finalize(left, 4),
+    discover(right),
+    discover({ ...file(pending.id, 'b'), sizeBytes: 5, parentId: right.id }),
+    finalize(right, 6),
+    finalize(root(), 10)
+  ])
+  expect(() =>
+    db.publishScan(completed(pending, { fileCount: 2, directoryCount: 3, totalBytes: 10 }), 'root')
+  ).toThrow('has an inconsistent aggregate')
+  expect(db.getScan(pending.id)?.status).toBe('running')
+})
+
+test('rejects disconnected directory cycles even when their parent IDs exist', () => {
+  const db = open()
+  const pending = building()
+  db.beginScan(pending)
+  const child = { ...root(), id: 'child', parentId: 'root', aggregatedSizeBytes: 0 }
+  db.insertEntry({ ...root(), aggregatedSizeBytes: 0 })
+  db.insertEntry(child)
+  db.insertEntry({ ...child, id: 'grandchild', parentId: child.id })
+  inspectDatabase((sql) =>
+    sql
+      .prepare('UPDATE entries SET parent_id = ? WHERE scan_id = ? AND id = ?')
+      .run('grandchild', pending.id, child.id)
+  )
+  expect(() =>
+    db.publishScan(completed(pending, { fileCount: 0, directoryCount: 3, totalBytes: 0 }), 'root')
+  ).toThrow('not all reachable')
+  expect(db.getPublishedScan()).toBeNull()
+})
+
+test('rejects persisted byte totals above the safe range without rounding', () => {
+  const db = open()
+  const pending = building()
+  db.beginScan(pending)
+  const max = Number.MAX_SAFE_INTEGER
+  db.applyBatch(pending.id, [
+    discover(root()),
+    discover({ ...file(), sizeBytes: max }),
+    discover({ ...file(pending.id, 'second'), sizeBytes: 2 }),
+    finalize(root(), max)
+  ])
+  expect(() =>
+    db.publishScan(completed(pending, { fileCount: 2, totalBytes: max }), 'root')
+  ).toThrow('logical bytes differ')
+  expect(db.getPublishedScan()).toBeNull()
+})
+
+test('discards only the addressed building scan and rejects stale publication and cancellation', () => {
+  const db = open()
+  const previous = readyScan(db)
+  db.publishScan(previous, 'root')
+  const rejected = readyScan(db, 'scan-b')
+  expect(() => db.discardBuildingScan(previous.id)).toThrow('not a building scan')
+  db.discardBuildingScan(rejected.id)
+  expect(db.getScan(rejected.id)).toBeNull()
+  expect(db.getEntry(rejected.id, 'root')).toBeNull()
+  expect(db.getEntry(rejected.id, 'file')).toBeNull()
+  const next = readyScan(db, 'scan-c')
+  expect(() => db.discardBuildingScan(rejected.id)).toThrow('not a building scan')
+  expect(() => db.publishScan(rejected, 'root')).toThrow('not a building scan')
+  expect(db.getPublishedScan()).toEqual(previous)
+  expect(db.getScan(next.id)?.status).toBe('running')
+})
+
+test('readers see only the old snapshot before commit and a failed commit rolls back promotion and deletion', () => {
+  const db = open()
+  const previous = readyScan(db)
+  db.publishScan(previous, 'root')
+  const next = readyScan(db, 'scan-b')
+  const observer = new DatabaseSync(databasePath, { readOnly: true })
+  const read = observer.prepare("SELECT id FROM scans WHERE status = 'completed'")
+  const exec = DatabaseSync.prototype.exec
+  let failCommit = true
+  const commit = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (
+    this: DatabaseSync,
+    sql: string
+  ) {
+    if (sql === 'COMMIT') {
+      expect(read.all()).toEqual([{ id: previous.id }])
+      expect(
+        observer.prepare('SELECT id FROM entries WHERE scan_id = ? ORDER BY id').all(previous.id)
+      ).toEqual([{ id: 'file' }, { id: 'root' }])
+      if (failCommit) throw new Error('Controlled publication commit failure.')
+    }
+    exec.call(this, sql)
+  })
+  try {
+    expect(() => db.publishScan(next, 'root')).toThrow('Controlled publication commit failure')
+    expect(db.getPublishedScan()).toEqual(previous)
+    expect(db.getEntry(previous.id, 'file')).toEqual(file(previous.id))
+    expect(db.getScan(next.id)?.status).toBe('running')
+    failCommit = false
+    db.publishScan(next, 'root')
+    expect(read.all()).toEqual([{ id: next.id }])
+  } finally {
+    commit.mockRestore()
+    observer.close()
+  }
+})
+
+test('ignores legacy failed or cancelled rows and refuses ambiguous legacy completions', () => {
+  const db = open()
+  db.insertScan(scan('failed', 'failed'))
+  db.insertScan(scan('cancelled', 'cancelled'))
+  expect(db.getPublishedScan()).toBeNull()
+  db.insertScan(scan('first'))
+  db.insertScan(scan('second'))
+  expect(() => db.getPublishedScan()).toThrow('more than one completed scan')
+  expect(() => db.beginScan(building())).toThrow('more than one completed scan')
+  expect(db.getScan('first')?.status).toBe('completed')
+  expect(db.getScan('second')?.status).toBe('completed')
 })

@@ -1,4 +1,5 @@
-import type { FileEntry } from '../../shared/scan'
+import { isAbsolute } from 'node:path'
+import type { FileEntry, ScanSession } from '../../shared/scan'
 import { SCANNER_BATCH_SIZE } from '../scanner/workerProtocol'
 
 export type FinalizedDirectory = FileEntry & {
@@ -15,6 +16,14 @@ export interface StorageBatch {
   readonly operations: readonly StorageBatchOperation[]
 }
 
+export type BuildingScan = ScanSession & { readonly status: 'running' }
+export type CompletedScan = ScanSession & { readonly status: 'completed' }
+
+export interface ScanPublication {
+  readonly scan: CompletedScan
+  readonly rootEntryId: string
+}
+
 export function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
@@ -29,6 +38,74 @@ export function nonempty(value: unknown): value is string {
 
 export function nullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string'
+}
+
+export function isStorageScan(value: unknown): value is ScanSession {
+  if (!record(value) || !nonempty(value.id) || !nonempty(value.rootPath)) return false
+  const { status, summary, startedAt, finishedAt } = value
+  return (
+    typeof startedAt === 'string' &&
+    (status === 'running'
+      ? finishedAt === null
+      : (status === 'completed' || status === 'cancelled' || status === 'failed') &&
+        typeof finishedAt === 'string') &&
+    record(summary) &&
+    integer(summary.fileCount) &&
+    integer(summary.directoryCount) &&
+    integer(summary.totalBytes) &&
+    integer(summary.errorCount)
+  )
+}
+
+export function isSnapshotId(value: unknown): value is string {
+  return typeof value === 'string' && /^[a-zA-Z0-9_-]{1,128}$/.test(value)
+}
+
+function timestamp(value: string): number {
+  const match =
+    /^((?:\d{4}|[+-]\d{6})-\d{2}-\d{2})T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:\d{2})$/.exec(
+      value
+    )
+  if (!match) return NaN
+  // Date.parse can normalize an invalid calendar day instead of rejecting it.
+  const day = new Date(`${match[1]}T00:00:00Z`)
+  return Number.isFinite(day.getTime()) && day.toISOString().split('T')[0] === match[1]
+    ? Date.parse(value)
+    : NaN
+}
+
+export function validateBuildingScan(value: unknown): asserts value is BuildingScan {
+  if (
+    !isStorageScan(value) ||
+    value.status !== 'running' ||
+    !isSnapshotId(value.id) ||
+    !isAbsolute(value.rootPath) ||
+    !Number.isFinite(timestamp(value.startedAt))
+  )
+    throw new TypeError('A building scan requires valid running scan metadata.')
+
+  const { fileCount, directoryCount, totalBytes, errorCount } = value.summary
+  if (fileCount !== 0 || directoryCount !== 0 || totalBytes !== 0 || errorCount !== 0) {
+    throw new TypeError('A building scan must start with an empty summary.')
+  }
+}
+
+export function validateScanPublication(value: unknown): asserts value is ScanPublication {
+  if (!record(value) || !isSnapshotId(value.rootEntryId)) {
+    throw new TypeError('Scan publication requires a valid root entry ID.')
+  }
+  const { scan } = value
+  if (
+    !isStorageScan(scan) ||
+    scan.status !== 'completed' ||
+    !isSnapshotId(scan.id) ||
+    !isAbsolute(scan.rootPath)
+  ) {
+    throw new TypeError('Scan publication requires valid completed scan metadata and summary.')
+  }
+  if (!(timestamp(scan.finishedAt) >= timestamp(scan.startedAt))) {
+    throw new TypeError('Scan publication requires valid timestamps in start-to-finish order.')
+  }
 }
 
 export function isStorageEntry(value: unknown): value is FileEntry {
