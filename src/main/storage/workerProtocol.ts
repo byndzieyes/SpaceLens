@@ -1,10 +1,20 @@
 import type { FileEntry, ScanSession } from '../../shared/scan'
+import {
+  integer,
+  isStorageEntry,
+  nonempty,
+  nullableString,
+  record,
+  validateStorageBatch,
+  type StorageBatch
+} from './payloads'
 
 interface StorageCommands {
   initialize: { payload: { databasePath: string }; result: null }
   insertScan: { payload: ScanSession; result: null }
   getScan: { payload: { id: string }; result: ScanSession | null }
   insertEntry: { payload: FileEntry; result: null }
+  applyBatch: { payload: StorageBatch; result: null }
   getEntry: { payload: { scanId: string; id: string }; result: FileEntry | null }
   close: { payload: null; result: null }
 }
@@ -35,22 +45,6 @@ export type StorageResponse<T extends StorageOperation = StorageOperation> = {
   | { readonly ok: false; readonly error: StorageFailure }
 )
 
-function record(value: unknown): value is Record<string, unknown> {
-  return value !== null && typeof value === 'object' && !Array.isArray(value)
-}
-
-function integer(value: unknown): value is number {
-  return typeof value === 'number' && Number.isSafeInteger(value) && value >= 0
-}
-
-function nonempty(value: unknown): value is string {
-  return typeof value === 'string' && value.length > 0 && !value.includes('\0')
-}
-
-function nullableString(value: unknown): value is string | null {
-  return value === null || typeof value === 'string'
-}
-
 function scan(value: unknown): value is ScanSession {
   if (!record(value) || !nonempty(value.id) || !nonempty(value.rootPath)) return false
   const { status, summary, startedAt, finishedAt } = value
@@ -65,28 +59,6 @@ function scan(value: unknown): value is ScanSession {
     integer(summary.directoryCount) &&
     integer(summary.totalBytes) &&
     integer(summary.errorCount)
-  )
-}
-
-function entry(value: unknown): value is FileEntry {
-  if (!record(value)) return false
-  const { id, scanId, parentId, path, name, type, createdAt, modifiedAt } = value
-  return (
-    nonempty(id) &&
-    nonempty(scanId) &&
-    (parentId === null || nonempty(parentId)) &&
-    nonempty(path) &&
-    typeof name === 'string' &&
-    (type === 'file' ||
-      type === 'directory' ||
-      type === 'symlink' ||
-      type === 'other' ||
-      type === 'unknown') &&
-    (value.sizeBytes === null || (type === 'file' && integer(value.sizeBytes))) &&
-    (value.aggregatedSizeBytes === null ||
-      (type === 'directory' && integer(value.aggregatedSizeBytes))) &&
-    nullableString(createdAt) &&
-    nullableString(modifiedAt)
   )
 }
 
@@ -115,8 +87,11 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       }
       break
     case 'insertEntry':
-      if (entry(payload)) return { requestId, operation, payload }
+      if (isStorageEntry(payload)) return { requestId, operation, payload }
       break
+    case 'applyBatch':
+      validateStorageBatch(payload)
+      return { requestId, operation, payload }
     case 'getEntry':
       if (record(payload) && nonempty(payload.scanId) && nonempty(payload.id)) {
         return { requestId, operation, payload: { scanId: payload.scanId, id: payload.id } }
@@ -141,7 +116,8 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     insertScan: isNull,
     getScan: (value): value is ScanSession | null => value === null || scan(value),
     insertEntry: isNull,
-    getEntry: (value): value is FileEntry | null => value === null || entry(value),
+    applyBatch: isNull,
+    getEntry: (value): value is FileEntry | null => value === null || isStorageEntry(value),
     close: isNull
   }
 

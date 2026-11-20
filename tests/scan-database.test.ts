@@ -5,7 +5,9 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
 import { ScanDatabase } from '../src/main/storage/database'
+import type { StorageBatchOperation } from '../src/main/storage/payloads'
 import type { FileEntry, ScanSession, ScanStatus } from '../src/shared/scan'
 
 const rootPath = resolve('fixture')
@@ -382,4 +384,183 @@ test('rolls back writes to both tables on statement failure and can start a new 
   })
   expect(db.getScan('scan-a')).toEqual(scan())
   expect(db.getEntry('scan-a', 'root')).toEqual(root())
+})
+
+function discover(entry: FileEntry): StorageBatchOperation {
+  return { type: 'entry', entry: { ...entry, aggregatedSizeBytes: null } }
+}
+
+function finalize(entry: FileEntry, bytes: number): StorageBatchOperation {
+  return {
+    type: 'directory-finalized',
+    entry: { ...entry, type: 'directory', sizeBytes: null, aggregatedSizeBytes: bytes }
+  }
+}
+
+test('commits ordered discoveries and finalizations and preserves exact metadata after reopen', () => {
+  const db = open()
+  db.insertScan(scan('scan-a', 'running'))
+  const directory = root()
+  const empty = { ...directory, id: 'empty', parentId: directory.id, path: join(rootPath, 'empty') }
+  const name = "Фото 📁 'quotes' \ud800.txt"
+  const known = { ...file(), name, path: join(rootPath, name), sizeBytes: Number.MAX_SAFE_INTEGER }
+  const unknown = { ...file('scan-a', 'unknown-size'), sizeBytes: null }
+
+  db.applyBatch('scan-a', [
+    discover(directory),
+    discover(empty),
+    finalize(empty, 0),
+    discover(known),
+    discover(unknown)
+  ])
+  expect(db.getEntry('scan-a', directory.id)).toEqual({ ...directory, aggregatedSizeBytes: null })
+  expect(db.getEntry('scan-a', empty.id)).toEqual({ ...empty, aggregatedSizeBytes: 0 })
+  db.applyBatch('scan-a', [finalize(directory, Number.MAX_SAFE_INTEGER)])
+  db.close()
+
+  const reopened = open()
+  expect(reopened.getEntry('scan-a', known.id)).toEqual(known)
+  expect(reopened.getEntry('scan-a', unknown.id)).toEqual(unknown)
+  expect(reopened.getEntry('scan-a', directory.id)).toEqual({
+    ...directory,
+    aggregatedSizeBytes: Number.MAX_SAFE_INTEGER
+  })
+  expect(reopened.getEntry('scan-a', empty.id)).toEqual({ ...empty, aggregatedSizeBytes: 0 })
+})
+
+test('accepts an empty batch for a running scan and exactly the scanner batch limit', () => {
+  const db = open()
+  db.insertScan(scan('scan-a', 'running'))
+  db.applyBatch('scan-a', [])
+  expect(db.getEntry('scan-a', 'root')).toBeNull()
+  const descendants = Array.from({ length: SCANNER_BATCH_SIZE - 1 }, (_, index) =>
+    discover({ ...file('scan-a', `file-${index}`), sizeBytes: 0 })
+  )
+  db.applyBatch('scan-a', [discover(root()), ...descendants])
+  expect(db.getEntry('scan-a', `file-${descendants.length - 1}`)?.sizeBytes).toBe(0)
+})
+
+test('requires the parent to precede the child and belong to the same scan', () => {
+  const db = open()
+  db.insertScan(scan('scan-a', 'running'))
+  db.insertScan(scan('scan-b', 'running'))
+  db.applyBatch('scan-b', [discover(root('scan-b'))])
+  expect(() => db.applyBatch('scan-a', [discover(file()), discover(root())])).toThrow(
+    'FOREIGN KEY constraint failed'
+  )
+  expect(db.getEntry('scan-a', 'file')).toBeNull()
+  expect(db.getEntry('scan-a', 'root')).toBeNull()
+  expect(db.getEntry('scan-b', 'root')).not.toBeNull()
+
+  db.applyBatch('scan-a', [discover(root()), discover(file())])
+  expect(db.getEntry('scan-a', 'file')).toEqual(file())
+})
+
+test('rolls back both inserts and finalizations on a later constraint violation', () => {
+  const db = open()
+  db.insertScan(scan('scan-a', 'running'))
+  db.applyBatch('scan-a', [discover(root())])
+  const operations = [discover(file()), finalize(root(), 20)]
+  expect(() => db.applyBatch('scan-a', [...operations, discover(root())])).toThrow(
+    'UNIQUE constraint failed'
+  )
+  expect(db.getEntry('scan-a', 'root')).toEqual({ ...root(), aggregatedSizeBytes: null })
+  expect(db.getEntry('scan-a', 'file')).toBeNull()
+
+  db.applyBatch('scan-a', operations)
+  expect(db.getEntry('scan-a', 'file')).toEqual(file())
+  expect(db.getEntry('scan-a', 'root')).toEqual(root())
+})
+
+test('rolls back on missing, non-directory, and inconsistent finalization targets', () => {
+  const db = open()
+  db.insertScan(scan('scan-a', 'running'))
+  db.applyBatch('scan-a', [discover(root()), discover(file())])
+  const added = discover(file('scan-a', 'new-file'))
+  for (const [target, message] of [
+    [finalize({ ...root(), id: 'absent' }, 0), 'Cannot finalize missing entry absent'],
+    [finalize(file(), 0), 'Entry file is not a directory'],
+    [finalize({ ...root(), modifiedAt: null }, 20), 'differs from its discovery metadata']
+  ] as const) {
+    expect(() => db.applyBatch('scan-a', [added, target])).toThrow(message)
+    expect(db.getEntry('scan-a', 'new-file')).toBeNull()
+    expect(db.getEntry('scan-a', 'root')?.aggregatedSizeBytes).toBeNull()
+  }
+})
+
+test('requires child directories to finalize before their parent and rejects repeated finalization', () => {
+  const db = open()
+  db.insertScan(scan('scan-a', 'running'))
+  const child = { ...root(), id: 'child', parentId: 'root', path: join(rootPath, 'child') }
+  db.applyBatch('scan-a', [discover(root()), discover(child)])
+  expect(() => db.applyBatch('scan-a', [finalize(root(), 0), finalize(child, 0)])).toThrow(
+    'has an unfinalized child directory'
+  )
+  expect(db.getEntry('scan-a', child.id)?.aggregatedSizeBytes).toBeNull()
+
+  db.applyBatch('scan-a', [finalize(child, 0), finalize(root(), 0)])
+  expect(() => db.applyBatch('scan-a', [finalize(root(), 0)])).toThrow('already finalized')
+  expect(() => db.applyBatch('scan-a', [discover(file())])).toThrow(
+    'Parent directory root is already finalized'
+  )
+  expect(db.getEntry('scan-a', 'root')?.aggregatedSizeBytes).toBe(0)
+  expect(db.getEntry('scan-a', 'file')).toBeNull()
+})
+
+test('requires discoveries to match the scan root and rejects mixed-scan batches', () => {
+  const db = open()
+  db.insertScan(scan('scan-a', 'running'))
+  expect(() =>
+    db.applyBatch('scan-a', [discover({ ...root(), path: join(rootPath, 'other') })])
+  ).toThrow('does not match the scan root')
+  expect(() => db.applyBatch('scan-a', [discover(root()), discover(file('scan-b'))])).toThrow(
+    'belongs to a different scan'
+  )
+  expect(() => db.applyBatch('scan-a', [discover(root()), finalize(root('scan-b'), 0)])).toThrow(
+    'belongs to a different scan'
+  )
+  expect(db.getEntry('scan-a', 'root')).toBeNull()
+})
+
+test.each(['completed', 'cancelled', 'failed'] as const)(
+  'rejects batch writes to a %s scan',
+  (status) => {
+    const db = open()
+    db.insertScan(scan('scan-a', status))
+    expect(() => db.applyBatch('scan-a', [discover(root())])).toThrow('scan scan-a is not running')
+    expect(db.getEntry('scan-a', 'root')).toBeNull()
+  }
+)
+
+test('requires an existing scan even for an empty batch', () => {
+  expect(() => open().applyBatch('scan-a', [])).toThrow('scan scan-a does not exist')
+})
+
+test('rejects oversized and malformed batches without retaining an insert', () => {
+  const db = open()
+  db.insertScan(scan('scan-a', 'running'))
+  const discovery = discover(root())
+  const oversized = Array.from({ length: SCANNER_BATCH_SIZE + 1 }, () => discovery)
+  expect(() => db.applyBatch('scan-a', oversized)).toThrow(
+    `at most ${SCANNER_BATCH_SIZE} operations`
+  )
+
+  const sparse = new Array<StorageBatchOperation>(2)
+  sparse[1] = discovery
+  for (const malformed of [
+    sparse,
+    [discovery, { type: 'other', entry: file() }],
+    [{ type: 'entry', entry: root() }],
+    [discovery, { type: 'directory-finalized', entry: { ...root(), aggregatedSizeBytes: null } }],
+    [discovery, { type: 'directory-finalized', entry: file() }],
+    [discovery, discover({ ...file(), sizeBytes: Number.MAX_SAFE_INTEGER + 1 })],
+    [discovery, finalize(root(), Number.MAX_SAFE_INTEGER + 1)],
+    [discovery, finalize(root(), -1)],
+    [discovery, finalize(root(), 0.5)]
+  ]) {
+    expect(() => Reflect.apply(db.applyBatch, db, ['scan-a', malformed])).toThrow(
+      'storage batch operation'
+    )
+    expect(db.getEntry('scan-a', 'root')).toBeNull()
+  }
 })

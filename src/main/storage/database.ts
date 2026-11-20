@@ -1,5 +1,10 @@
 import { DatabaseSync, type SQLOutputValue, type StatementSync } from 'node:sqlite'
 import type { FileEntry, ScanSession } from '../../shared/scan'
+import {
+  validateStorageBatch,
+  type FinalizedDirectory,
+  type StorageBatchOperation
+} from './payloads'
 import { initializeSchema } from './schema'
 
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
@@ -70,6 +75,9 @@ export class ScanDatabase {
   private readonly selectScanStatement: StatementSync
   private readonly insertEntryStatement: StatementSync
   private readonly selectEntryStatement: StatementSync
+  private readonly selectFinalizedDirectoryStatement: StatementSync
+  private readonly selectUnfinalizedChildStatement: StatementSync
+  private readonly finalizeDirectoryStatement: StatementSync
 
   constructor(path: string) {
     // Foreign keys are per connection. Keep SQLite's default journal mode for new databases
@@ -109,6 +117,19 @@ export class ScanDatabase {
         FROM entries WHERE scan_id = ? AND id = ?
       `)
       this.selectEntryStatement.setReadBigInts(true)
+
+      this.selectFinalizedDirectoryStatement = this.connection.prepare(`
+        SELECT 1 FROM entries
+        WHERE scan_id = ? AND id = ? AND type = 'directory' AND aggregated_size_bytes IS NOT NULL
+      `)
+      this.selectUnfinalizedChildStatement = this.connection.prepare(`
+        SELECT 1 FROM entries
+        WHERE scan_id = ? AND parent_id = ? AND type = 'directory' AND aggregated_size_bytes IS NULL
+        LIMIT 1
+      `)
+      this.finalizeDirectoryStatement = this.connection.prepare(`
+        UPDATE entries SET aggregated_size_bytes = ? WHERE scan_id = ? AND id = ?
+      `)
     } catch (error) {
       const reason = error instanceof Error ? error.message : String(error)
       const message = `Could not open the scan database ${JSON.stringify(path)}. ${reason}`
@@ -217,6 +238,65 @@ export class ScanDatabase {
       createdAt: row.created_at === null ? null : readText(row.created_at, 'createdAt'),
       modifiedAt: row.modified_at === null ? null : readText(row.modified_at, 'modifiedAt')
     }
+  }
+
+  /** Persist discoveries and finalizations in order, acknowledging only a committed batch. */
+  applyBatch(scanId: string, operations: readonly StorageBatchOperation[]): void {
+    validateStorageBatch({ scanId, operations })
+    this.transaction(() => {
+      const scan = this.getScan(scanId)
+      if (!scan) throw new Error(`Storage batch scan ${scanId} does not exist.`)
+      if (scan.status !== 'running') throw new Error(`Storage batch scan ${scanId} is not running.`)
+
+      for (const operation of operations) {
+        const { entry } = operation
+        if (operation.type === 'entry') {
+          if (
+            entry.parentId === null &&
+            (entry.type !== 'directory' || entry.path !== scan.rootPath)
+          ) {
+            throw new Error(`Storage batch entry ${entry.id} does not match the scan root.`)
+          }
+          this.requireUnfinalizedParent(entry)
+          this.insertEntry(entry)
+        } else {
+          this.finalizeDirectory(operation.entry)
+        }
+      }
+    })
+  }
+
+  private requireUnfinalizedParent(entry: FileEntry): void {
+    // The immediate foreign key on insert still enforces existence and same-scan directory identity.
+    if (
+      entry.parentId !== null &&
+      this.selectFinalizedDirectoryStatement.get(entry.scanId, entry.parentId)
+    ) {
+      throw new Error(`Parent directory ${entry.parentId} is already finalized.`)
+    }
+  }
+
+  private finalizeDirectory(entry: FinalizedDirectory): void {
+    const { scanId, id, aggregatedSizeBytes } = entry
+    const stored = this.getEntry(scanId, id)
+    if (!stored) throw new Error(`Cannot finalize missing entry ${id}.`)
+    if (stored.type !== 'directory') throw new Error(`Entry ${id} is not a directory.`)
+    if (stored.aggregatedSizeBytes !== null)
+      throw new Error(`Directory ${id} is already finalized.`)
+    const metadata = ['parentId', 'name', 'path', 'createdAt', 'modifiedAt'] as const
+    if (metadata.some((key) => stored[key] !== entry[key])) {
+      throw new Error(`Finalization for directory ${id} differs from its discovery metadata.`)
+    }
+    this.requireUnfinalizedParent(entry)
+    if (this.selectUnfinalizedChildStatement.get(scanId, id)) {
+      throw new Error(`Directory ${id} has an unfinalized child directory.`)
+    }
+
+    this.finalizeDirectoryStatement.run(
+      bindInteger(aggregatedSizeBytes, 'aggregatedSizeBytes'),
+      scanId,
+      id
+    )
   }
 
   /** Run synchronous writes atomically on this connection. A thrown error rolls them back. */

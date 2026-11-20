@@ -5,10 +5,13 @@ import { mkdtemp, readdir, rm, stat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
 import { Worker } from 'node:worker_threads'
 import { resolveConfig } from 'electron-vite'
 import { build } from 'vite'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
+import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
+import type { StorageBatchOperation } from '../src/main/storage/payloads'
 import {
   STORAGE_REQUEST_TIMEOUT_MS,
   STORAGE_SHUTDOWN_TIMEOUT_MS,
@@ -198,6 +201,118 @@ test('accepts one in-flight request, so callers await writes before reading', as
   await expect(client.getScan(scan.id)).rejects.toThrow('already in flight')
   await inserted
   await expect(client.getScan(scan.id)).resolves.toEqual(scan)
+})
+
+test('acknowledges a mixed batch only after commit and reopens the exact values', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.insertScan(scan)
+  const directory = { ...root, type: 'directory' as const, aggregatedSizeBytes: 0 }
+  await client.applyBatch(scan.id, [
+    { type: 'entry', entry: root },
+    { type: 'entry', entry: file },
+    { type: 'directory-finalized', entry: directory }
+  ])
+
+  // A second, read-only connection sees the committed changes while the worker is still open.
+  const observer = new DatabaseSync(databasePath, { readOnly: true })
+  try {
+    expect(
+      observer.prepare('SELECT id, aggregated_size_bytes FROM entries ORDER BY id').all()
+    ).toEqual([
+      { id: 'file', aggregated_size_bytes: null },
+      { id: 'root', aggregated_size_bytes: 0 }
+    ])
+  } finally {
+    observer.close()
+  }
+  await client.dispose()
+
+  const reopened = bundled()
+  await reopened.initialize(databasePath)
+  await expect(reopened.getEntry(scan.id, root.id)).resolves.toEqual(directory)
+  await expect(reopened.getEntry(scan.id, file.id)).resolves.toEqual(file)
+})
+
+test('propagates a batch constraint error, rolls back its writes, and accepts a later batch', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.insertScan(scan)
+  await client.applyBatch(scan.id, [{ type: 'entry', entry: root }])
+  await expect(
+    client.applyBatch(scan.id, [
+      { type: 'entry', entry: file },
+      { type: 'entry', entry: { ...file, id: 'orphan', parentId: 'missing' } }
+    ])
+  ).rejects.toMatchObject({
+    message: 'FOREIGN KEY constraint failed',
+    code: 'ERR_SQLITE_ERROR',
+    sqliteCode: 787
+  })
+  await expect(client.getEntry(scan.id, file.id)).resolves.toBeNull()
+  await expect(client.getEntry(scan.id, root.id)).resolves.toEqual(root)
+
+  const directory = { ...root, type: 'directory' as const, aggregatedSizeBytes: 0 }
+  await expect(
+    client.applyBatch(scan.id, [
+      { type: 'entry', entry: file },
+      { type: 'directory-finalized', entry: { ...directory, id: 'missing' } }
+    ])
+  ).rejects.toMatchObject({ message: 'Cannot finalize missing entry missing.', code: null })
+  await expect(client.getEntry(scan.id, file.id)).resolves.toBeNull()
+  await client.applyBatch(scan.id, [
+    { type: 'entry', entry: file },
+    { type: 'directory-finalized', entry: directory }
+  ])
+  await expect(client.getEntry(scan.id, root.id)).resolves.toEqual(directory)
+})
+
+test('reports malformed, mixed-scan, and oversized batch requests as structured errors', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.insertScan(scan)
+  const discovery = { type: 'entry', entry: root } satisfies StorageBatchOperation
+  await expect(
+    client.applyBatch(scan.id, [discovery, { type: 'entry', entry: { ...file, scanId: 'other' } }])
+  ).rejects.toMatchObject({
+    name: 'TypeError',
+    message: expect.stringContaining('different scan'),
+    code: null
+  })
+  await expect(
+    client.applyBatch(
+      scan.id,
+      Array.from({ length: SCANNER_BATCH_SIZE + 1 }, () => discovery)
+    )
+  ).rejects.toMatchObject({
+    name: 'RangeError',
+    message: expect.stringContaining('at most'),
+    code: null
+  })
+  await expect(
+    client.applyBatch(scan.id, [
+      discovery,
+      { type: 'entry', entry: { ...file, sizeBytes: Number.MAX_SAFE_INTEGER + 1 } }
+    ])
+  ).rejects.toMatchObject({
+    name: 'TypeError',
+    message: expect.stringContaining('operation 2'),
+    code: null
+  })
+  await expect(client.getEntry(scan.id, root.id)).resolves.toBeNull()
+})
+
+test('keeps batches single-in-flight and stops accepting them once disposal starts', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.insertScan(scan)
+  const operations = [{ type: 'entry', entry: root }] satisfies StorageBatchOperation[]
+  const committed = client.applyBatch(scan.id, operations)
+  await expect(client.applyBatch(scan.id, operations)).rejects.toThrow('already in flight')
+  const closing = client.dispose()
+  await expect(client.applyBatch(scan.id, [])).rejects.toThrow('closing or closed')
+  await committed
+  await closing
 })
 
 test('propagates a constraint error and accepts subsequent requests on the same connection', async () => {

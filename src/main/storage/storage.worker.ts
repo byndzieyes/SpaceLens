@@ -38,6 +38,9 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
     case 'insertEntry':
       requireDatabase().insertEntry(request.payload)
       return null
+    case 'applyBatch':
+      requireDatabase().applyBatch(request.payload.scanId, request.payload.operations)
+      return null
     case 'getEntry':
       return requireDatabase().getEntry(request.payload.scanId, request.payload.id)
     case 'close':
