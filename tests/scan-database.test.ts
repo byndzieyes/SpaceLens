@@ -5,7 +5,6 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { ScanSnapshotStorage } from '../src/main/scanner/snapshot'
 import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
 import { ScanDatabase } from '../src/main/storage/database'
 import type {
@@ -657,7 +656,7 @@ test('reads published Explorer metadata and entries through reopen and atomic re
   expect(reopened.getScanEntry({ ...nextRoot, entryId: 'file' })).toEqual(file(next.id))
 })
 
-test('matches Memory Snapshot metadata and page ordering for mixed names, types and depths', () => {
+test('returns SQLite metadata and deterministic pages and Treemap for mixed names, types and depths', () => {
   const db = open()
   const pending = building()
   const top = { ...root(), id: 'stored-root' }
@@ -729,29 +728,35 @@ test('matches Memory Snapshot metadata and page ordering for mixed names, types 
     totalBytes: max,
     errorCount: 2
   })
-  const memory = new ScanSnapshotStorage(pending.id, rootPath)
-  for (const op of operations) memory.accept(op)
-  for (const entry of [files.find((item) => item.id === 'odd')!, otherEntries[0]]) {
-    memory.accept({ type: 'error', error: { path: entry.path, code: 'EACCES', message: 'Denied' } })
-  }
-  expect(
-    memory.complete(
-      { type: 'summary', scanId: pending.id, rootEntryId: top.id, summary: final.summary },
-      final.finishedAt
-    )
-  ).toBe(true)
   db.beginScan(pending)
   for (let i = 0; i < operations.length; i += SCANNER_BATCH_SIZE) {
     db.applyBatch(pending.id, operations.slice(i, i + SCANNER_BATCH_SIZE))
   }
   db.publishScan(final, top.id)
-  expect(db.getScanSnapshot()).toEqual({ snapshot: memory.describe(), unavailable: null })
+  const saved = db.getScanSnapshot()
+  expect(saved).toEqual({
+    snapshot: {
+      entries: { scanId: pending.id, rootEntryId: top.id },
+      root: { ...top, aggregatedSizeBytes: max },
+      completedAt: final.finishedAt,
+      summary: final.summary,
+      entryCount: files.length + 7,
+      incomplete: true
+    },
+    unavailable: null
+  })
   expect(db.getScanSnapshot().snapshot?.entryCount).toBe(files.length + 7)
   for (const entry of [...files, ...otherEntries, leaf]) {
-    expect(db.getScanEntry({ scanId: pending.id, entryId: entry.id })).toEqual(
-      memory.getEntry(entry.id)
-    )
+    expect(db.getScanEntry({ scanId: pending.id, entryId: entry.id })).toEqual(entry)
   }
+  const direct = [
+    { ...empty, aggregatedSizeBytes: 0 },
+    { ...nested, aggregatedSizeBytes: max },
+    ...files,
+    ...otherEntries
+  ]
+  const compare = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0)
+  direct.sort((a, b) => compare(a.name, b.name) || compare(a.id, b.id))
   for (const [entryId, offset, limit] of [
     [top.id, 0, 100],
     [top.id, 100, 100],
@@ -762,30 +767,43 @@ test('matches Memory Snapshot metadata and page ordering for mixed names, types 
     [nested.id, 0, 1]
   ] as const) {
     const request = { scanId: pending.id, entryId, offset, limit }
-    expect(db.listScanDirectory(request)).toEqual(memory.listDirectory(request))
+    const expected = entryId === top.id ? direct : entryId === nested.id ? [leaf] : []
+    expect(db.listScanDirectory(request)).toEqual({
+      scanId: pending.id,
+      directoryId: entryId,
+      entries: expected.slice(offset, offset + limit),
+      totalCount: expected.length,
+      nextOffset: offset + limit < expected.length ? offset + limit : null
+    })
   }
-  const tied = memory.listDirectory({
-    scanId: pending.id,
-    entryId: top.id,
-    offset: 100,
-    limit: 100
-  })
-  const tieStart = 100 + tied.entries.findIndex((entry) => entry.name === 'same')
+  const tieStart = direct.findIndex((entry) => entry.name === 'same')
   for (const [index, id] of ['tie_-', 'tie_A', 'tie_z'].entries()) {
     const request = { scanId: pending.id, entryId: top.id, offset: tieStart + index, limit: 1 }
-    expect(db.listScanDirectory(request)).toEqual(memory.listDirectory(request))
     expect(db.listScanDirectory(request).entries[0].id).toBe(id)
   }
 
-  for (const [entryId, limit] of [
-    [top.id, 1],
-    [top.id, 100],
-    [empty.id, 100],
-    [nested.id, 100]
-  ] as const) {
-    const request = { scanId: pending.id, entryId, limit }
-    expect(db.getScanDirectoryTreemap(request)).toEqual(memory.getDirectoryTreemap(request))
-  }
+  const ranked = [
+    direct.find(({ id }) => id === nested.id)!,
+    ...direct.filter(
+      ({ id, type, sizeBytes }) => id === empty.id || (type === 'file' && sizeBytes === 0)
+    ),
+    ...direct.filter(
+      ({ type, sizeBytes }) => type !== 'directory' && (type !== 'file' || sizeBytes === null)
+    )
+  ]
+  expect(db.getScanDirectoryTreemap({ scanId: pending.id, entryId: top.id }).entries).toEqual(
+    ranked.slice(0, 100)
+  )
+  expect(db.getScanDirectoryTreemap({ scanId: pending.id, entryId: empty.id })).toMatchObject({
+    entries: [],
+    totalCount: 0,
+    other: null
+  })
+  expect(db.getScanDirectoryTreemap({ scanId: pending.id, entryId: nested.id })).toMatchObject({
+    entries: [leaf],
+    totalCount: 1,
+    other: null
+  })
   expect(
     db.getScanDirectoryTreemap({ scanId: pending.id, entryId: top.id, limit: 1 })
   ).toMatchObject({
@@ -795,8 +813,38 @@ test('matches Memory Snapshot metadata and page ordering for mixed names, types 
   })
 })
 
+test('rejects a batch with unbrowsable entry references before writing any of its entries', () => {
+  const db = open()
+  const pending = building()
+  db.beginScan(pending)
+  for (const invalid of [
+    { ...file(), id: '../file' },
+    { ...file(), parentId: 'root/child' }
+  ]) {
+    expect(() => db.applyBatch(pending.id, [discover(root()), discover(invalid)])).toThrow(
+      'Invalid entry reference'
+    )
+    expect(db.getEntry(pending.id, 'root')).toBeNull()
+  }
+})
+
+test('commits and returns browsable metadata beyond the former per-entry retention cap', () => {
+  const db = open()
+  const pending = building()
+  const top = root()
+  const name = 'long'.repeat(9000)
+  const child = { ...file(), name, path: join(rootPath, name) }
+  const publication = completed(pending, { fileCount: 1, totalBytes: 20 })
+
+  db.beginScan(pending)
+  db.applyBatch(pending.id, [discover(top), discover(child), finalize(top, 20)])
+  expect(db.publishScan(publication, top.id)).toEqual(publication)
+  expect(db.getPublishedScan()).toEqual(publication)
+  expect(db.getScanEntry({ scanId: pending.id, entryId: child.id })).toEqual(child)
+})
+
 test.each([0, 1, 37, 100, 101, 138])(
-  'matches Treemap Top-N and Other for %i direct children',
+  'ranks Treemap Top-N and Other across %i direct children',
   (count) => {
     const db = open()
     const pending = building()
@@ -813,14 +861,6 @@ test.each([0, 1, 37, 100, 101, 138])(
     const bytes = files.reduce((total, entry) => total + entry.sizeBytes, 0)
     const operations = [discover(top), ...files.map(discover), finalize(top, bytes)]
     const saved = completed(pending, { fileCount: count, totalBytes: bytes })
-    const memory = new ScanSnapshotStorage(pending.id, rootPath)
-    for (const operation of operations) memory.accept(operation)
-    expect(
-      memory.complete(
-        { type: 'summary', scanId: pending.id, rootEntryId: top.id, summary: saved.summary },
-        saved.finishedAt
-      )
-    ).toBe(true)
     db.beginScan(pending)
     for (let start = 0; start < operations.length; start += SCANNER_BATCH_SIZE) {
       db.applyBatch(pending.id, operations.slice(start, start + SCANNER_BATCH_SIZE))
@@ -828,7 +868,17 @@ test.each([0, 1, 37, 100, 101, 138])(
     db.publishScan(saved, top.id)
     const request = { scanId: pending.id, entryId: top.id }
     const result = db.getScanDirectoryTreemap(request)
-    expect(result).toEqual(memory.getDirectoryTreemap(request))
+    const ranked = files.toSorted((a, b) => b.sizeBytes - a.sizeBytes || (a.name < b.name ? -1 : 1))
+    expect(result.entries).toEqual(ranked.slice(0, 100))
+    if (count > 100) {
+      const excluded = ranked.slice(100)
+      expect(result.other).toEqual({
+        count: excluded.length,
+        knownBytes: excluded.reduce((sum, entry) => sum + entry.sizeBytes, 0),
+        unknownCount: 0,
+        zeroCount: excluded.filter((entry) => entry.sizeBytes === 0).length
+      })
+    } else expect(result.other).toBeNull()
     expect(db.getScanDirectoryTreemap(request)).toEqual(result)
     expect(result.entries).toHaveLength(Math.min(100, count))
     expect(result.entries[0]?.name).toBe(count ? 'zz-largest' : undefined)
@@ -840,7 +890,7 @@ test.each([0, 1, 37, 100, 101, 138])(
       )
     ).toBe(bytes)
     const limited = { ...request, limit: 1 }
-    expect(db.getScanDirectoryTreemap(limited)).toEqual(memory.getDirectoryTreemap(limited))
+    expect(db.getScanDirectoryTreemap(limited).entries).toEqual(ranked.slice(0, 1))
     expect(db.getScanDirectoryTreemap(limited).other?.knownBytes ?? 0).toBe(
       count > 1 ? bytes - 1000 : 0
     )

@@ -50,13 +50,12 @@ async function mount(): Promise<RenderHookResult<ReturnType<typeof useExplorer>,
   await waitFor(() => expect(hook.result.current.loading).toBe(false))
   return hook
 }
-test('initializes the retained root with incomplete and newer summary-only metadata', async () => {
+test('initializes the published root and preserves incomplete coverage', async () => {
   const { result } = await mount()
   expect(result.current.currentDirectoryId).toBe('root')
   expect(result.current.availability).toMatchObject({
     status: 'available',
-    snapshot: { incomplete: true },
-    unavailable: { scanId: 'newer' }
+    snapshot: { incomplete: true }
   })
   expect(api.getScanEntry).not.toHaveBeenCalled()
 })
@@ -66,7 +65,7 @@ test.each([null, { scanId: 'newer', reason: 'limit-exceeded' as const }])(
     api.getScanSnapshot.mockResolvedValue({ ok: true, value: { snapshot: null, unavailable } })
     const { result } = await mount()
     expect(result.current.currentDirectoryId).toBeNull()
-    expect(result.current.availability?.status).toBe(unavailable ? 'summary-only' : 'missing')
+    expect(result.current.availability?.status).toBe('missing')
   }
 )
 test('validates hierarchy, history, ancestor navigation and selection', async () => {

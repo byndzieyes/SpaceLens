@@ -1,29 +1,11 @@
 import { randomUUID } from 'node:crypto'
 import { resolve } from 'node:path'
-import type { RecentScanSummary, ScanProgress, ScanSessionState } from '../../shared/scan'
+import type { ScanProgress, ScanSessionState } from '../../shared/scan'
 export type { ScanSessionState } from '../../shared/scan'
 import { ScanCancelledError } from './cancellation'
 import { batchOperations, ScanStorageError, writeScan, type ScanPersistence } from './persistence'
-import type { BuildingScan } from '../storage/payloads'
+import type { BuildingScan, CompletedScan } from '../storage/payloads'
 import { ScanProgressTracker } from './progress'
-import {
-  DEFAULT_SNAPSHOT_LIMITS,
-  ScanSnapshotStorage,
-  SnapshotAccessError,
-  validateSnapshotRequest,
-  validateTreemapRequest,
-  type SnapshotLimits
-} from './snapshot'
-import type {
-  ScanDirectoryPage,
-  ScanDirectoryRequest,
-  ScanDirectoryTreemap,
-  ScanDirectoryTreemapRequest,
-  ScanEntryRequest,
-  ScanSnapshotAvailability
-} from '../../shared/snapshot'
-import type { FileEntry } from '../../shared/scan'
-import type { ScanSummaryEvent } from './summary'
 import type { ScanEventConsumer } from './workerClient'
 import { serializeWorkerFailure } from './workerProtocol'
 import { runScannerWorker } from './workerRunner'
@@ -35,7 +17,6 @@ interface ActiveScan {
   readonly id: string
   readonly controller: AbortController
   readonly tracker: ScanProgressTracker
-  readonly snapshot: ScanSnapshotStorage
   readonly done: Promise<ScanSessionState>
   acceptingEvents: boolean
   publishing: boolean
@@ -57,76 +38,17 @@ function copy(state: ScanSessionState): ScanSessionState {
 }
 
 /**
- * One active attempt and the latest state, with bounded temporary entry retention
- * and no event history. start() resolves terminal state for all worker outcomes; invalid,
- * concurrent, or disposed starts reject. Await it before starting another scan.
+ * One active attempt and its latest state. Each scanner batch goes to SQLite before ACK.
  */
 export class ScanSessionManager {
-  private latestCompleted: RecentScanSummary | null = null
   private state: ScanSessionState | null = null
   private active: ActiveScan | null = null
   private storageBlocked: ScanStorageError | undefined
   private readonly subscribers = new Set<ScanSessionSubscriber>()
   private disposed = false
   private disposal: Promise<void> | undefined
-  private published: ScanSnapshotStorage | null = null
-  private unavailable: ScanSnapshotAvailability['unavailable'] = null
-  private readonly snapshotLimits: SnapshotLimits
 
-  constructor(
-    limits: SnapshotLimits = DEFAULT_SNAPSHOT_LIMITS,
-    private readonly storageReady?: Promise<ScanPersistence>
-  ) {
-    if (
-      !Number.isSafeInteger(limits.maxEntries) ||
-      limits.maxEntries < 0 ||
-      !Number.isSafeInteger(limits.maxEstimatedBytes) ||
-      limits.maxEstimatedBytes < 0
-    )
-      throw new RangeError('Snapshot limits must be non-negative safe integers.')
-    this.snapshotLimits = { ...limits }
-  }
-
-  getScanSnapshot(): ScanSnapshotAvailability {
-    return {
-      snapshot: this.published?.describe() ?? null,
-      unavailable: this.getSnapshotUnavailable()
-    }
-  }
-
-  /** Small notification metadata; never copies entries or root paths on progress updates. */
-  getSnapshotUnavailable(): ScanSnapshotAvailability['unavailable'] {
-    return this.unavailable === null ? null : { ...this.unavailable }
-  }
-
-  getScanEntry(request: ScanEntryRequest): FileEntry {
-    validateSnapshotRequest(request, false)
-    return this.snapshotFor(request.scanId).getEntry(request.entryId)
-  }
-
-  listScanDirectory(request: ScanDirectoryRequest): ScanDirectoryPage {
-    validateSnapshotRequest(request, true)
-    return this.snapshotFor(request.scanId).listDirectory(request)
-  }
-
-  getScanDirectoryTreemap(request: ScanDirectoryTreemapRequest): ScanDirectoryTreemap {
-    validateTreemapRequest(request)
-    return this.snapshotFor(request.scanId).getDirectoryTreemap(request)
-  }
-
-  private snapshotFor(scanId: string): ScanSnapshotStorage {
-    if (this.published?.scanId === scanId) return this.published
-    if (!this.published || this.unavailable?.scanId === scanId || this.state?.session.id === scanId)
-      throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'This scan has no available snapshot.')
-    throw new SnapshotAccessError(
-      'SNAPSHOT_EXPIRED',
-      'This snapshot reference is no longer available.'
-    )
-  }
-
-  getLatestCompleted(): RecentScanSummary | null {
-    return this.latestCompleted === null ? null : { ...this.latestCompleted }
-  }
+  constructor(private readonly storageReady: Promise<ScanPersistence>) {}
 
   getState(): ScanSessionState | null {
     return this.state === null ? null : copy(this.state)
@@ -174,49 +96,40 @@ export class ScanSessionManager {
       summary: { fileCount: 0, directoryCount: 0, totalBytes: 0, errorCount: 0 }
     }
     const accepted = Promise.withResolvers<void>()
-    const activate = (): void => {
-      active.acceptingEvents = true
-      this.state = { session, progress: tracker.snapshot(), failure: null }
-      this.notify()
-      accepted.resolve()
-    }
     const active: ActiveScan = {
       id,
       tracker,
-      snapshot: new ScanSnapshotStorage(id, path, this.snapshotLimits),
       controller: new AbortController(),
       acceptingEvents: false,
       publishing: false,
       errorCount: 0,
       // Establish the active reservation before callbacks can cancel/dispose/reenter.
       done: Promise.resolve().then(async () => {
-        let storage: ScanPersistence | undefined
-        if (this.storageReady) {
-          try {
-            storage = await this.prepareStorage(active, session, this.storageReady, confirmStart)
-          } catch (error) {
-            if (error instanceof ScanStorageError && error.uncertain) this.storageBlocked = error
-            active.snapshot.discard()
-            this.active = null
-            throw error
-          }
-          activate()
+        let storage: ScanPersistence
+        try {
+          storage = await this.prepareStorage(active, session, confirmStart)
+        } catch (error) {
+          if (error instanceof ScanStorageError && error.uncertain) this.storageBlocked = error
+          this.active = null
+          throw error
         }
+        active.acceptingEvents = true
+        this.state = { session, progress: tracker.snapshot(), failure: null }
+        this.notify()
+        accepted.resolve()
         return this.execute(active, path, consume, storage)
       })
     }
     this.active = active
-    if (!this.storageReady) activate()
     return { scanId: id, accepted: accepted.promise, done: active.done }
   }
 
   private async prepareStorage(
     active: ActiveScan,
     session: BuildingScan,
-    ready: Promise<ScanPersistence>,
     confirmStart?: () => Promise<void>
   ): Promise<ScanPersistence> {
-    const storage = await ready.catch((error: unknown) => {
+    const storage = await this.storageReady.catch((error: unknown) => {
       if (active.controller.signal.aborted) throw new ScanCancelledError()
       if (error instanceof ScanStorageError) throw error
       throw new ScanStorageError('initializing scan storage', error)
@@ -267,10 +180,6 @@ export class ScanSessionManager {
     this.disposed = true
     this.subscribers.clear()
     this.cancel()
-    this.published?.discard()
-    this.published = null
-    this.active?.snapshot.discard()
-    this.unavailable = null
     this.disposal =
       this.active?.done.then(
         () => undefined,
@@ -306,12 +215,11 @@ export class ScanSessionManager {
     active: ActiveScan,
     path: string,
     consume: ScanEventConsumer,
-    storage?: ScanPersistence
+    storage: ScanPersistence
   ): Promise<ScanSessionState> {
     let status: 'completed' | 'cancelled' | 'failed' = 'completed'
     let failure: unknown
-    let completedResult: ScanSummaryEvent | null = null
-    let completedAt: string | undefined
+    let published: CompletedScan | undefined
     try {
       const result = await runScannerWorker(
         path,
@@ -328,21 +236,18 @@ export class ScanSessionManager {
             active.errorCount++
           }
           active.tracker.accept(event)
-          if (!this.disposed) active.snapshot.accept(event)
           this.refresh(active)
         },
         {
           signal: active.controller.signal,
-          beforeAck:
-            storage &&
-            ((events) => {
-              if (!this.current(active)) return
-              const operations = batchOperations(events)
-              active.batch = writeScan('writing a scan batch', () =>
-                storage.applyBatch(active.id, operations)
-              )
-              return active.batch
-            }),
+          beforeAck: (events) => {
+            if (!this.current(active)) return
+            const operations = batchOperations(events)
+            active.batch = writeScan('writing a scan batch', () =>
+              storage.applyBatch(active.id, operations)
+            )
+            return active.batch
+          },
           onProgress: (progress) => {
             if (!this.current(active)) return
             const known = active.tracker.snapshot()
@@ -368,20 +273,16 @@ export class ScanSessionManager {
         ...this.state!,
         session: { ...this.state!.session, summary: { ...result.summary } }
       }
-      completedAt = new Date().toISOString()
-      if (storage) {
-        const completed = {
-          ...this.state.session,
-          status: 'completed' as const,
-          finishedAt: completedAt
-        }
-        // From this point cancellation would race an atomic publication already in flight.
-        active.publishing = true
-        await writeScan('publishing the scan', () =>
-          storage.publishScan(completed, result.rootEntryId)
-        )
+      const completed: CompletedScan = {
+        ...this.state.session,
+        status: 'completed',
+        finishedAt: new Date().toISOString()
       }
-      completedResult = result
+      // From this point cancellation would race an atomic publication already in flight.
+      active.publishing = true
+      published = await writeScan('publishing the scan', () =>
+        storage.publishScan(completed, result.rootEntryId)
+      )
     } catch (error) {
       if (active.controller.signal.aborted && error instanceof ScanCancelledError)
         status = 'cancelled'
@@ -390,7 +291,7 @@ export class ScanSessionManager {
         failure = error
       }
     }
-    if (status !== 'completed' && storage) {
+    if (status !== 'completed') {
       // Scanner cancellation can settle before an in-flight pre-ACK callback returns.
       try {
         await active.batch
@@ -415,38 +316,12 @@ export class ScanSessionManager {
     this.state = {
       ...this.state!,
       failure: status === 'failed' ? serializeWorkerFailure(failure) : null,
-      session: {
+      session: published ?? {
         ...this.state!.session,
         status,
-        finishedAt: status === 'completed' ? completedAt! : new Date().toISOString()
+        finishedAt: new Date().toISOString()
       }
     }
-    if (this.state.session.status === 'completed') {
-      const session = this.state.session
-      if (
-        !this.disposed &&
-        completedResult &&
-        active.snapshot.complete(completedResult, session.finishedAt)
-      ) {
-        this.published?.discard()
-        this.published = active.snapshot
-        this.unavailable = null
-      } else if (!this.disposed) {
-        this.unavailable = {
-          scanId: active.id,
-          reason: active.snapshot.unavailableReason ?? 'invalid-data'
-        }
-      }
-      this.latestCompleted = {
-        id: session.id,
-        path: session.rootPath,
-        completedAt: session.finishedAt,
-        totalBytes: session.summary.totalBytes,
-        fileCount: session.summary.fileCount,
-        errorCount: session.summary.errorCount
-      }
-    }
-    if (this.published !== active.snapshot) active.snapshot.discard()
     const terminal = copy(this.state)
     this.notify()
     this.active = null

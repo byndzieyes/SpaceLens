@@ -18,10 +18,7 @@ export function ScanPanel({
   const status = scan?.session.status
   const incomplete = (scan?.session.summary.errorCount ?? 0) > 0
   const canBrowse =
-    ready &&
-    !pending &&
-    scan?.session.status === 'completed' &&
-    scanner.latestCompleted?.id === scan.session.id
+    ready && !pending && scanner.publicationStatus === 'ready' && scanner.latestCompleted !== null
   const label = cancelling
     ? 'Cancellation requested'
     : running
@@ -34,9 +31,11 @@ export function ScanPanel({
           ? 'Scan cancelled'
           : status === 'failed'
             ? 'Scan failed'
-            : ready
-              ? 'Ready to scan'
-              : 'Loading scan status'
+            : scanner.publicationStatus === 'unavailable'
+              ? 'Scan storage unavailable'
+              : ready && scanner.publicationStatus === 'ready'
+                ? 'Ready to scan'
+                : 'Loading scan status'
   const activity =
     pending === 'selecting' ? 'Choosing a folder' : pending === 'starting' ? 'Starting scan' : label
   const Icon =

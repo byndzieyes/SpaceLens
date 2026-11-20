@@ -60,7 +60,7 @@ test.each([false, true])(
     const result = await resolveExplorerSnapshot()
     expect(result).toEqual({
       ok: true,
-      value: { status: 'available', snapshot: metadata, unavailable: null }
+      value: { status: 'available', snapshot: metadata }
     })
     if (!result.ok || result.value.status !== 'available') throw new Error('Expected snapshot')
     expect(result.value.snapshot).toBe(metadata)
@@ -74,31 +74,16 @@ test('represents absence without inventing a scan, summary, or root', async () =
   api.getScanSnapshot.mockResolvedValue({ ok: true, value: { snapshot: null, unavailable: null } })
   expect(await resolveExplorerSnapshot()).toEqual({
     ok: true,
-    value: { status: 'missing', snapshot: null, unavailable: null }
+    value: { status: 'missing', snapshot: null }
   })
 })
 
-test.each(['limit-exceeded', 'invalid-data'] as const)(
-  'distinguishes summary-only retention failure: %s',
-  async (reason) => {
-    const unavailable = { scanId: 'newer', reason }
-    api.getScanSnapshot.mockResolvedValue({ ok: true, value: { snapshot: null, unavailable } })
-    expect(await resolveExplorerSnapshot()).toEqual({
-      ok: true,
-      value: { status: 'summary-only', snapshot: null, unavailable }
-    })
-    expect(api.getScanEntry).not.toHaveBeenCalled()
-    expect(api.listScanDirectory).not.toHaveBeenCalled()
-  }
-)
-
-test('keeps an older snapshot browsable alongside a newer summary-only scan', async () => {
+test('uses published IDs regardless of the deprecated availability field', async () => {
   const unavailable = { scanId: 'newer', reason: 'limit-exceeded' } as const
   api.getScanSnapshot.mockResolvedValue({ ok: true, value: { snapshot, unavailable } })
   api.getScanEntry.mockResolvedValue({ ok: true, value: root })
   const result = await resolveExplorerSnapshot()
   if (!result.ok || result.value.status !== 'available') throw new Error('Expected snapshot')
-  expect(result.value.unavailable).toBe(unavailable)
 
   // Entry lookup deliberately reuses preload; the published IDs, not the latest
   // completed scan ID or a filesystem path, identify the root to query.

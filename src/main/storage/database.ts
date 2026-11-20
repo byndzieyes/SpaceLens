@@ -1,4 +1,5 @@
 import { DatabaseSync, type SQLOutputValue, type StatementSync } from 'node:sqlite'
+import { types } from 'node:util'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
   MAX_SCAN_TREEMAP_ENTRIES,
@@ -13,7 +14,7 @@ import {
   SnapshotAccessError,
   validateSnapshotRequest,
   validateTreemapRequest
-} from '../scanner/snapshot'
+} from './snapshotAccess'
 import {
   isSnapshotId,
   validateBuildingScan,
@@ -73,7 +74,7 @@ function bindFilesystemText(value: string): Buffer {
 }
 
 function readFilesystemText(value: SQLOutputValue, column: string): string {
-  if (!(value instanceof Uint8Array) || value.byteLength % 2 !== 0) {
+  if (!types.isUint8Array(value) || value.byteLength % 2 !== 0) {
     throw new TypeError(`Stored ${column} must be a UTF-16 BLOB.`)
   }
   return Buffer.from(value).swap16().toString('utf16le')
@@ -395,8 +396,9 @@ export class ScanDatabase {
     })
   }
 
-  publishScan(scan: CompletedScan, rootEntryId: string): void {
+  publishScan(scan: CompletedScan, rootEntryId: string): CompletedScan {
     validateScanPublication({ scan, rootEntryId })
+    let published!: CompletedScan
     this.transaction(() => {
       const building = this.getScan(scan.id)
       if (!building || building.status !== 'running') {
@@ -423,7 +425,11 @@ export class ScanDatabase {
       if (previous && this.deleteScanStatement.run(previous.id, 'completed').changes !== 1) {
         throw new Error(`Could not retire published scan ${previous.id}.`)
       }
+      const stored = this.getPublishedScan()
+      if (!stored || stored.id !== scan.id) throw new Error('Could not read the promoted scan.')
+      published = stored
     })
+    return published
   }
 
   discardBuildingScan(scanId: string): void {

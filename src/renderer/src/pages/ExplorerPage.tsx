@@ -156,13 +156,9 @@ export function ExplorerPage(): React.JSX.Element {
         >
           {snapshot
             ? explorer.breadcrumbs.at(-1)?.path
-            : availability?.status === 'summary-only'
-              ? availability.unavailable.reason === 'limit-exceeded'
-                ? 'Summary only. The temporary snapshot storage limit was reached.'
-                : 'Summary only. Filesystem entries could not be retained.'
-              : availability?.status === 'missing'
-                ? 'No published snapshot yet. Complete a scan in Overview to browse its retained entries.'
-                : null}
+            : availability?.status === 'missing'
+              ? 'No published snapshot yet. Complete a scan in Overview to browse its entries.'
+              : null}
         </p>
       </div>
 
@@ -180,11 +176,6 @@ export function ExplorerPage(): React.JSX.Element {
       )}
       {snapshot?.incomplete && (
         <p className="text-warning">Incomplete snapshot: known sizes may be partial.</p>
-      )}
-      {availability?.status === 'available' && availability.unavailable && (
-        <p className="text-text-secondary">
-          A newer scan has summary-only results. Browsing the retained snapshot.
-        </p>
       )}
       <div className="grid min-w-0 grid-cols-1 gap-4 md:grid-cols-[13rem_minmax(0,1fr)] xl:grid-cols-[minmax(12rem,1fr)_minmax(0,2fr)_minmax(12rem,1fr)]">
         <ExplorerPanel id="explorer-tree-title" title="Directory Tree">

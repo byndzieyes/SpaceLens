@@ -11,6 +11,7 @@ import {
 import { runScannerWorker } from '../src/main/scanner/workerRunner'
 import type { ScanEventConsumer, ScannerWorkerOptions } from '../src/main/scanner/workerClient'
 import type { ScanSummaryEvent } from '../src/main/scanner/summary'
+import type { CompletedScan } from '../src/main/storage/payloads'
 import { StorageWorkerError } from '../src/main/storage/workerClient'
 import { ScanStorageError, type ScanPersistence } from '../src/main/scanner/persistence'
 
@@ -48,16 +49,14 @@ afterEach(async () => {
 })
 
 function manager(): ScanSessionManager {
-  const instance = new ScanSessionManager()
-  managers.push(instance)
-  return instance
+  return persistentManager(Promise.resolve(storageMock()))
 }
 
 function storageMock(): { [K in keyof ScanPersistence]: Mock<ScanPersistence[K]> } {
   return {
     beginScan: vi.fn<ScanPersistence['beginScan']>().mockResolvedValue(undefined),
     applyBatch: vi.fn<ScanPersistence['applyBatch']>().mockResolvedValue(undefined),
-    publishScan: vi.fn<ScanPersistence['publishScan']>().mockResolvedValue(undefined),
+    publishScan: vi.fn<ScanPersistence['publishScan']>(async (scan) => scan),
     discardBuildingScan: vi
       .fn<ScanPersistence['discardBuildingScan']>()
       .mockResolvedValue(undefined)
@@ -65,7 +64,7 @@ function storageMock(): { [K in keyof ScanPersistence]: Mock<ScanPersistence[K]>
 }
 
 function persistentManager(ready: Promise<ScanPersistence>): ScanSessionManager {
-  const instance = new ScanSessionManager(undefined, ready)
+  const instance = new ScanSessionManager(ready)
   managers.push(instance)
   return instance
 }
@@ -126,7 +125,7 @@ test('failed recovery prevents every scan start before authorization or traversa
   expect(storage.beginScan).not.toHaveBeenCalled()
   expect(confirm).not.toHaveBeenCalled()
   expect(runScannerWorker).not.toHaveBeenCalled()
-  expect(instance.getLatestCompleted()).toBeNull()
+  expect(instance.getState()).toBeNull()
 })
 
 test('rejects initialization and begin failures before acknowledging the start', async () => {
@@ -235,8 +234,10 @@ test.each(['batch', 'publication'] as const)(
     await root(earlier.run)
     await finish(instance, earlier.run)
     expect((await earlier.done).session.status).toBe('completed')
-    const previousSnapshot = instance.getScanSnapshot().snapshot
-    expect(previousSnapshot?.entries.scanId).toBe(earlier.scanId)
+    expect(storage.publishScan).toHaveBeenCalledExactlyOnceWith(
+      expect.objectContaining({ id: earlier.scanId }),
+      'directory'
+    )
     storage.publishScan.mockClear()
     const { run, done } = await launch(instance)
     const crash = new Error('Storage worker exited unexpectedly')
@@ -257,8 +258,6 @@ test.each(['batch', 'publication'] as const)(
     })
     expect(storage.discardBuildingScan).not.toHaveBeenCalled()
     expect(storage.publishScan).toHaveBeenCalledTimes(stage === 'batch' ? 0 : 1)
-    expect(instance.getLatestCompleted()).toMatchObject({ id: earlier.scanId })
-    expect(instance.getScanSnapshot().snapshot).toEqual(previousSnapshot)
     await expect(launch(instance)).rejects.toMatchObject({ code: 'SCAN_STORAGE_UNCERTAIN' })
     expect(storage.beginScan).toHaveBeenCalledTimes(2)
   }
@@ -283,7 +282,7 @@ test('blocks new scans when discard definitely fails and leaves a building scan 
 
 test('closes cancellation once publishing and holds terminal state and shutdown until commit', async () => {
   const storage = storageMock()
-  const publication = Promise.withResolvers<void>()
+  const publication = Promise.withResolvers<CompletedScan>()
   storage.publishScan.mockReturnValueOnce(publication.promise)
   const instance = persistentManager(Promise.resolve(storage))
   const { run, done, scanId } = await launch(instance)
@@ -292,13 +291,13 @@ test('closes cancellation once publishing and holds terminal state and shutdown 
   await vi.waitFor(() => expect(storage.publishScan).toHaveBeenCalledOnce())
   expect(instance.cancel()).toBe(false)
   expect(instance.getState()?.session.status).toBe('running')
-  expect(instance.getLatestCompleted()).toBeNull()
   const disposing = vi.fn()
   const disposed = instance.dispose().then(disposing)
   await Promise.resolve()
   expect(disposing).not.toHaveBeenCalled()
-  publication.resolve()
-  expect((await done).session.status).toBe('completed')
+  const stored = { ...storage.publishScan.mock.calls[0][0], finishedAt: '2026-11-05T14:30:00Z' }
+  publication.resolve(stored)
+  expect((await done).session).toEqual(stored)
   await disposed
   expect(storage.publishScan).toHaveBeenCalledWith(
     expect.objectContaining({ id: scanId }),
@@ -311,8 +310,9 @@ async function begin(
   instance: ScanSessionManager,
   consume?: ScanEventConsumer
 ): Promise<{ done: Promise<ScanSessionState>; run: Run }> {
+  const previous = runs.length
   const done = instance.start(rootPath, consume)
-  await Promise.resolve()
+  await vi.waitFor(() => expect(runs).toHaveLength(previous + 1), { interval: 1 })
   return { done, run: runs.at(-1)! }
 }
 
@@ -631,185 +631,18 @@ test('validates roots and permits disposing an unused manager', async () => {
   expect(runScannerWorker).not.toHaveBeenCalled()
 })
 
-test('retains one isolated completed summary through later attempts and resets on recreation', async () => {
-  const instance = manager()
-  expect(instance.getLatestCompleted()).toBeNull()
-  const first = await begin(instance)
-  await root(first.run)
-  await first.run.consume({ type: 'entry', entry: entry(first.run, 'file', 300) })
-  await first.run.consume({
-    type: 'error',
-    error: { path: rootPath, code: 'EACCES', message: 'Denied' }
-  })
-  expect(instance.getLatestCompleted()).toBeNull()
-  await finish(instance, first.run)
-  const completed = await first.done
-  const summary = instance.getLatestCompleted()!
-  expect(summary).toEqual({
-    id: first.run.id,
-    path: rootPath,
-    completedAt: completed.session.finishedAt,
-    totalBytes: 300,
-    fileCount: 1,
-    errorCount: 1
-  })
-  Object.assign(instance.getLatestCompleted()!, { totalBytes: 999 })
-  for (const status of ['cancelled', 'failed']) {
-    const next = await begin(instance)
-    expect(instance.getLatestCompleted()).toEqual(summary)
-    if (status === 'cancelled') instance.cancel()
-    next.run.reject(status === 'cancelled' ? new ScanCancelledError() : new Error('Failed'))
-    await next.done
-    expect(instance.getLatestCompleted()).toEqual(summary)
-  }
-  const next = await begin(instance)
-  await root(next.run)
-  await finish(instance, next.run)
-  await next.done
-  expect(instance.getLatestCompleted()!.id).toBe(next.run.id)
-  expect(manager().getLatestCompleted()).toBeNull()
-})
-
-test('publishes storage only after settlement, preserves it across attempts, and expires old references', async () => {
-  const instance = manager()
-  expect(instance.getScanSnapshot()).toEqual({ snapshot: null, unavailable: null })
-  const first = await begin(instance)
-  await root(first.run)
-  await first.run.consume({ type: 'entry', entry: entry(first.run, 'file', 300) })
-  await first.run.consume({
-    type: 'error',
-    error: { path: rootPath, code: 'EACCES', message: 'Denied' }
-  })
-  // Even final aggregation and summary do not publish before worker exit.
-  const settle = first.run.resolve
-  first.run.resolve = () => {}
-  const result = await finish(instance, first.run)
-  expect(instance.getScanSnapshot().snapshot).toBeNull()
-  expect(() => instance.getScanEntry({ scanId: first.run.id, entryId: 'directory' })).toThrow(
-    'no available snapshot'
-  )
-  settle(result)
-  await first.done
-  const available = instance.getScanSnapshot()
-  expect(available.snapshot).toMatchObject({
-    root: { aggregatedSizeBytes: 300 },
-    incomplete: true,
-    summary: { errorCount: 1 }
-  })
-  const reference = { scanId: first.run.id, entryId: 'directory' }
-  expect(instance.listScanDirectory({ ...reference, offset: 0, limit: 10 }).entries).toEqual([
-    entry(first.run, 'file', 300)
-  ])
-  expect(instance.getScanDirectoryTreemap(reference).entries).toEqual([
-    entry(first.run, 'file', 300)
-  ])
-  for (const outcome of ['cancelled', 'failed']) {
-    const next = await begin(instance)
-    await root(next.run)
-    expect(instance.getScanSnapshot()).toEqual(available)
-    if (outcome === 'cancelled') instance.cancel()
-    next.run.reject(
-      outcome === 'cancelled' ? new ScanCancelledError() : new Error('Worker failed after entries')
-    )
-    await next.done
-    expect(instance.getScanSnapshot()).toEqual(available)
-    expect(instance.getScanEntry(reference).aggregatedSizeBytes).toBe(300)
-  }
-  const next = await begin(instance)
-  await root(next.run)
-  await finish(instance, next.run)
-  await next.done
-  expect(instance.getScanSnapshot().snapshot!.entries.scanId).toBe(next.run.id)
-  expect(() => instance.getScanEntry(reference)).toThrow('no longer available')
-  expect(() => instance.getScanDirectoryTreemap(reference)).toThrow('no longer available')
-  expect(() => instance.getScanEntry({ scanId: next.run.id, entryId: 'file' })).toThrow(
-    'does not exist'
-  )
-  await instance.dispose()
-  expect(instance.getScanSnapshot()).toEqual({ snapshot: null, unavailable: null })
-  expect(() => instance.getScanEntry({ scanId: next.run.id, entryId: 'directory' })).toThrow(
-    'no available snapshot'
-  )
-})
-
-test('retention limits preserve previous entries while new statistics finish successfully', async () => {
-  const instance = new ScanSessionManager({ maxEntries: 1, maxEstimatedBytes: 1_000_000 })
-  managers.push(instance)
-  const first = await begin(instance)
-  await root(first.run)
-  await finish(instance, first.run)
-  await first.done
-  const previous = instance.getScanSnapshot().snapshot
-  const next = await begin(instance)
-  await root(next.run)
-  await next.run.consume({ type: 'entry', entry: entry(next.run, 'file', 300) })
-  await finish(instance, next.run)
-  const terminal = await next.done
-  expect(terminal.session).toMatchObject({
-    status: 'completed',
-    summary: { totalBytes: 300, fileCount: 1 }
-  })
-  expect(instance.getLatestCompleted()!.id).toBe(next.run.id)
-  expect(instance.getScanSnapshot()).toEqual({
-    snapshot: previous,
-    unavailable: { scanId: next.run.id, reason: 'limit-exceeded' }
-  })
-  expect(
-    instance.getScanDirectoryTreemap({ scanId: first.run.id, entryId: 'directory' })
-  ).toMatchObject({ scanId: first.run.id, totalCount: 0 })
-  expect(() =>
-    instance.getScanDirectoryTreemap({ scanId: next.run.id, entryId: 'directory' })
-  ).toThrow('no available snapshot')
-  expect(() => instance.getScanEntry({ scanId: next.run.id, entryId: 'directory' })).toThrow(
-    'no available snapshot'
-  )
-  // A subsequent retainable completion clears the diagnostic and replaces the old snapshot.
-  const last = await begin(instance)
-  await root(last.run)
-  await finish(instance, last.run)
-  await last.done
-  expect(instance.getScanSnapshot().unavailable).toBeNull()
-  expect(instance.getScanSnapshot().snapshot!.entries.scanId).toBe(last.run.id)
-})
-
-test('invalid storage cannot replace published entries or invalidate otherwise valid scan statistics', async () => {
-  const instance = manager()
-  const first = await begin(instance)
-  await root(first.run)
-  await finish(instance, first.run)
-  await first.done
-  const previous = instance.getScanSnapshot().snapshot
-  const next = await begin(instance)
-  await root(next.run)
-  await next.run.consume({
-    type: 'entry',
-    entry: { ...entry(next.run, 'file', 10), parentId: 'missing' }
-  })
-  await finish(instance, next.run)
-  expect((await next.done).session.status).toBe('completed')
-  expect(instance.getScanSnapshot()).toEqual({
-    snapshot: previous,
-    unavailable: { scanId: next.run.id, reason: 'invalid-data' }
-  })
-})
-
-test('shutdown discards building and published entries even with a pending consumer', async () => {
-  const instance = manager()
-  const first = await begin(instance)
-  await root(first.run)
-  await finish(instance, first.run)
-  await first.done
-  let release!: () => void
-  const pending = new Promise<void>((resolve) => {
-    release = resolve
-  })
-  const next = await begin(instance, () => pending)
+test('shutdown discards the active attempt and ignores a pending event callback', async () => {
+  const storage = storageMock()
+  const instance = persistentManager(Promise.resolve(storage))
+  const gate = Promise.withResolvers<void>()
+  const next = await begin(instance, () => gate.promise)
   const callback = root(next.run)
   const disposal = instance.dispose()
-  expect(instance.getScanSnapshot().snapshot).toBeNull()
   next.run.reject(new ScanCancelledError())
   await disposal
-  release()
+  gate.resolve()
   await callback
-  expect(instance.getScanSnapshot()).toEqual({ snapshot: null, unavailable: null })
+  expect((await next.done).session.summary.directoryCount).toBe(0)
+  expect(storage.discardBuildingScan).toHaveBeenCalledExactlyOnceWith(next.run.id)
+  expect(storage.publishScan).not.toHaveBeenCalled()
 })

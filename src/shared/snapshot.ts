@@ -1,6 +1,6 @@
 import type { FileEntry, ScanEntriesReference, ScanSummary } from './scan'
 
-/** Immutable, temporary data. A reference expires when a newer snapshot replaces it. */
+/** Immutable metadata. A reference expires when a newer publication replaces it. */
 export interface ScanSnapshot {
   readonly entries: ScanEntriesReference
   readonly root: FileEntry
@@ -13,7 +13,7 @@ export interface ScanSnapshot {
 
 export interface ScanSnapshotAvailability {
   readonly snapshot: ScanSnapshot | null
-  /** Latest completed scan whose entries could not be retained; an older snapshot may remain. */
+  /** @deprecated SQLite publications always send null. */
   readonly unavailable: {
     readonly scanId: string
     readonly reason: 'limit-exceeded' | 'invalid-data'

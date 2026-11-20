@@ -4,8 +4,7 @@ import {
   type ScanDirectoryPage,
   type ScanDirectoryRequest,
   type ScanEntryRequest,
-  type ScanSnapshot,
-  type ScanSnapshotAvailability
+  type ScanSnapshot
 } from '../../../../shared/snapshot'
 
 export function isStaleSnapshotError(code?: string): boolean {
@@ -17,15 +16,8 @@ export type ExplorerSnapshotState =
   | {
       readonly status: 'available'
       readonly snapshot: ScanSnapshot
-      /** A newer summary-only scan can coexist with this published snapshot. */
-      readonly unavailable: ScanSnapshotAvailability['unavailable']
     }
-  | {
-      readonly status: 'summary-only'
-      readonly snapshot: null
-      readonly unavailable: NonNullable<ScanSnapshotAvailability['unavailable']>
-    }
-  | { readonly status: 'missing'; readonly snapshot: null; readonly unavailable: null }
+  | { readonly status: 'missing'; readonly snapshot: null }
 
 /**
  * Resolve the published SQLite snapshot without loading its children.
@@ -40,11 +32,9 @@ export type ExplorerSnapshotState =
 export async function resolveExplorerSnapshot(): Promise<ScannerIpcResult<ExplorerSnapshotState>> {
   const result = await window.spaceLens.getScanSnapshot()
   if (!result.ok) return result
-  const { snapshot, unavailable } = result.value
-  if (snapshot) return { ok: true, value: { status: 'available', snapshot, unavailable } }
-  if (unavailable)
-    return { ok: true, value: { status: 'summary-only', snapshot: null, unavailable } }
-  return { ok: true, value: { status: 'missing', snapshot: null, unavailable: null } }
+  const { snapshot } = result.value
+  if (snapshot) return { ok: true, value: { status: 'available', snapshot } }
+  return { ok: true, value: { status: 'missing', snapshot: null } }
 }
 
 /**

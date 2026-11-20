@@ -3,7 +3,7 @@ import type { ScannerIpcErrorCode, ScanStateSnapshot } from '../../../../shared/
 import type { RecentScanSummary, ScanSessionState } from '../../../../shared/scan'
 
 interface ScanView {
-  snapshotUnavailable: NonNullable<ScanStateSnapshot['snapshotUnavailable']> | null
+  publicationStatus: NonNullable<ScanStateSnapshot['publicationStatus']>
   latestCompleted: RecentScanSummary | null
   scan: ScanSessionState | null
   ready: boolean
@@ -14,7 +14,7 @@ interface ScanView {
 }
 
 const initialView: ScanView = {
-  snapshotUnavailable: null,
+  publicationStatus: 'loading',
   latestCompleted: null,
   scan: null,
   ready: false,
@@ -92,7 +92,7 @@ export function useScanner(): ScanView & {
         {
           scan,
           latestCompleted: snapshot.latestCompleted ?? null,
-          snapshotUnavailable: snapshot.snapshotUnavailable ?? null,
+          publicationStatus: snapshot.publicationStatus ?? 'ready',
           ready: true,
           cancelling:
             scan?.session.status === 'running' && scan.session.id === current.cancelling
@@ -102,6 +102,13 @@ export function useScanner(): ScanView & {
         progressOnly
       )
     }
+    const statusError = (error: string): void => {
+      update({
+        error,
+        publicationStatus:
+          current.publicationStatus === 'loading' ? 'unavailable' : current.publicationStatus
+      })
+    }
     const refresh = async (): Promise<void> => {
       if (!active) return
       const requestedAt = revision
@@ -109,16 +116,17 @@ export function useScanner(): ScanView & {
         const result = await api.getScanState()
         if (!active) return
         if (result.ok) accept(result.value)
-        else if (revision === requestedAt) update({ error: requestError(result.error.code) })
+        else if (revision === requestedAt) statusError(requestError(result.error.code))
       } catch {
         if (revision === requestedAt)
-          update({ error: 'Scan status could not be loaded. Refresh the status to try again.' })
+          statusError('Scan status could not be loaded. Refresh the status to try again.')
       }
     }
     const select = async (): Promise<void> => {
       if (
         !active ||
         !current.ready ||
+        current.publicationStatus !== 'ready' ||
         current.pending ||
         current.scan?.session.status === 'running'
       )
@@ -206,7 +214,7 @@ export function useScanner(): ScanView & {
       unsubscribe = api.onScanStateChanged(accept)
       void refresh()
     } catch {
-      update({ error: 'The scanner is unavailable. Reopen the application to try again.' })
+      statusError('The scanner is unavailable. Reopen the application to try again.')
     }
     return () => {
       active = false

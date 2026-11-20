@@ -407,7 +407,7 @@ test('Explorer shares Treemap selection and navigation with Contents, Details, b
   const getSnapshot = vi.fn<SpaceLensAPI['getScanSnapshot']>()
   getSnapshot.mockResolvedValue({
     ok: true,
-    value: { snapshot, unavailable: { scanId: 'summary-only', reason: 'limit-exceeded' } }
+    value: { snapshot, unavailable: null }
   })
   const listPages = vi.fn<SpaceLensAPI['listScanDirectory']>()
   listPages.mockImplementation(async ({ entryId }) => ({
@@ -434,7 +434,6 @@ test('Explorer shares Treemap selection and navigation with Contents, Details, b
   const chart = within(screen.getByRole('region', { name: 'Treemap' }))
   const rootChart = await chart.findByRole('figure', { name: 'Storage distribution in Root' })
   expect(screen.getByText('Incomplete snapshot: known sizes may be partial.')).toBeVisible()
-  expect(screen.getByText(/newer scan has summary-only results/)).toBeVisible()
   const contents = within(screen.getByRole('region', { name: 'Directory Contents' }))
   const details = within(screen.getByRole('region', { name: 'Details' }))
   const fileTile = within(rootChart).getByRole('button', { name: 'report.txt, file, 1 KB' })

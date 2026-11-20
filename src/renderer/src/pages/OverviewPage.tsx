@@ -24,7 +24,10 @@ export function OverviewPage({
           <Button
             onClick={scanner.select}
             disabled={
-              !scanner.ready || !!scanner.pending || scanner.scan?.session.status === 'running'
+              !scanner.ready ||
+              scanner.publicationStatus !== 'ready' ||
+              !!scanner.pending ||
+              scanner.scan?.session.status === 'running'
             }
           >
             <FolderSearch size={16} aria-hidden="true" />
@@ -49,7 +52,7 @@ export function OverviewPage({
         </div>
       </section>
 
-      <RecentScans scans={scanner.latestCompleted ? [scanner.latestCompleted] : []} />
+      <RecentScans scan={scanner.latestCompleted} status={scanner.publicationStatus} />
     </div>
   )
 }

@@ -78,10 +78,12 @@ export type ScannerIpcResult<T> =
 
 /** Compare revisions when combining query responses with subscription updates. */
 export interface ScanStateSnapshot {
-  /** Retention failure is separate from filesystem errors and does not invalidate statistics. */
+  /** @deprecated SQLite publications always send null. */
   readonly snapshotUnavailable?: ScanSnapshotAvailability['unavailable']
-  /** Latest settled completion in this application session; absent on older producers. */
+  /** Latest confirmed SQLite publication, including results restored after recovery. */
   readonly latestCompleted?: RecentScanSummary | null
+  /** Startup state of the publication summary, independent of active scanner progress. */
+  readonly publicationStatus?: 'loading' | 'ready' | 'unavailable'
   readonly revision: number
   readonly state: ScanSessionState | null
 }

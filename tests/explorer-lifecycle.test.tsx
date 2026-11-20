@@ -1,17 +1,24 @@
 import { StrictMode } from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, expect, test, vi, type Mocked } from 'vitest'
-import { ScanSnapshotStorage, SnapshotAccessError } from '../src/main/scanner/snapshot'
+import { ScanDatabase } from '../src/main/storage/database'
+import { SnapshotAccessError } from '../src/main/storage/snapshotAccess'
+import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
+import type { StorageBatchOperation } from '../src/main/storage/payloads'
 import App from '../src/renderer/src/App'
 import type { ScannerIpcResult, ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
-import type { FileEntry, ScanSessionState, ScanStatus } from '../src/shared/scan'
-import type { ScanSnapshotAvailability } from '../src/shared/snapshot'
+import type { FileEntry, RecentScanSummary, ScanSessionState, ScanStatus } from '../src/shared/scan'
+import type { ScanSnapshot, ScanSnapshotAvailability } from '../src/shared/snapshot'
 
 const timestamp = '2026-11-18T14:00:00Z'
 
-function retained(scanId: string, name: string, errors = 0, extras = 0): ScanSnapshotStorage {
+type SavedFixture = { database: ScanDatabase; snapshot: ScanSnapshot }
+const databases = new Set<ScanDatabase>()
+
+function publishedFixture(scanId: string, name: string, errors = 0, extras = 0): SavedFixture {
   const path = `/scans/${name}`
-  const store = new ScanSnapshotStorage(scanId, path)
+  const database = new ScanDatabase(':memory:')
+  databases.add(database)
   const root: FileEntry = {
     id: 'root',
     scanId,
@@ -48,48 +55,54 @@ function retained(scanId: string, name: string, errors = 0, extras = 0): ScanSna
     const name = `sample-${String(i).padStart(3, '0')}.bin`
     fileEntries.push(file(name.replace('.', '-'), root, name, 100 + i))
   }
-  for (const entry of [root, folder, ...fileEntries]) store.accept({ type: 'entry', entry })
-  for (let count = 0; count < errors; count++)
-    store.accept({ type: 'error', error: { path, code: 'EACCES', message: 'Access denied.' } })
+  const scan = { id: scanId, rootPath: path, startedAt: timestamp }
+  database.beginScan({
+    ...scan,
+    status: 'running',
+    finishedAt: null,
+    summary: { fileCount: 0, directoryCount: 0, totalBytes: 0, errorCount: 0 }
+  })
   const totalBytes = fileEntries.reduce((total, entry) => total + entry.sizeBytes!, 0)
-  store.accept({ type: 'directory-finalized', entry: { ...folder, aggregatedSizeBytes: 2000 } })
-  store.accept({ type: 'directory-finalized', entry: { ...root, aggregatedSizeBytes: totalBytes } })
-  expect(
-    store.complete(
-      {
-        type: 'summary',
-        scanId,
-        rootEntryId: root.id,
-        summary: {
-          fileCount: fileEntries.length,
-          directoryCount: 2,
-          totalBytes,
-          errorCount: errors
-        }
-      },
-      timestamp
-    )
-  ).toBe(true)
-  return store
+  const operations: StorageBatchOperation[] = [
+    ...[root, folder, ...fileEntries].map((entry) => ({ type: 'entry' as const, entry })),
+    {
+      type: 'directory-finalized',
+      entry: { ...folder, type: 'directory', aggregatedSizeBytes: 2000 }
+    },
+    {
+      type: 'directory-finalized',
+      entry: { ...root, type: 'directory', aggregatedSizeBytes: totalBytes }
+    }
+  ]
+  for (let start = 0; start < operations.length; start += SCANNER_BATCH_SIZE) {
+    database.applyBatch(scanId, operations.slice(start, start + SCANNER_BATCH_SIZE))
+  }
+  database.publishScan(
+    {
+      ...scan,
+      status: 'completed',
+      finishedAt: timestamp,
+      summary: { fileCount: fileEntries.length, directoryCount: 2, totalBytes, errorCount: errors }
+    },
+    root.id
+  )
+  return { database, snapshot: database.getScanSnapshot().snapshot! }
 }
 
 function mockApp(): {
   api: Mocked<SpaceLensAPI>
   listeners: Set<(snapshot: ScanStateSnapshot) => void>
-  publish: (
-    storage: ScanSnapshotStorage,
-    options?: { memoryRetained?: boolean; notify?: boolean }
-  ) => void
-  restore: (storage: ScanSnapshotStorage) => void
+  publish: (storage: SavedFixture, options?: { notify?: boolean }) => void
+  restore: (storage: SavedFixture) => void
   runNext: (id: string) => void
 } {
-  let published: ScanSnapshotStorage | null = null
-  let state: ScanStateSnapshot = { revision: 0, state: null }
+  let published: SavedFixture | null = null
+  let state: ScanStateSnapshot = { revision: 0, state: null, publicationStatus: 'ready' }
   const listeners = new Set<(snapshot: ScanStateSnapshot) => void>()
   const activeScan = (id: string, status: ScanStatus, rootPath: string): ScanSessionState => {
     const stats =
-      published?.scanId === id
-        ? published.describe().summary
+      published?.snapshot.entries.scanId === id
+        ? published.snapshot.summary
         : {
             fileCount: 0,
             directoryCount: 1,
@@ -117,31 +130,24 @@ function mockApp(): {
     state = { ...state, ...patch, revision: state.revision + 1 }
     for (const listener of listeners) listener(state)
   }
-  const publish = (
-    storage: ScanSnapshotStorage,
-    { memoryRetained = true, notify = true } = {}
-  ): void => {
+  const summaryOf = ({ snapshot }: SavedFixture): RecentScanSummary => ({
+    id: snapshot.entries.scanId,
+    path: snapshot.root.path,
+    completedAt: snapshot.completedAt,
+    ...snapshot.summary
+  })
+  const publish = (storage: SavedFixture, { notify = true } = {}): void => {
     published = storage
-    const { root, summary } = storage.describe()
+    const { root, entries } = storage.snapshot
     const patch = {
-      state: activeScan(storage.scanId, 'completed', root.path),
-      latestCompleted: {
-        id: storage.scanId,
-        path: root.path,
-        completedAt: timestamp,
-        totalBytes: summary.totalBytes,
-        fileCount: summary.fileCount,
-        errorCount: summary.errorCount
-      },
-      snapshotUnavailable: memoryRetained
-        ? null
-        : { scanId: storage.scanId, reason: 'limit-exceeded' as const }
+      state: activeScan(entries.scanId, 'completed', root.path),
+      latestCompleted: summaryOf(storage)
     }
     if (notify) emit(patch)
     else state = { ...state, ...patch, revision: state.revision + 1 }
   }
-  function read<T>(scanId: string, load: (store: ScanSnapshotStorage) => T): ScannerIpcResult<T> {
-    if (published?.scanId !== scanId)
+  function read<T>(scanId: string, load: (store: ScanDatabase) => T): ScannerIpcResult<T> {
+    if (published?.snapshot.entries.scanId !== scanId)
       return {
         ok: false,
         error: {
@@ -150,7 +156,7 @@ function mockApp(): {
         }
       }
     try {
-      return { ok: true, value: load(published) }
+      return { ok: true, value: load(published.database) }
     } catch (error) {
       if (error instanceof SnapshotAccessError)
         return { ok: false, error: { code: error.code, message: error.message } }
@@ -164,18 +170,18 @@ function mockApp(): {
     getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
       ok: true,
       value: {
-        snapshot: published?.describe() ?? null,
+        snapshot: published?.snapshot ?? null,
         unavailable: null
       }
     })),
     getScanEntry: vi.fn<SpaceLensAPI['getScanEntry']>(async (request) =>
-      read(request.scanId, (store) => store.getEntry(request.entryId))
+      read(request.scanId, (store) => store.getScanEntry(request))
     ),
     getScanDirectoryTreemap: vi.fn<SpaceLensAPI['getScanDirectoryTreemap']>(async (request) =>
-      read(request.scanId, (store) => store.getDirectoryTreemap(request))
+      read(request.scanId, (store) => store.getScanDirectoryTreemap(request))
     ),
     listScanDirectory: vi.fn<SpaceLensAPI['listScanDirectory']>(async (request) =>
-      read(request.scanId, (store) => store.listDirectory(request))
+      read(request.scanId, (store) => store.listScanDirectory(request))
     ),
     onScanStateChanged: vi.fn<SpaceLensAPI['onScanStateChanged']>((listener) => {
       listeners.add(listener)
@@ -203,6 +209,7 @@ function mockApp(): {
     publish,
     restore: (storage) => {
       published = storage
+      state = { ...state, state: null, latestCompleted: summaryOf(storage) }
     },
     runNext: (id: string) => {
       nextId = id
@@ -210,7 +217,11 @@ function mockApp(): {
   }
 }
 
-afterEach(() => vi.unstubAllGlobals())
+afterEach(() => {
+  for (const database of databases) database.close()
+  databases.clear()
+  vi.unstubAllGlobals()
+})
 
 const panel = (name: string): ReturnType<typeof within> =>
   within(screen.getByRole('region', { name }))
@@ -233,7 +244,7 @@ async function start(): Promise<void> {
 
 test('a settled scan opens Explorer with one published identity across all four panels', async () => {
   const { api, listeners, publish } = mockApp()
-  const alpha = retained('scan-a', 'Alpha', 1)
+  const alpha = publishedFixture('scan-a', 'Alpha', 1)
   render(
     <StrictMode>
       <App />
@@ -292,9 +303,9 @@ test('a settled scan opens Explorer with one published identity across all four 
   expect(api.cancelScan).not.toHaveBeenCalled()
 })
 
-test('preserves the prior Treemap during a scan and cancellation, then renders a replacement without memory retention', async () => {
+test('preserves the prior Treemap during a scan and cancellation, then renders a replacement', async () => {
   const main = mockApp()
-  main.publish(retained('scan-a', 'Alpha'))
+  main.publish(publishedFixture('scan-a', 'Alpha'))
   main.runNext('scan-b')
   render(<App />)
   await start()
@@ -310,7 +321,7 @@ test('preserves the prior Treemap during a scan and cancellation, then renders a
   expect(main.api.cancelScan).toHaveBeenCalledExactlyOnceWith({ scanId: 'scan-b' })
   open('Explorer')
   await chart('Alpha')
-  act(() => main.publish(retained('scan-c', 'Replacement'), { memoryRetained: false }))
+  act(() => main.publish(publishedFixture('scan-c', 'Replacement')))
   const replacementChart = await chart('Replacement')
   fireEvent.click(
     within(replacementChart).getByRole('button', { name: 'Replacement.txt, file, 3 KB' })
@@ -324,8 +335,8 @@ test('preserves the prior Treemap during a scan and cancellation, then renders a
 
 test('refreshes automatically on publication and ignores late panel data from the old snapshot', async () => {
   const main = mockApp()
-  const alpha = retained('scan-a', 'Alpha')
-  const beta = retained('scan-b', 'Beta')
+  const alpha = publishedFixture('scan-a', 'Alpha')
+  const beta = publishedFixture('scan-b', 'Beta')
   main.publish(alpha)
   render(<App />)
   open('Explorer')
@@ -347,7 +358,12 @@ test('refreshes automatically on publication and ignores late panel data from th
   act(() => main.publish(beta))
   await chart('Beta')
   expect(main.api.getScanSnapshot).toHaveBeenCalledTimes(2)
-  await act(async () => pending.resolve({ ok: true, value: alpha.getEntry('report') }))
+  await act(async () =>
+    pending.resolve({
+      ok: true,
+      value: alpha.database.getScanEntry({ scanId: 'scan-a', entryId: 'report' })
+    })
+  )
   expect(panel('Details').getByText('No item selected')).toBeVisible()
   expect(button('Forward')).toHaveAttribute('aria-disabled', 'true')
   expect(button('Back')).toHaveAttribute('aria-disabled', 'true')
@@ -362,7 +378,7 @@ test('refreshes automatically on publication and ignores late panel data from th
 test('activates a long breadcrumb ancestor and keeps focus in the toolbar', async () => {
   const main = mockApp()
   const name = 'folder-name-without-spaces-'.repeat(8)
-  main.publish(retained('scan-a', name))
+  main.publish(publishedFixture('scan-a', name))
   render(<App />)
   open('Explorer')
   await chart(name)
@@ -380,11 +396,11 @@ test('activates a long breadcrumb ancestor and keeps focus in the toolbar', asyn
 
 test('refreshes a replaced snapshot from an expired panel and focuses the toolbar action', async () => {
   const main = mockApp()
-  main.publish(retained('scan-a', 'Alpha'))
+  main.publish(publishedFixture('scan-a', 'Alpha'))
   render(<App />)
   open('Explorer')
   await chart('Alpha')
-  act(() => main.publish(retained('scan-b', 'Beta'), { notify: false }))
+  act(() => main.publish(publishedFixture('scan-b', 'Beta'), { notify: false }))
   fireEvent.click(button('Expand Alpha'))
   const tree = panel('Directory Tree')
   expect(await tree.findByRole('alert')).toHaveTextContent('Use Refresh snapshot')
@@ -411,25 +427,27 @@ test('leaving Explorer ignores pending availability and a new publication is res
   await act(async () =>
     late.resolve({
       ok: true,
-      value: { snapshot: retained('old', 'Old').describe(), unavailable: null }
+      value: { snapshot: publishedFixture('old', 'Old').snapshot, unavailable: null }
     })
   )
   expect(main.api.listScanDirectory).not.toHaveBeenCalled()
   expect(main.api.getScanDirectoryTreemap).not.toHaveBeenCalled()
   open('Explorer')
   await screen.findByText(/No published snapshot yet/)
-  act(() => main.publish(retained('scan-new', 'Published'), { memoryRetained: false }))
+  act(() => main.publish(publishedFixture('scan-new', 'Published')))
   await panel('Directory Contents').findByRole('button', { name: 'Published.txt' })
   await chart('Published')
   expect(main.api.cancelScan).not.toHaveBeenCalled()
 })
 
-test('opens Treemap from a saved publication when the new session has no scan metadata', async () => {
+test('restores the same publication in Overview and Explorer with the scanner idle', async () => {
   const main = mockApp()
-  main.restore(retained('saved', 'Saved', 0, 104))
+  main.restore(publishedFixture('saved', 'Saved', 0, 104))
   render(<App />)
-  expect(screen.getByText('No scans yet')).toBeVisible()
-  open('Explorer')
+  await panel('Recent Scans').findByText('/scans/Saved')
+  expect(panel('Folder scan').getByText('Ready to scan')).toBeVisible()
+  expect(panel('Folder scan').queryByText('Scan completed')).not.toBeInTheDocument()
+  fireEvent.click(button('Open in Explorer'))
   const figure = await chart('Saved')
   expect(within(figure).getByRole('img', { name: /Other.*6 grouped entries/ })).toBeVisible()
   fireEvent.click(within(figure).getByRole('button', { name: 'Saved.txt, file, 3 KB' }))
@@ -442,7 +460,7 @@ test('opens Treemap from a saved publication when the new session has no scan me
 
 test('Top-N and inert Other coexist with independent Contents pagination and selection resets', async () => {
   const main = mockApp()
-  main.publish(retained('large', 'Large', 0, 104))
+  main.publish(publishedFixture('large', 'Large', 0, 104))
   render(<App />)
   open('Explorer')
   const figure = await chart('Large')

@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
 import { app, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { IPC_CHANNELS, type ScannerIpcResult, type ScanStateSnapshot } from '../src/shared/ipc'
+import type { CompletedScan } from '../src/main/storage/payloads'
 import type { ScanSessionState } from '../src/shared/scan'
 import type { ScanSessionManager, ScanSessionSubscriber } from '../src/main/scanner/sessionManager'
 import { registerScannerIpc, registerScannerShutdown } from '../src/main/scannerIpc'
@@ -110,7 +111,7 @@ function ack(revision: number, sender = event()): void {
   ipcMain.emit(IPC_CHANNELS.acknowledgeScanState, sender, revision)
 }
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks()
   for (const query of Object.values(queries)) query.mockReset()
   queries.getScanSnapshot.mockResolvedValue({ snapshot: null, unavailable: null })
@@ -133,12 +134,6 @@ beforeEach(() => {
   })
   manager = {
     getState: () => state,
-    getLatestCompleted: () => null,
-    getSnapshotUnavailable: vi.fn(() => null),
-    getScanSnapshot: vi.fn(() => ({ snapshot: null, unavailable: null })),
-    getScanEntry: vi.fn(),
-    listScanDirectory: vi.fn(),
-    getScanDirectoryTreemap: vi.fn(),
     launch: start,
     cancel,
     dispose,
@@ -147,9 +142,10 @@ beforeEach(() => {
       return unsubscribe
     }
   } as unknown as ScanSessionManager
-  boundary = registerScannerIpc(manager, url, storage)
+  boundary = registerScannerIpc(manager, url, storage, Promise.resolve(null))
+  await Promise.resolve()
   boundary.attachRenderer(renderer as unknown as WebContents)
-  ack(0)
+  ack((renderer.send.mock.calls.at(-1)![1] as ScanStateSnapshot).revision)
   renderer.send.mockClear()
 })
 
@@ -192,30 +188,91 @@ test('retrieval uses fixed, authorized channels and forwards bounded ID-only que
   })
   expect(queries.getScanDirectoryTreemap).toHaveBeenCalledExactlyOnceWith(treemap)
   expect(queries.getScanEntry).toHaveBeenCalledTimes(1)
-  expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
-  expect(manager.getScanSnapshot).not.toHaveBeenCalled()
-  expect(manager.getScanEntry).not.toHaveBeenCalled()
-  expect(manager.listScanDirectory).not.toHaveBeenCalled()
 })
 
-test('state queries and terminal notifications include retention failure metadata without entries', () => {
-  const unavailable = { scanId: id, reason: 'limit-exceeded' as const }
-  vi.mocked(manager.getSnapshotUnavailable).mockReturnValue(unavailable)
-  state = {
-    ...running(),
-    session: { ...running().session, status: 'completed', finishedAt: '2026-11-12T12:00:00Z' }
+const completed = (): CompletedScan => ({
+  ...running().session,
+  status: 'completed',
+  finishedAt: '2026-11-12T12:00:00Z'
+})
+
+async function attachWithRecovery(publication: Promise<CompletedScan | null>): Promise<void> {
+  await boundary.dispose()
+  vi.mocked(ipcMain.handle).mockClear()
+  boundary = registerScannerIpc(manager, url, storage, publication)
+  boundary.attachRenderer(renderer as unknown as WebContents)
+  ack((renderer.send.mock.calls.at(-1)![1] as ScanStateSnapshot).revision)
+  renderer.send.mockClear()
+}
+
+test('restores a published summary over the existing channel while the scanner stays idle', async () => {
+  const recovery = Promise.withResolvers<CompletedScan | null>()
+  await attachWithRecovery(recovery.promise)
+  expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
+    ok: true,
+    value: { state: null, latestCompleted: null, publicationStatus: 'loading' }
+  })
+  const scan = {
+    ...completed(),
+    summary: { fileCount: 8, directoryCount: 3, totalBytes: 1024, errorCount: 2 }
   }
-  subscriber(state)
+  const restored = {
+    id: scan.id,
+    path: scan.rootPath,
+    completedAt: scan.finishedAt,
+    ...scan.summary
+  }
+  recovery.resolve(scan)
+  await Promise.resolve()
   expect(renderer.send).toHaveBeenLastCalledWith(
     IPC_CHANNELS.scanStateChanged,
-    expect.objectContaining({ snapshotUnavailable: unavailable })
+    expect.objectContaining({
+      state: null,
+      latestCompleted: restored,
+      publicationStatus: 'ready',
+      snapshotUnavailable: null
+    })
   )
   expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
     ok: true,
-    value: { snapshotUnavailable: unavailable }
+    value: { state: null, latestCompleted: restored }
   })
-  expect(manager.getScanSnapshot).not.toHaveBeenCalled()
-  expect(manager.listScanDirectory).not.toHaveBeenCalled()
+})
+
+test('keeps the acknowledged publication when recovery or later unsuccessful sessions deliver updates', async () => {
+  const recovery = Promise.withResolvers<CompletedScan | null>()
+  await attachWithRecovery(recovery.promise)
+  const scan = completed()
+  state = { ...running(), session: scan }
+  subscriber(state)
+  recovery.resolve({ ...scan, id: otherId })
+  await Promise.resolve()
+  for (const status of ['running', 'cancelled', 'failed'] as const) {
+    state = {
+      ...running(),
+      session: status === 'running' ? running().session : { ...scan, status }
+    }
+    subscriber(state)
+    expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
+      ok: true,
+      value: {
+        publicationStatus: 'ready',
+        latestCompleted: { id: scan.id, completedAt: scan.finishedAt }
+      }
+    })
+  }
+})
+
+test('reports startup recovery failure without inventing a publication', async () => {
+  const recovery = Promise.withResolvers<CompletedScan | null>()
+  await attachWithRecovery(recovery.promise)
+  recovery.reject(new Error('Recovery failed'))
+  await vi.waitFor(() =>
+    expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
+      ok: true,
+      value: { state: null, latestCompleted: null, publicationStatus: 'unavailable' }
+    })
+  )
 })
 
 test.each([
@@ -242,7 +299,6 @@ test.each([
     expect(queries.getScanEntry).not.toHaveBeenCalled()
     expect(queries.listScanDirectory).not.toHaveBeenCalled()
     expect(queries.getScanDirectoryTreemap).not.toHaveBeenCalled()
-    expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
   }
 )
 
@@ -299,7 +355,6 @@ test('validates Treemap requests before dispatch and preserves structured failur
   }
   expect(queries.getScanEntry).not.toHaveBeenCalled()
   expect(queries.getScanDirectoryTreemap).not.toHaveBeenCalled()
-  expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
   for (const code of [
     'NOT_DIRECTORY',
     'ENTRY_NOT_FOUND',
@@ -320,7 +375,6 @@ test('validates Treemap requests before dispatch and preserves structured failur
       error: { code, message: 'Public message' }
     })
   }
-  expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
 })
 
 test('discards a pending SQLite Treemap response when its renderer navigates', async () => {
@@ -340,7 +394,6 @@ test('discards a pending SQLite Treemap response when its renderer navigates', a
     other: null
   })
   expect(await received).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
-  expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
 })
 
 test('reports storage failure and discards a pending reply after renderer navigation', async () => {
@@ -356,7 +409,6 @@ test('reports storage failure and discards a pending reply after renderer naviga
   renderer.emit('did-start-navigation', { isMainFrame: true })
   pending.resolve({ snapshot: null, unavailable: null })
   expect(await received).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
-  expect(manager.getScanSnapshot).not.toHaveBeenCalled()
 })
 
 test.each([
@@ -548,7 +600,7 @@ test('requires explicit approval independently of absolute path validation', asy
   expect(start).not.toHaveBeenCalled()
   await boundary.dispose()
   vi.mocked(ipcMain.handle).mockClear()
-  boundary = registerScannerIpc(manager, url, storage)
+  boundary = registerScannerIpc(manager, url, storage, Promise.resolve(null))
   boundary.attachRenderer(renderer as unknown as WebContents)
   expect(invoke(IPC_CHANNELS.startScan, [{ rootPath }])).toMatchObject({
     ok: false,

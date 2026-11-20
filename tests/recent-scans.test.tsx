@@ -22,7 +22,7 @@ function createScanSummary(
 }
 
 test('empty state explains where completed scans will appear without fabricated entries or actions', () => {
-  render(<RecentScans scans={[]} />)
+  render(<RecentScans scan={null} status="ready" />)
 
   expect(screen.getByRole('heading', { name: 'Recent Scans' })).toBeVisible()
   expect(screen.getAllByRole('region', { name: 'Recent Scans' })).toHaveLength(1)
@@ -37,7 +37,7 @@ test('empty state explains where completed scans will appear without fabricated 
 test('populated state displays location, completion time, decimal GB and grouped file counts', () => {
   const completedAt = '2026-11-05T14:30:00Z'
   const scan = createScanSummary('documents', completedAt)
-  render(<RecentScans scans={[scan]} />)
+  render(<RecentScans scan={scan} status="ready" />)
 
   expect(screen.getByText(scan.path)).toBeVisible()
   expect(screen.getByText('Nov 5, 2026, 14:30')).toHaveAttribute('datetime', completedAt)
@@ -50,52 +50,43 @@ test('populated state displays location, completion time, decimal GB and grouped
   expect(screen.queryByRole('link')).not.toBeInTheDocument()
 })
 
-test('renders only the five newest scans without mutating the supplied summaries', () => {
-  const scans = Object.freeze(
-    [2, 0, 5, 1, 4, 3].map((index) =>
-      Object.freeze(createScanSummary(`entry-${index}`, `2026-11-05T0${index}:00:00Z`))
-    )
-  )
-  render(<RecentScans scans={scans} />)
-
-  const rows = within(screen.getByRole('list')).getAllByRole('listitem')
-  expect(rows).toHaveLength(5)
-  expect(screen.getByText('Showing latest 5')).toBeVisible()
-  expect(screen.queryByText('C:\\Test fixtures\\entry-0')).not.toBeInTheDocument()
-  rows.forEach((row, index) => {
-    expect(within(row).getByText(`C:\\Test fixtures\\entry-${5 - index}`)).toBeVisible()
+test('replaces the single published row and preserves the new completion time and errors', () => {
+  const first = createScanSummary('first', '2026-11-05T11:00:00+02:00')
+  const next = createScanSummary('next', '2026-11-05T14:30:00Z', {
+    directoryCount: 4567,
+    errorCount: 2
   })
-  expect(scans.map(({ id }) => id)).toEqual([
-    'entry-2',
-    'entry-0',
-    'entry-5',
-    'entry-1',
-    'entry-4',
-    'entry-3'
-  ])
+  const { rerender } = render(<RecentScans scan={first} status="ready" />)
+  rerender(<RecentScans scan={next} status="ready" />)
+  const row = screen.getByRole('listitem')
+  expect(within(row).getByText(next.path)).toBeVisible()
+  expect(within(row).getByText('4,567')).toBeVisible()
+  expect(within(row).getByText(/2 filesystem errors/)).toBeVisible()
+  expect(within(row).getByText('Nov 5, 2026, 14:30')).toHaveAttribute('datetime', next.completedAt)
+  expect(screen.queryByText(first.path)).not.toBeInTheDocument()
 })
 
-test('compares timestamps by actual completion time, including timezone offsets', () => {
-  const earlier = createScanSummary('earlier', '2026-11-05T11:00:00+02:00')
-  const later = createScanSummary('later', '2026-11-05T10:00:00Z')
-  render(<RecentScans scans={[earlier, later]} />)
-
-  const rows = within(screen.getByRole('list')).getAllByRole('listitem')
-  expect(within(rows[0]).getByText(later.path)).toBeVisible()
-  expect(within(rows[1]).getByText(earlier.path)).toBeVisible()
+test('distinguishes startup recovery from unavailable storage and an empty publication', () => {
+  const { rerender } = render(<RecentScans scan={null} status="loading" />)
+  expect(screen.getByRole('status')).toHaveTextContent(/Loading saved scan/)
+  expect(screen.queryByText('No scans yet')).not.toBeInTheDocument()
+  rerender(<RecentScans scan={null} status="unavailable" />)
+  expect(screen.getByRole('alert')).toHaveTextContent(/Saved scan storage is unavailable/)
+  expect(screen.queryByText('No scans yet')).not.toBeInTheDocument()
+  rerender(<RecentScans scan={null} status="ready" />)
+  expect(screen.getByText('No scans yet')).toBeVisible()
 })
 
 test('preserves unusual paths as text and displays zero sizes and file counts', () => {
   const path = 'D:\\Архів & notes\\<img src=x onerror=alert(1)>'
   render(
     <RecentScans
-      scans={[
-        createScanSummary('unusual', '2026-11-05T10:00:00Z', {
-          path,
-          totalBytes: 0,
-          fileCount: 0
-        })
-      ]}
+      status="ready"
+      scan={createScanSummary('unusual', '2026-11-05T10:00:00Z', {
+        path,
+        totalBytes: 0,
+        fileCount: 0
+      })}
     />
   )
 
@@ -112,7 +103,7 @@ test('Overview preserves demo devices and empty Recent Scans while enabling fold
   })
   render(<OverviewPage />)
 
-  expect(screen.getByRole('heading', { name: 'No scans yet' })).toBeVisible()
+  expect(await screen.findByRole('heading', { name: 'No scans yet' })).toBeVisible()
   expect(screen.queryByRole('list')).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Demo scans' })).not.toBeInTheDocument()
   expect(screen.getAllByText('Demo data')).toHaveLength(1)

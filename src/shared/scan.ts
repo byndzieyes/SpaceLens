@@ -119,4 +119,6 @@ export interface RecentScanSummary {
   readonly completedAt: string
   readonly totalBytes: number
   readonly fileCount: number
+  /** Absent on older summary producers. */
+  readonly directoryCount?: number
 }

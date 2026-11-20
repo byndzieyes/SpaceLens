@@ -10,7 +10,7 @@ import {
   type ScanEntryRequest,
   type ScanSnapshotAvailability
 } from '../../shared/snapshot'
-import { validateSnapshotRequest, validateTreemapRequest } from '../scanner/snapshot'
+import { validateSnapshotRequest, validateTreemapRequest } from './snapshotAccess'
 import {
   integer,
   isScanSummary,
@@ -34,7 +34,7 @@ interface StorageCommands {
   recoverStorage: { payload: null; result: null }
   insertScan: { payload: ScanSession; result: null }
   beginScan: { payload: BuildingScan; result: null }
-  publishScan: { payload: ScanPublication; result: null }
+  publishScan: { payload: ScanPublication; result: CompletedScan }
   discardBuildingScan: { payload: { scanId: string }; result: null }
   getPublishedScan: { payload: null; result: CompletedScan | null }
   getScanSnapshot: { payload: null; result: ScanSnapshotAvailability }
@@ -153,6 +153,10 @@ function isNull(value: unknown): value is null {
   return value === null
 }
 
+function isCompletedScan(value: unknown): value is CompletedScan {
+  return isStorageScan(value) && value.status === 'completed'
+}
+
 function isSnapshotAvailability(value: unknown): value is ScanSnapshotAvailability {
   if (!record(value) || value.unavailable !== null) return false
   const { snapshot } = value
@@ -258,10 +262,10 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     recoverStorage: isNull,
     insertScan: isNull,
     beginScan: isNull,
-    publishScan: isNull,
+    publishScan: isCompletedScan,
     discardBuildingScan: isNull,
     getPublishedScan: (value): value is CompletedScan | null =>
-      value === null || (isStorageScan(value) && value.status === 'completed'),
+      value === null || isCompletedScan(value),
     getScanSnapshot: isSnapshotAvailability,
     getScanEntry: isStorageEntry,
     listScanDirectory: isDirectoryPage,

@@ -24,6 +24,17 @@ import type { createStorageWorkerClient } from '../src/main/storage/workerRunner
 import { ScanStorageCoordinator } from '../src/main/storage/coordinator'
 import { batchOperations } from '../src/main/scanner/persistence'
 
+function sessionOnlyManager(mode = 'production'): ScanSessionManager {
+  return new (artifacts.get(mode)!.Manager)(
+    Promise.resolve({
+      beginScan: async () => {},
+      applyBatch: async () => {},
+      publishScan: async (scan) => scan,
+      discardBuildingScan: async () => {}
+    })
+  )
+}
+
 const require = createRequire(import.meta.url)
 const scanId = 'worker-test'
 const workers = new Set<Worker>()
@@ -153,17 +164,14 @@ test.each([true, false])(
   }
 )
 
-test('runs live scans through SQLite, keeps prior results on cancellation and failure, and outgrows the memory cap', async () => {
+test('runs live scans through SQLite and keeps the prior publication through cancellation and failure', async () => {
   const built = artifacts.get('production')!
   const storage = built.storage()
   const databasePath = join(suitePath, 'integration.sqlite')
   const ready = Promise.withResolvers<typeof storage>()
   const requests = new ScanStorageCoordinator(ready.promise)
   const { signal } = new AbortController()
-  const instance = new built.Manager(
-    { maxEntries: 5, maxEstimatedBytes: 1024 * 1024 },
-    ready.promise.then(() => requests)
-  )
+  const instance = new built.Manager(ready.promise.then(() => requests))
   const release = Promise.withResolvers<void>()
   const written = Promise.withResolvers<void>()
   const report = vi.spyOn(console, 'error').mockImplementation(() => {})
@@ -182,7 +190,7 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
       summary: { fileCount: 2, directoryCount: 2, totalBytes: 3 }
     })
     expect(await storage.getPublishedScan()).toEqual(first)
-    const oldMemory = instance.getScanSnapshot().snapshot!
+    const previous = (await storage.getScanSnapshot()).snapshot!
     const firstOperations = batches.mock.calls[0][1]
     expect(firstOperations.filter(({ type }) => type === 'entry')).toHaveLength(4)
     expect(firstOperations.filter(({ type }) => type === 'directory-finalized')).toHaveLength(2)
@@ -193,7 +201,9 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
     expect(firstOperations.every(({ entry }) => entry.scanId === first.id)).toBe(true)
     const empty = firstOperations.find(({ entry }) => entry.name === 'empty')!.entry
     expect(await storage.getEntry(first.id, empty.id)).toMatchObject({ sizeBytes: 0 })
-    expect(instance.getScanEntry({ scanId: first.id, entryId: empty.id })).toEqual(empty)
+    await expect(storage.getScanEntry({ scanId: first.id, entryId: empty.id })).resolves.toEqual(
+      empty
+    )
 
     batches.mockImplementationOnce(async (id, operations) => {
       await apply(id, operations)
@@ -207,12 +217,12 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
       requests.read(signal, (db) => db.getScanSnapshot()),
       requests.read(signal, (db) => db.getScanEntry({ scanId: first.id, entryId: empty.id })),
       requests.read(signal, (db) =>
-        db.getScanDirectoryTreemap({ scanId: first.id, entryId: oldMemory.root.id })
+        db.getScanDirectoryTreemap({ scanId: first.id, entryId: previous.root.id })
       ),
       requests.read(signal, (db) =>
         db.listScanDirectory({
           scanId: first.id,
-          entryId: oldMemory.root.id,
+          entryId: previous.root.id,
           offset: 0,
           limit: 100
         })
@@ -221,17 +231,15 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
     expect(instance.cancel()).toBe(true)
     release.resolve()
     const [metadata, entry, chart, page] = await browsing
-    expect(metadata.snapshot).toEqual(oldMemory)
+    expect(metadata.snapshot).toEqual(previous)
     expect(entry).toEqual(empty)
-    expect(chart).toEqual(
-      instance.getScanDirectoryTreemap({ scanId: first.id, entryId: oldMemory.root.id })
-    )
+    expect(chart.entries.map(({ name }) => name)).toEqual(['nested', 'empty'])
     expect(page.entries.map(({ name }) => name)).toEqual(['empty', 'nested'])
     const cancelled = (await cancellation).session
     expect(cancelled.status).toBe('cancelled')
     expect(await storage.getScan(cancelled.id)).toBeNull()
     expect(await storage.getPublishedScan()).toEqual(first)
-    expect(instance.getScanSnapshot().snapshot).toEqual(oldMemory)
+    expect((await storage.getScanSnapshot()).snapshot).toEqual(previous)
 
     const failed = (await instance.start(join(rootPath, 'missing'))).session
     expect(failed.status).toBe('failed')
@@ -247,7 +255,7 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
     })
     expect(await storage.getScan(rejected.session.id)).toBeNull()
     expect(await storage.getPublishedScan()).toEqual(first)
-    expect(instance.getScanSnapshot().snapshot).toEqual(oldMemory)
+    expect((await storage.getScanSnapshot()).snapshot).toEqual(previous)
     expect(report).toHaveBeenCalled()
 
     const publish = storage.publishScan.bind(storage)
@@ -264,7 +272,7 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
     })
     expect(await storage.getScan(rejectedPublication.session.id)).toBeNull()
     expect(await storage.getPublishedScan()).toEqual(first)
-    expect(instance.getScanSnapshot().snapshot).toEqual(oldMemory)
+    expect((await storage.getScanSnapshot()).snapshot).toEqual(previous)
 
     await Promise.all(
       Array.from({ length: SCANNER_BATCH_SIZE }, (_, index) =>
@@ -287,10 +295,6 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
     ).toBe(true)
     expect(await storage.getPublishedScan()).toEqual(second)
     expect(await storage.getScan(first.id)).toBeNull()
-    expect(instance.getScanSnapshot()).toEqual({
-      snapshot: oldMemory,
-      unavailable: { scanId: second.id, reason: 'limit-exceeded' }
-    })
     const saved = (await requests.read(signal, (db) => db.getScanSnapshot())).snapshot!
     expect(saved.entries.scanId).toBe(second.id)
     expect(saved.entryCount).toBe(132)
@@ -303,10 +307,10 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
     expect(lastPage).toMatchObject({ totalCount: 130, nextOffset: null })
     expect(firstPage.entries).toHaveLength(100)
     expect(lastPage.entries).toHaveLength(30)
-    const chartAfterLimit = await requests.read(signal, (db) =>
+    const replacementTreemap = await requests.read(signal, (db) =>
       db.getScanDirectoryTreemap({ scanId: second.id, entryId: saved.root.id })
     )
-    expect(chartAfterLimit).toMatchObject({
+    expect(replacementTreemap).toMatchObject({
       scanId: second.id,
       individualCount: 100,
       totalCount: 130,
@@ -331,11 +335,14 @@ test.each(['development', 'production'])(
     await mkdir(nested)
     await writeFile(join(rootPath, 'root file.txt'), '12345')
     await writeFile(join(nested, 'data.bin'), '1234567')
-    const instance = new (artifacts.get(mode)!.Manager)()
+    const built = artifacts.get(mode)!
+    const storage = built.storage()
+    await storage.initialize(join(suitePath, mode + '-nested.sqlite'))
+    const instance = new built.Manager(Promise.resolve(storage))
     try {
       const state = await instance.start(rootPath)
       expect(state.session.status).toBe('completed')
-      const snapshot = instance.getScanSnapshot().snapshot!
+      const snapshot = (await storage.getScanSnapshot()).snapshot!
       expect(snapshot).toMatchObject({
         entryCount: 4,
         incomplete: false,
@@ -348,13 +355,14 @@ test.each(['development', 'production'])(
         offset: 0,
         limit: 100
       }
-      const children = instance.listScanDirectory(request)
+      const children = await storage.listScanDirectory(request)
       expect(children.entries.map((item) => item.name)).toEqual(['nested Україна', 'root file.txt'])
       const directory = children.entries[0]
       expect(
-        instance.getScanEntry({ scanId: request.scanId, entryId: directory.id }).aggregatedSizeBytes
+        (await storage.getScanEntry({ scanId: request.scanId, entryId: directory.id }))
+          .aggregatedSizeBytes
       ).toBe(7)
-      const files = instance.listScanDirectory({ ...request, entryId: directory.id }).entries
+      const files = (await storage.listScanDirectory({ ...request, entryId: directory.id })).entries
       expect(files).toHaveLength(1)
       expect(files[0]).toMatchObject({
         parentId: directory.id,
@@ -364,7 +372,7 @@ test.each(['development', 'production'])(
       })
       // Fatal failure after a previous real completion leaves the published snapshot intact.
       expect((await instance.start(join(rootPath, 'missing'))).session.status).toBe('failed')
-      expect(instance.getScanSnapshot().snapshot).toEqual(snapshot)
+      expect((await storage.getScanSnapshot()).snapshot).toEqual(snapshot)
       let cancelled = false
       const stateAfterCancel = await instance.start(rootPath, () => {
         if (!cancelled) {
@@ -373,18 +381,20 @@ test.each(['development', 'production'])(
         }
       })
       expect(stateAfterCancel.session.status).toBe('cancelled')
-      expect(instance.getScanSnapshot().snapshot).toEqual(snapshot)
+      expect((await storage.getScanSnapshot()).snapshot).toEqual(snapshot)
       await instance.start(nested)
-      expect(instance.getScanSnapshot().snapshot!.root.aggregatedSizeBytes).toBe(7)
-      expect(() => instance.listScanDirectory(request)).toThrow('no longer available')
+      expect((await storage.getScanSnapshot()).snapshot!.root.aggregatedSizeBytes).toBe(7)
+      await expect(storage.listScanDirectory(request)).rejects.toMatchObject({
+        code: 'SNAPSHOT_EXPIRED'
+      })
     } finally {
       await instance.dispose()
+      await storage.dispose()
     }
-    expect(instance.getScanSnapshot().snapshot).toBeNull()
   }
 )
 
-test('production snapshot paginates a larger real fixture and keeps statistics after retention exhaustion', async () => {
+test('production SQLite publication paginates a larger real fixture', async () => {
   const count = 3000
   // Bounded fixture creation; scanner and storage still consume worker batches incrementally.
   for (let offset = 0; offset < count; offset += 50) {
@@ -394,20 +404,19 @@ test('production snapshot paginates a larger real fixture and keeps statistics a
       )
     )
   }
-  const Manager = artifacts.get('production')!.Manager
-  const instance = new Manager()
-  const limited = new Manager({ maxEntries: 100, maxEstimatedBytes: 1024 * 1024 })
-  const heapBefore = process.memoryUsage().heapUsed
+  const built = artifacts.get('production')!
+  const storage = built.storage()
+  await storage.initialize(join(suitePath, 'pagination.sqlite'))
+  const instance = new built.Manager(Promise.resolve(storage))
   try {
     await instance.start(rootPath)
-    const heapAfter = process.memoryUsage().heapUsed
-    const snapshot = instance.getScanSnapshot().snapshot!
+    const snapshot = (await storage.getScanSnapshot()).snapshot!
     expect(snapshot.entryCount).toBe(count + 1)
     expect(snapshot.root.aggregatedSizeBytes).toBe(count * 4)
     let offset: number | null = 0
     let observed = 0
     while (offset !== null) {
-      const page = instance.listScanDirectory({
+      const page = await storage.listScanDirectory({
         scanId: snapshot.entries.scanId,
         entryId: snapshot.root.id,
         offset,
@@ -420,21 +429,9 @@ test('production snapshot paginates a larger real fixture and keeps statistics a
       offset = page.nextOffset
     }
     expect(observed).toBe(count)
-    console.info(
-      `Snapshot fixture: ${count + 1} entries; approximate Main heap delta ${((heapAfter - heapBefore) / 1024 / 1024).toFixed(1)} MiB (includes worker event processing and GC variability).`
-    )
-    const result = await limited.start(rootPath)
-    expect(result.session).toMatchObject({
-      status: 'completed',
-      summary: { fileCount: count, totalBytes: count * 4 }
-    })
-    expect(limited.getScanSnapshot()).toEqual({
-      snapshot: null,
-      unavailable: { scanId: result.session.id, reason: 'limit-exceeded' }
-    })
   } finally {
     await instance.dispose()
-    await limited.dispose()
+    await storage.dispose()
   }
 }, 30_000)
 
@@ -469,7 +466,7 @@ function deferred(): { promise: Promise<void>; resolve: () => void } {
 test.each(['development', 'production'])(
   'generated %s session manager completes a real scan with batch-paced notifications',
   async (mode) => {
-    const instance = new (artifacts.get(mode)!.Manager)()
+    const instance = sessionOnlyManager(mode)
     await mkdir(join(rootPath, 'nested'))
     await writeFile(join(rootPath, 'file'), '123')
     await writeFile(join(rootPath, 'nested', 'file'), '12345')
@@ -517,7 +514,7 @@ test('session manager preserves consumer backpressure and disposes a real worker
     workers.add(created)
     return created
   })
-  const instance = new (artifacts.get('production')!.Manager)()
+  const instance = sessionOnlyManager()
   const ready = deferred()
   const gate = deferred()
   const consume = vi.fn(async () => {
@@ -548,7 +545,7 @@ test('session manager preserves consumer backpressure and disposes a real worker
 test('session manager cancels a large real scan, preserves known partial totals, then starts afresh', async () => {
   for (let index = 0; index < SCANNER_BATCH_SIZE * 2; index++)
     await writeFile(join(rootPath, `file-${index}`), 'abc')
-  const instance = new (artifacts.get('production')!.Manager)()
+  const instance = sessionOnlyManager()
   const states: ScanSessionState[] = []
   const unsubscribe = instance.subscribe((state) => {
     states.push(state)
@@ -584,7 +581,7 @@ test('session manager cancels a large real scan, preserves known partial totals,
 })
 
 test('session manager records actual worker and callback failures and can recover', async () => {
-  const instance = new (artifacts.get('production')!.Manager)()
+  const instance = sessionOnlyManager()
   try {
     const missing = await instance.start(join(rootPath, 'missing'))
     expect(missing.session.status).toBe('failed')

@@ -276,7 +276,7 @@ function mountExplorer(): {
 } {
   const getSnapshot = vi.fn<SpaceLensAPI['getScanSnapshot']>().mockResolvedValue({
     ok: true,
-    value: { snapshot, unavailable: { scanId: 'summary-only', reason: 'limit-exceeded' } }
+    value: { snapshot, unavailable: null }
   })
   getEntry.mockImplementation(async ({ entryId }) => ({
     ok: true,

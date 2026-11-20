@@ -330,7 +330,7 @@ test('an outstanding selection cannot start scanning after its component unmount
 test('transport failure never displays raw diagnostics and status loading can be retried', async () => {
   vi.mocked(api.getScanState).mockRejectedValueOnce(new Error('private internal stack'))
   render(<OverviewPage />)
-  await screen.findByRole('alert')
+  await within(panel()).findByRole('alert')
   expect(panel().textContent).not.toContain('private internal stack')
   expect(screen.getByRole('button', { name: 'Scan Folder' })).toBeDisabled()
   fireEvent.click(screen.getByRole('button', { name: 'Refresh status' }))
@@ -455,49 +455,56 @@ test('Recent Scans uses Main summaries, survives navigation and ignores stale re
   expect(recent().queryByText(completed.path)).not.toBeInTheDocument()
 })
 
-test.each(['limit-exceeded', 'invalid-data'] as const)(
-  'offers Explorer when the completed scan has legacy memory retention outcome %s',
-  async (reason) => {
-    const completed = {
-      id: 'scan-a',
-      path: '/large',
-      completedAt: '2026-11-12T12:00:00Z',
-      totalBytes: 300_000_000,
-      fileCount: 1234,
-      errorCount: 0
-    }
-    render(<App />)
-    await screen.findByText('Ready to scan')
-    emit({
-      ...snapshot(1, 'completed'),
-      latestCompleted: completed,
-      snapshotUnavailable: { scanId: 'scan-a', reason }
-    })
-    expect(
-      within(panel()).queryByText(/Treemap is temporarily unavailable/)
-    ).not.toBeInTheDocument()
-    expect(within(panel()).getByRole('button', { name: 'Open in Explorer' })).toBeEnabled()
-    expect(within(panel()).getByText('300 MB')).toBeVisible()
-    const recent = (): ReturnType<typeof within> =>
-      within(screen.getByRole('region', { name: 'Recent Scans' }))
-    expect(recent().getByText(completed.path)).toBeVisible()
-    expect(recent().queryByText(/filesystem entries were not retained/)).not.toBeInTheDocument()
-    expect(screen.queryByText(/Results are incomplete/)).not.toBeInTheDocument()
-    for (const status of ['running', 'cancelled', 'failed'] as const) {
-      emit({
-        ...snapshot(latest.revision + 1, status, 'next'),
-        latestCompleted: completed,
-        snapshotUnavailable: { scanId: 'scan-a', reason }
-      })
-      expect(recent().getByText(completed.path)).toBeVisible()
-    }
-    emit({
-      ...snapshot(10, 'completed', 'new'),
-      latestCompleted: { ...completed, id: 'new' },
-      snapshotUnavailable: null
-    })
-    expect(screen.queryByText(/filesystem entries were not retained/)).not.toBeInTheDocument()
-    expect(api.getScanSnapshot).not.toHaveBeenCalled()
-    expect(api.listScanDirectory).not.toHaveBeenCalled()
+test('restores saved metadata with an idle scanner and preserves it through a failed or cancelled replacement', async () => {
+  const completed = {
+    id: 'saved',
+    path: '/large',
+    completedAt: '2026-11-12T12:00:00Z',
+    totalBytes: 300_000_000,
+    fileCount: 1234,
+    directoryCount: 2,
+    errorCount: 0
   }
-)
+  latest = { revision: 1, state: null, latestCompleted: completed, publicationStatus: 'ready' }
+  render(<App />)
+  await within(panel()).findByText('Ready to scan')
+  const recent = (): ReturnType<typeof within> =>
+    within(screen.getByRole('region', { name: 'Recent Scans' }))
+  expect(recent().getByText(completed.path)).toBeVisible()
+  expect(within(panel()).queryByText('Scan completed')).not.toBeInTheDocument()
+  for (const status of ['running', 'cancelled', 'failed'] as const) {
+    emit({ ...snapshot(latest.revision + 1, status, 'next'), latestCompleted: completed })
+    expect(recent().getByText(completed.path)).toBeVisible()
+    expect(within(panel()).getByRole('button', { name: 'Open in Explorer' })).toBeEnabled()
+  }
+  expect(api.getScanSnapshot).not.toHaveBeenCalled()
+})
+
+test('a late startup query cannot overwrite a new publication notification', async () => {
+  const recovery = Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['getScanState']>>>()
+  vi.mocked(api.getScanState).mockReturnValueOnce(recovery.promise)
+  render(<OverviewPage />)
+  expect(screen.getByText(/Loading saved scan/)).toBeVisible()
+  const saved = {
+    id: 'older',
+    path: '/old',
+    completedAt: '2026-11-12T12:00:00Z',
+    totalBytes: 1,
+    fileCount: 1,
+    directoryCount: 1
+  }
+  emit({
+    ...snapshot(4, 'completed', 'new'),
+    latestCompleted: { ...saved, id: 'new', path: '/new' },
+    publicationStatus: 'ready'
+  })
+  await act(async () =>
+    recovery.resolve({
+      ok: true,
+      value: { revision: 2, state: null, latestCompleted: saved, publicationStatus: 'ready' }
+    })
+  )
+  const recent = within(screen.getByRole('region', { name: 'Recent Scans' }))
+  expect(recent.getByText('/new')).toBeVisible()
+  expect(recent.queryByText('/old')).not.toBeInTheDocument()
+})

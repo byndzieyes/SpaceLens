@@ -16,13 +16,14 @@ import {
   type ScanDirectorySelection,
   type ScanStateSnapshot
 } from '../shared/ipc'
-import type { ScanSessionState } from '../shared/scan'
+import type { RecentScanSummary, ScanSessionState } from '../shared/scan'
 import type { ScanDirectoryRequest, ScanEntryRequest } from '../shared/snapshot'
 import {
   SnapshotAccessError,
   validateSnapshotRequest,
   validateTreemapRequest
-} from './scanner/snapshot'
+} from './storage/snapshotAccess'
+import type { CompletedScan } from './storage/payloads'
 import type { ScanSessionManager } from './scanner/sessionManager'
 import { ScanStorageError } from './scanner/persistence'
 import {
@@ -126,21 +127,38 @@ function publicState(state: ScanSessionState | null): ScanSessionState | null {
   }
 }
 
+function publicationSummary(
+  scan: Pick<CompletedScan, 'id' | 'rootPath' | 'finishedAt' | 'summary'> | null
+): RecentScanSummary | null {
+  return (
+    scan && {
+      id: scan.id,
+      path: scan.rootPath,
+      completedAt: scan.finishedAt,
+      ...scan.summary
+    }
+  )
+}
+
 /** Only the native picker grants approval, scoped to the attached renderer document. */
 export function registerScannerIpc(
   manager: ScanSessionManager,
   rendererUrl: string,
-  storage: Pick<ScanStorageCoordinator, 'read'>
+  storage: Pick<ScanStorageCoordinator, 'read'>,
+  restoredPublication: Promise<CompletedScan | null>
 ): { attachRenderer: (renderer: WebContents) => void; dispose: () => Promise<void> } {
   let renderer: WebContents | null = null
   let disposed = false
   let disposal: Promise<void> | undefined
   let revision = 0
+  let latestCompleted: RecentScanSummary | null = null
+  let publicationStatus: NonNullable<ScanStateSnapshot['publicationStatus']> = 'loading'
   let latest: ScanStateSnapshot = {
     revision,
     state: publicState(manager.getState()),
-    snapshotUnavailable: manager.getSnapshotUnavailable(),
-    latestCompleted: manager.getLatestCompleted()
+    snapshotUnavailable: null,
+    latestCompleted,
+    publicationStatus
   }
   let inFlight: number | null = null
   let approval: DirectoryApproval | null = null
@@ -176,8 +194,9 @@ export function registerScannerIpc(
     latest = {
       revision: ++revision,
       state: publicState(state),
-      snapshotUnavailable: manager.getSnapshotUnavailable(),
-      latestCompleted: manager.getLatestCompleted()
+      snapshotUnavailable: null,
+      latestCompleted,
+      publicationStatus
     }
     return latest
   }
@@ -192,9 +211,24 @@ export function registerScannerIpc(
     }
   }
   const unsubscribe = manager.subscribe((state) => {
+    if (state.session.status === 'completed') {
+      latestCompleted = publicationSummary(state.session)
+      publicationStatus = 'ready'
+    }
     capture(state)
     sendLatest()
   })
+  const restore = (status: 'ready' | 'unavailable', scan: CompletedScan | null): void => {
+    if (disposed || publicationStatus !== 'loading') return
+    publicationStatus = status
+    latestCompleted = publicationSummary(scan)
+    capture(manager.getState())
+    sendLatest()
+  }
+  void restoredPublication.then(
+    (scan) => restore('ready', scan),
+    () => restore('unavailable', null)
+  )
   const onLoaded = (): void => {
     inFlight = null
     sendLatest()

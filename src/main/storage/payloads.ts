@@ -138,7 +138,7 @@ export function isStorageEntry(value: unknown): value is FileEntry {
 
 /** Empty batches are valid after filtering a scanner batch that only carried errors or a summary. */
 export function validateStorageBatch(value: unknown): asserts value is StorageBatch {
-  if (!record(value) || !nonempty(value.scanId) || !Array.isArray(value.operations)) {
+  if (!record(value) || !isSnapshotId(value.scanId) || !Array.isArray(value.operations)) {
     throw new TypeError('A storage batch requires a scan ID and an operations array.')
   }
   const operations: readonly unknown[] = value.operations
@@ -150,6 +150,9 @@ export function validateStorageBatch(value: unknown): asserts value is StorageBa
       throw new TypeError(`Invalid entry in storage batch operation ${index + 1}.`)
     }
     const { entry, type } = operation
+    if (!isSnapshotId(entry.id) || (entry.parentId !== null && !isSnapshotId(entry.parentId))) {
+      throw new TypeError(`Invalid entry reference in storage batch operation ${index + 1}.`)
+    }
     if (entry.scanId !== value.scanId) {
       throw new TypeError(`Storage batch operation ${index + 1} belongs to a different scan.`)
     }

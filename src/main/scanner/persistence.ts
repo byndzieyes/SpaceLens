@@ -26,9 +26,9 @@ export class ScanStorageError extends Error {
   }
 }
 
-export async function writeScan(action: string, write: () => Promise<void>): Promise<void> {
+export async function writeScan<T>(action: string, write: () => Promise<T>): Promise<T> {
   try {
-    await write()
+    return await write()
   } catch (error) {
     // A worker reply establishes rollback unless SQLite itself could not roll back.
     // Transport failures and timeouts can lose the reply after a commit.

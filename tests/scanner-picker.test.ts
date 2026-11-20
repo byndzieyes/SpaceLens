@@ -89,15 +89,14 @@ beforeEach(async () => {
   boundary = registerScannerIpc(
     {
       getState: () => state,
-      getLatestCompleted: () => null,
-      getSnapshotUnavailable: () => null,
       launch: start,
       cancel: vi.fn(),
       subscribe: () => () => {},
       dispose: async () => {}
     } as unknown as ScanSessionManager,
     url,
-    { read: vi.fn() }
+    { read: vi.fn() },
+    Promise.resolve(null)
   )
   boundary.attachRenderer(renderer as unknown as WebContents)
 })

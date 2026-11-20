@@ -95,8 +95,10 @@ export function useExplorer(): ExplorerState & {
       if (update.revision <= revision) return
       revision = update.revision
       const session = update.state?.session
+      // Recovery metadata arrives with an idle scanner. The initial SQLite read already waits for it.
+      if (!session) return
       const published =
-        update.latestCompleted?.id ?? (session?.status === 'completed' ? session.id : undefined)
+        update.latestCompleted?.id ?? (session.status === 'completed' ? session.id : undefined)
       if (!published || latestPublished === published) return
       latestPublished = published
       const previous = current.current.availability?.snapshot?.entries.scanId

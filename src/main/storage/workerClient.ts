@@ -85,8 +85,8 @@ export class StorageWorkerClient {
     await this.run('beginScan', scan)
   }
 
-  async publishScan(scan: CompletedScan, rootEntryId: string): Promise<void> {
-    await this.run('publishScan', { scan, rootEntryId })
+  publishScan(scan: CompletedScan, rootEntryId: string): Promise<CompletedScan> {
+    return this.run('publishScan', { scan, rootEntryId })
   }
 
   async discardBuildingScan(scanId: string): Promise<void> {

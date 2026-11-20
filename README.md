@@ -2,7 +2,7 @@
 
 Desktop filesystem storage analysis application. Overview displays demo storage device cards and the latest completed scan summary. Device capacities use decimal GB (1 GB = 1,000,000,000 bytes); these are example drives, not detected devices. Scan Folder opens a native directory picker and scans the selected directory in a worker, with progress and cancellation.
 
-Recent Scans displays "No scans yet" until a scan completes in the current application session. SpaceLens stores scanner batches in `scans.sqlite` under Electron's `userData` directory and publishes the completed scan after SQLite commits. The app keeps the most recent published SQLite scan and a scan under construction. The Overview still starts with an empty session after restart.
+SpaceLens streams scanner batches into `scans.sqlite` in Electron's `userData` directory. Overview restores the latest published scan after startup recovery and displays its folder, completion time, logical size, file and directory counts, and filesystem errors. The Folder scan panel starts idle. Recent Scans displays an empty state until the first successful scan.
 
 At startup, Electron's single-instance lock protects the application profile while the Storage Worker validates the saved publication and removes interrupted scans in a transaction. New scans wait for recovery. If recovery fails, a write outcome is unknown, or a building scan cannot be discarded, SpaceLens blocks further scans for that session. Restarting runs recovery against the committed SQLite state.
 
@@ -10,7 +10,7 @@ Storage requests have a 10-second deadline. On normal shutdown Main waits for sc
 
 SQLite uses its default `DELETE` rollback journal. Snapshot replacement and recovery free pages for future writes, so the database can stay near its previous peak size after the old rows are removed. A rollback journal may be present during a write or after an interruption. SQLite handles journal recovery when the database is reopened.
 
-Explorer uses the latest published SQLite snapshot after recovery, including after a restart. The Directory Tree, Contents, Details, and navigation can browse the previous publication while a scan is running. A successful publication refreshes an open Explorer and resets its navigation to the new root. Known logical bytes may be incomplete after recoverable filesystem errors.
+Overview and Explorer use the same SQLite publication. A running, cancelled, or failed scan leaves the last acknowledged publication visible. A successful commit replaces it and refreshes Explorer at the new root. SpaceLens keeps one published scan and at most one building scan. It maintains no history or parallel entry index in memory. Known logical bytes may be incomplete after recoverable filesystem errors.
 
 Directory pages contain at most 100 direct children, sorted by name then ID in UTF-16 order. References expire on replacement. Treemap reads the same SQLite publication, including after restart. It ranks up to 100 direct children by known size and groups the remaining entries into Other. It uses logical file sizes and the scanner's stored directory totals.
 
@@ -64,7 +64,7 @@ Tests live in `tests/` as `.test.ts` and `.test.tsx` files. `vitest.config.mts` 
 
 ## Structure
 
-- `src/main` — Electron lifecycle, scanner worker, scan session management and temporary snapshot indexes.
+- `src/main` — Electron lifecycle, scanner worker, scan session management, and SQLite storage and recovery.
 - `src/preload` — isolated, typed context bridge for application information, authorized scanning and bounded snapshot retrieval.
 - `src/renderer` — React application shell, UI primitives, Overview dashboard layout and other section placeholder pages.
 - `src/shared` — shared IPC contracts and channel names.

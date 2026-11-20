@@ -57,7 +57,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
     return this.enqueue((client) => client.applyBatch(scanId, operations))
   }
 
-  publishScan(scan: CompletedScan, rootEntryId: string): Promise<void> {
+  publishScan(scan: CompletedScan, rootEntryId: string): Promise<CompletedScan> {
     return this.enqueue((client) => client.publishScan(scan, rootEntryId))
   }
 

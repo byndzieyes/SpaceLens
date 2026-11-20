@@ -94,7 +94,7 @@ app.whenReady().then(async () => {
   })
 
   registerAppInfoHandler(rendererUrl)
-  storageReady = (async () => {
+  const startup = (async () => {
     const directory = app.getPath('userData')
     await mkdir(directory, { recursive: true })
     if (quitting) throw new Error('The application is shutting down.')
@@ -103,17 +103,25 @@ app.whenReady().then(async () => {
     await client.initialize(join(directory, 'scans.sqlite'))
     if (quitting) throw new Error('The application is shutting down.')
     await writeScan('recovering scan storage', () => client.recoverStorage())
-    return client
+    if (quitting) throw new Error('The application is shutting down.')
+    const published = await client.getPublishedScan()
+    return { client, published }
   })()
+  storageReady = startup.then(({ client }) => client)
   const requests = new ScanStorageCoordinator(storageReady)
   storageRequests = requests
   const scanStorageReady = storageReady.then(() => requests)
   void scanStorageReady.catch((error: unknown) => {
     if (!quitting) console.error('Scan storage startup failed.', error)
   })
-  scanManager = new ScanSessionManager(undefined, scanStorageReady)
+  scanManager = new ScanSessionManager(scanStorageReady)
   // Only native directory selection can grant this renderer permission to scan a root.
-  scannerIpc = registerScannerIpc(scanManager, rendererUrl, requests)
+  scannerIpc = registerScannerIpc(
+    scanManager,
+    rendererUrl,
+    requests,
+    startup.then(({ published }) => published)
+  )
 
   if (!app.isPackaged && process.env['NODE_ENV'] === 'development') {
     const extensionPath = process.env['REACT_DEVTOOLS_PATH']?.trim()

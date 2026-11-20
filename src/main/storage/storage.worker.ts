@@ -56,8 +56,7 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       writableDatabase().beginScan(request.payload)
       return null
     case 'publishScan':
-      writableDatabase().publishScan(request.payload.scan, request.payload.rootEntryId)
-      return null
+      return writableDatabase().publishScan(request.payload.scan, request.payload.rootEntryId)
     case 'discardBuildingScan':
       writableDatabase().discardBuildingScan(request.payload.scanId)
       return null
