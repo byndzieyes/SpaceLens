@@ -63,6 +63,12 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return null
     case 'getPublishedScan':
       return requireDatabase().getPublishedScan()
+    case 'getScanSnapshot':
+      return requireDatabase().getScanSnapshot()
+    case 'getScanEntry':
+      return requireDatabase().getScanEntry(request.payload)
+    case 'listScanDirectory':
+      return requireDatabase().listScanDirectory(request.payload)
     case 'getScan':
       return requireDatabase().getScan(request.payload.id)
     case 'insertEntry':

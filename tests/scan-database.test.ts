@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { ScanSnapshotStorage } from '../src/main/scanner/snapshot'
 import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
 import { ScanDatabase } from '../src/main/storage/database'
 import type {
@@ -598,6 +599,245 @@ function readyScan(db: ScanDatabase, id = 'scan-a'): CompletedScan {
   db.applyBatch(id, [discover(root(id)), discover(file(id)), finalize(root(id), 20)])
   return completed(pending)
 }
+
+test('reads published Explorer metadata and entries through reopen and atomic replacement', () => {
+  const db = open()
+  const old = readyScan(db, 'previous')
+  const oldRoot = { scanId: old.id, entryId: 'root' }
+  expect(db.getScanSnapshot()).toEqual({ snapshot: null, unavailable: null })
+  expect(() => db.getScanEntry(oldRoot)).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
+  )
+  expect(() => db.listScanDirectory({ ...oldRoot, offset: 0, limit: 100 })).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
+  )
+  db.publishScan(old, 'root')
+  db.close()
+
+  const reopened = open()
+  reopened.recoverStorage()
+  const expected = {
+    snapshot: {
+      entries: { scanId: old.id, rootEntryId: 'root' },
+      root: root(old.id),
+      completedAt: finishedAt,
+      summary: old.summary,
+      entryCount: 2,
+      incomplete: false
+    },
+    unavailable: null
+  }
+  expect(reopened.getScanSnapshot()).toEqual(expected)
+  expect(reopened.getScanEntry(oldRoot)).toEqual(root(old.id))
+  expect(reopened.getScanEntry({ ...oldRoot, entryId: 'file' })).toEqual(file(old.id))
+  const next = readyScan(reopened, 'next')
+  const nextRoot = { ...oldRoot, scanId: next.id }
+  expect(reopened.getScanSnapshot()).toEqual(expected)
+  expect(() => reopened.getScanEntry({ ...nextRoot, entryId: 'file' })).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
+  )
+  expect(() => reopened.getScanEntry({ ...oldRoot, entryId: 'absent' })).toThrow(
+    expect.objectContaining({ code: 'ENTRY_NOT_FOUND' })
+  )
+  expect(() =>
+    reopened.listScanDirectory({ ...oldRoot, entryId: 'file', offset: 0, limit: 1 })
+  ).toThrow(expect.objectContaining({ code: 'NOT_DIRECTORY' }))
+
+  reopened.publishScan(next, 'root')
+  expect(() => reopened.getScanEntry(oldRoot)).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
+  )
+  expect(() => reopened.listScanDirectory({ ...oldRoot, offset: 0, limit: 100 })).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
+  )
+  expect(reopened.getScanSnapshot().snapshot?.entries).toEqual({
+    scanId: next.id,
+    rootEntryId: 'root'
+  })
+  expect(reopened.getScanEntry({ ...nextRoot, entryId: 'file' })).toEqual(file(next.id))
+})
+
+test('matches Memory Snapshot metadata and page ordering for mixed names, types and depths', () => {
+  const db = open()
+  const pending = building()
+  const top = { ...root(), id: 'stored-root' }
+  const empty = {
+    ...top,
+    id: 'empty',
+    name: 'empty',
+    parentId: top.id,
+    path: join(rootPath, 'empty')
+  }
+  const nested = { ...empty, id: 'nested', name: 'nested', path: join(rootPath, 'nested') }
+  const max = Number.MAX_SAFE_INTEGER
+  const leaf = {
+    ...file(),
+    id: 'leaf',
+    parentId: nested.id,
+    path: join(nested.path, 'leaf'),
+    sizeBytes: max
+  }
+  const files = [
+    ['tie_z', 'same'],
+    ['tie_A', 'same'],
+    ['tie_-', 'same'],
+    ['upper', 'A'],
+    ['lower', 'a'],
+    ['prefix', 'prefix'],
+    ['longer', 'prefix-x'],
+    ['composed', '\u00e9'],
+    ['decomposed', 'e\u0301'],
+    ['private', '\ue000'],
+    ['supplementary', '\u{10000}'],
+    ['emoji', '\u{1f4c1}'],
+    ['high', '\ud800'],
+    ['low', '\udc00'],
+    ['odd', " spaces ' quotes\n.txt "],
+    ...Array.from({ length: 130 }, (_, i) => [
+      `file-${i}`,
+      `item-${String(i).padStart(3, '0')}`
+    ]).reverse()
+  ].map(([id, name]) => ({
+    ...file(pending.id, id),
+    parentId: top.id,
+    name,
+    path: join(rootPath, name),
+    sizeBytes: id === 'odd' ? null : 0
+  }))
+  const otherEntries = (['unknown', 'symlink', 'other'] as const).map((type) => ({
+    ...file(pending.id, type),
+    parentId: top.id,
+    name: type,
+    path: join(rootPath, type),
+    type,
+    sizeBytes: null
+  }))
+  const operations = [
+    discover(top),
+    discover(empty),
+    finalize(empty, 0),
+    ...files.map(discover),
+    ...otherEntries.map(discover),
+    discover(nested),
+    discover(leaf),
+    finalize(nested, max),
+    finalize(top, max)
+  ]
+  const final = completed(pending, {
+    fileCount: files.length + 1,
+    directoryCount: 3,
+    totalBytes: max,
+    errorCount: 2
+  })
+  const memory = new ScanSnapshotStorage(pending.id, rootPath)
+  for (const op of operations) memory.accept(op)
+  for (const entry of [files.find((item) => item.id === 'odd')!, otherEntries[0]]) {
+    memory.accept({ type: 'error', error: { path: entry.path, code: 'EACCES', message: 'Denied' } })
+  }
+  expect(
+    memory.complete(
+      { type: 'summary', scanId: pending.id, rootEntryId: top.id, summary: final.summary },
+      final.finishedAt
+    )
+  ).toBe(true)
+  db.beginScan(pending)
+  for (let i = 0; i < operations.length; i += SCANNER_BATCH_SIZE) {
+    db.applyBatch(pending.id, operations.slice(i, i + SCANNER_BATCH_SIZE))
+  }
+  db.publishScan(final, top.id)
+  expect(db.getScanSnapshot()).toEqual({ snapshot: memory.describe(), unavailable: null })
+  expect(db.getScanSnapshot().snapshot?.entryCount).toBe(files.length + 7)
+  for (const entry of [...files, ...otherEntries, leaf]) {
+    expect(db.getScanEntry({ scanId: pending.id, entryId: entry.id })).toEqual(
+      memory.getEntry(entry.id)
+    )
+  }
+  for (const [entryId, offset, limit] of [
+    [top.id, 0, 100],
+    [top.id, 100, 100],
+    [top.id, 0, 100],
+    [top.id, files.length + 5, 10],
+    [top.id, max, 100],
+    [empty.id, 0, 100],
+    [nested.id, 0, 1]
+  ] as const) {
+    const request = { scanId: pending.id, entryId, offset, limit }
+    expect(db.listScanDirectory(request)).toEqual(memory.listDirectory(request))
+  }
+  const tied = memory.listDirectory({
+    scanId: pending.id,
+    entryId: top.id,
+    offset: 100,
+    limit: 100
+  })
+  const tieStart = 100 + tied.entries.findIndex((entry) => entry.name === 'same')
+  for (const [index, id] of ['tie_-', 'tie_A', 'tie_z'].entries()) {
+    const request = { scanId: pending.id, entryId: top.id, offset: tieStart + index, limit: 1 }
+    expect(db.listScanDirectory(request)).toEqual(memory.listDirectory(request))
+    expect(db.listScanDirectory(request).entries[0].id).toBe(id)
+  }
+})
+
+test('rejects invalid Explorer requests before reading', () => {
+  const db = open()
+  const entry = { scanId: 'scan-a', entryId: 'root' }
+  const page = { ...entry, offset: 0, limit: 100 }
+  for (const request of [null, { ...entry, entryId: '../root' }, { ...entry, scanId: ' ' }, page]) {
+    expect(() => Reflect.apply(db.getScanEntry, db, [request])).toThrow(
+      expect.objectContaining({ code: 'INVALID_REQUEST' })
+    )
+  }
+  for (const request of [
+    entry,
+    { ...page, path: 'extra' },
+    { ...page, scanId: 'x'.repeat(129) },
+    ...[-1, 0.5, Infinity, NaN, '0', Number.MAX_SAFE_INTEGER + 1].map((offset) => ({
+      ...page,
+      offset
+    })),
+    ...[0, 101, -1, 1.5, '100'].map((limit) => ({ ...page, limit }))
+  ]) {
+    expect(() => Reflect.apply(db.listScanDirectory, db, [request])).toThrow(
+      expect.objectContaining({ code: 'INVALID_REQUEST' })
+    )
+  }
+})
+
+test('reports inconsistent persisted Explorer metadata and rejects unsafe integers', () => {
+  const db = open()
+  const saved = readyScan(db)
+  db.publishScan(saved, 'root')
+  const entry = { scanId: saved.id, entryId: 'file' }
+  inspectDatabase((sql) => {
+    sql
+      .prepare('UPDATE entries SET size_bytes = ? WHERE scan_id = ? AND id = ?')
+      .run(BigInt(Number.MAX_SAFE_INTEGER) + 1n, saved.id, entry.entryId)
+  })
+  expect(() => db.getScanEntry(entry)).toThrow('outside the non-negative safe integer range')
+  expect(() => db.listScanDirectory({ ...entry, entryId: 'root', offset: 0, limit: 100 })).toThrow(
+    'outside the non-negative safe integer range'
+  )
+
+  inspectDatabase((sql) =>
+    sql.prepare('UPDATE scans SET file_count = 2 WHERE id = ?').run(saved.id)
+  )
+  expect(() => db.getScanSnapshot()).toThrow('entry counts differ')
+  inspectDatabase((sql) =>
+    sql
+      .prepare('UPDATE scans SET file_count = 1, finished_at = ? WHERE id = ?')
+      .run('invalid', saved.id)
+  )
+  expect(() => db.getScanSnapshot()).toThrow('valid timestamps')
+  inspectDatabase((sql) =>
+    sql
+      .prepare('UPDATE scans SET finished_at = ?, root_path = ? WHERE id = ?')
+      .run(finishedAt, Buffer.from(join(rootPath, 'different'), 'utf16le').swap16(), saved.id)
+  )
+  expect(() => db.getScanSnapshot()).toThrow('root directory is missing or invalid')
+  db.insertScan(scan('ambiguous'))
+  expect(() => db.getScanSnapshot()).toThrow('more than one completed scan')
+  expect(() => db.getScanEntry(entry)).toThrow('more than one completed scan')
+})
 
 test.each([false, true])(
   'recovers an empty database or a healthy publication (published: %s)',

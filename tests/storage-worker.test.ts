@@ -11,6 +11,7 @@ import { resolveConfig } from 'electron-vite'
 import { build } from 'vite'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
+import { ScanDatabase } from '../src/main/storage/database'
 import type {
   BuildingScan,
   CompletedScan,
@@ -347,6 +348,157 @@ async function preparePublication(
   ])
   return readyMetadata(pending)
 }
+
+test('queries published Explorer snapshots through the Worker and returns structured errors', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.recoverStorage()
+  await expect(client.getScanSnapshot()).resolves.toEqual({ snapshot: null, unavailable: null })
+  const previous = await preparePublication(client, lifecycleScan('previous'))
+  const rootRequest = { scanId: previous.id, entryId: root.id }
+  const page = { ...rootRequest, offset: 0, limit: 100 }
+  const fileRequest = { ...rootRequest, entryId: file.id }
+  await expect(client.getScanEntry(fileRequest)).rejects.toMatchObject({
+    name: 'SnapshotAccessError',
+    code: 'SNAPSHOT_UNAVAILABLE',
+    sqliteCode: null
+  })
+  await client.publishScan(previous, root.id)
+  const snapshot = client.getScanSnapshot()
+  await expect(client.listScanDirectory(page)).rejects.toThrow('already in flight')
+  await expect(snapshot).resolves.toEqual({
+    snapshot: {
+      entries: { scanId: previous.id, rootEntryId: root.id },
+      root: { ...root, scanId: previous.id, aggregatedSizeBytes: 0 },
+      completedAt: previous.finishedAt,
+      summary: previous.summary,
+      entryCount: 2,
+      incomplete: false
+    },
+    unavailable: null
+  })
+  await expect(client.getScanEntry(fileRequest)).resolves.toEqual({ ...file, scanId: previous.id })
+  await expect(client.listScanDirectory(page)).resolves.toEqual({
+    scanId: previous.id,
+    directoryId: root.id,
+    entries: [{ ...file, scanId: previous.id }],
+    totalCount: 1,
+    nextOffset: null
+  })
+  await expect(
+    client.listScanDirectory({ ...page, offset: Number.MAX_SAFE_INTEGER })
+  ).resolves.toMatchObject({
+    entries: [],
+    totalCount: 1,
+    nextOffset: null
+  })
+  for (const [request, code] of [
+    [{ ...page, limit: 101 }, 'INVALID_REQUEST'],
+    [{ ...page, offset: -1 }, 'INVALID_REQUEST'],
+    [{ ...page, scanId: '\0' }, 'INVALID_REQUEST'],
+    [{ ...page, entryId: '../root' }, 'INVALID_REQUEST'],
+    [{ ...page, entryId: file.id }, 'NOT_DIRECTORY'],
+    [{ ...page, entryId: 'missing' }, 'ENTRY_NOT_FOUND']
+  ] as const) {
+    await expect(client.listScanDirectory(request)).rejects.toMatchObject({
+      name: 'SnapshotAccessError',
+      code,
+      sqliteCode: null
+    })
+  }
+  await expect(client.getScanEntry({ ...rootRequest, entryId: 'missing' })).rejects.toMatchObject({
+    code: 'ENTRY_NOT_FOUND'
+  })
+
+  const next = await preparePublication(client, lifecycleScan('next'))
+  await expect(client.listScanDirectory({ ...page, scanId: next.id })).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
+  await expect(client.getScanSnapshot()).resolves.toMatchObject({
+    snapshot: { entries: { scanId: previous.id } }
+  })
+  await client.publishScan(next, root.id)
+  await expect(client.getScanEntry(fileRequest)).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
+  await expect(client.listScanDirectory(page)).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
+  await client.dispose()
+  await expect(client.getScanSnapshot()).rejects.toThrow('closing or closed')
+  await expect(client.getScanEntry(rootRequest)).rejects.toThrow('closing or closed')
+  await expect(client.listScanDirectory(page)).rejects.toThrow('closing or closed')
+
+  const reopened = bundled()
+  await reopened.initialize(databasePath)
+  await reopened.recoverStorage()
+  await expect(reopened.getScanSnapshot()).resolves.toMatchObject({
+    snapshot: { entries: { scanId: next.id } }
+  })
+  await expect(reopened.getScanEntry({ ...fileRequest, scanId: next.id })).resolves.toEqual({
+    ...file,
+    scanId: next.id
+  })
+})
+
+test('returns bounded Worker pages for a wide directory including deep and final offsets', async () => {
+  const pending = lifecycleScan('wide')
+  const count = 12_097
+  const label = (index: number): string => `file-${String(index).padStart(5, '0')}`
+  // Seed the read fixture in one transaction so the test does not depend on disk sync speed.
+  const seed = new ScanDatabase(databasePath)
+  try {
+    seed.beginScan(pending)
+    seed.transaction(() => {
+      seed.insertEntry({ ...root, scanId: pending.id, aggregatedSizeBytes: 0 })
+      for (let index = count - 1; index >= 0; index--) {
+        const id = label(index)
+        const name = index >= 9_998 && index <= 10_002 ? label(9_998) : id
+        seed.insertEntry({ ...file, id, scanId: pending.id, name, path: join(rootPath, name) })
+      }
+    })
+    const metadata = readyMetadata(pending)
+    seed.publishScan({ ...metadata, summary: { ...metadata.summary, fileCount: count } }, root.id)
+  } finally {
+    seed.close()
+  }
+  const client = bundled()
+  await client.initialize(databasePath)
+  for (const [offset, length, nextOffset] of [
+    [0, 100, 100],
+    [9_900, 100, 10_000],
+    [10_000, 100, 10_100],
+    [12_000, 97, null],
+    [count, 0, null]
+  ] as const) {
+    const page = await client.listScanDirectory({
+      scanId: pending.id,
+      entryId: root.id,
+      offset,
+      limit: 100
+    })
+    expect(page.totalCount).toBe(count)
+    expect(page.nextOffset).toBe(nextOffset)
+    expect(page.entries.map((entry) => entry.id)).toEqual(
+      Array.from({ length }, (_, i) => label(offset + i))
+    )
+  }
+})
+
+test('rejects a malformed Worker page response and terminates the client', async () => {
+  const worker = start(`
+    const { parentPort } = require('node:worker_threads')
+    parentPort.on('message', ({ requestId, operation }) => {
+      const result = operation === 'listScanDirectory'
+        ? { scanId: 'scan-a', directoryId: 'root', entries: Array(101).fill(null), totalCount: 101, nextOffset: null }
+        : null
+      parentPort.postMessage({ requestId, ok: true, result })
+    })
+  `)
+  const client = wrap(worker)
+  await client.initialize(databasePath)
+  await expect(
+    client.listScanDirectory({ scanId: 'scan-a', entryId: 'root', offset: 0, limit: 100 })
+  ).rejects.toThrow('invalid response')
+  await expect(client.dispose()).rejects.toThrow('invalid response')
+  expectReleased(worker)
+})
 
 test('allows startup recovery before any writes and rejects recovery during a legitimate scan', async () => {
   const client = bundled()

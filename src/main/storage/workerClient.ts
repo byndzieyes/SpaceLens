@@ -1,5 +1,11 @@
 import type { Worker } from 'node:worker_threads'
 import type { FileEntry, ScanSession } from '../../shared/scan'
+import type {
+  ScanDirectoryPage,
+  ScanDirectoryRequest,
+  ScanEntryRequest,
+  ScanSnapshotAvailability
+} from '../../shared/snapshot'
 import type { BuildingScan, CompletedScan, StorageBatchOperation } from './payloads'
 import {
   parseStorageResponse,
@@ -83,6 +89,18 @@ export class StorageWorkerClient {
 
   getPublishedScan(): Promise<CompletedScan | null> {
     return this.run('getPublishedScan', null)
+  }
+
+  getScanSnapshot(): Promise<ScanSnapshotAvailability> {
+    return this.run('getScanSnapshot', null)
+  }
+
+  getScanEntry(request: ScanEntryRequest): Promise<FileEntry> {
+    return this.run('getScanEntry', request)
+  }
+
+  listScanDirectory(request: ScanDirectoryRequest): Promise<ScanDirectoryPage> {
+    return this.run('listScanDirectory', request)
   }
 
   getScan(id: string): Promise<ScanSession | null> {

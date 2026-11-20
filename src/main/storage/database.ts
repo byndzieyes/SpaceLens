@@ -1,5 +1,12 @@
 import { DatabaseSync, type SQLOutputValue, type StatementSync } from 'node:sqlite'
 import type { FileEntry, ScanSession } from '../../shared/scan'
+import type {
+  ScanDirectoryPage,
+  ScanDirectoryRequest,
+  ScanEntryRequest,
+  ScanSnapshotAvailability
+} from '../../shared/snapshot'
+import { SnapshotAccessError, validateSnapshotRequest } from '../scanner/snapshot'
 import {
   isSnapshotId,
   validateBuildingScan,
@@ -18,6 +25,12 @@ const SELECT_SCAN = `
   SELECT id, root_path, status, started_at, finished_at, total_bytes, file_count,
          directory_count, error_count FROM scans
 `
+const SELECT_ENTRY = `
+  SELECT entry.scan_id, entry.id, entry.parent_id, entry.name, entry.path, entry.type,
+         entry.size_bytes, entry.aggregated_size_bytes, entry.created_at, entry.modified_at
+  FROM entries AS entry
+`
+const DEEP_DIRECTORY_OFFSET = 10_000
 
 function bindInteger(value: number, column: string): bigint {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -77,6 +90,41 @@ function readScan(row: Record<string, SQLOutputValue>): ScanSession {
   }
 }
 
+function readEntry(row: Record<string, SQLOutputValue>): FileEntry {
+  const { type } = row
+  if (
+    type !== 'file' &&
+    type !== 'directory' &&
+    type !== 'symlink' &&
+    type !== 'other' &&
+    type !== 'unknown'
+  ) {
+    throw new Error('Stored entry has an invalid type.')
+  }
+  return {
+    id: readText(row.id, 'entry ID'),
+    scanId: readText(row.scan_id, 'scan ID'),
+    parentId: row.parent_id === null ? null : readText(row.parent_id, 'parent ID'),
+    name: readFilesystemText(row.name, 'name'),
+    path: readFilesystemText(row.path, 'path'),
+    type,
+    sizeBytes: row.size_bytes === null ? null : readInteger(row.size_bytes, 'sizeBytes'),
+    aggregatedSizeBytes:
+      row.aggregated_size_bytes === null
+        ? null
+        : readInteger(row.aggregated_size_bytes, 'aggregatedSizeBytes'),
+    createdAt: row.created_at === null ? null : readText(row.created_at, 'createdAt'),
+    modifiedAt: row.modified_at === null ? null : readText(row.modified_at, 'modifiedAt')
+  }
+}
+
+function validateEntryReference(entry: FileEntry): FileEntry {
+  if (!isSnapshotId(entry.id) || (entry.parentId !== null && !isSnapshotId(entry.parentId))) {
+    throw new Error('Published snapshot contains an invalid entry reference.')
+  }
+  return entry
+}
+
 function inTransaction(connection: DatabaseSync, operation: () => undefined): void {
   connection.exec('BEGIN IMMEDIATE')
   try {
@@ -120,6 +168,10 @@ export class ScanDatabase {
   private readonly validateSnapshot: (scan: CompletedScan) => void
   private readonly insertEntryStatement: StatementSync
   private readonly selectEntryStatement: StatementSync
+  private readonly countSnapshotEntriesStatement: StatementSync
+  private readonly countDirectoryChildrenStatement: StatementSync
+  private readonly listDirectoryPageStatement: StatementSync
+  private readonly listDeepDirectoryPageStatement: StatementSync
   private readonly selectFinalizedDirectoryStatement: StatementSync
   private readonly selectUnfinalizedChildStatement: StatementSync
   private readonly finalizeDirectoryStatement: StatementSync
@@ -179,11 +231,47 @@ export class ScanDatabase {
         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       this.selectEntryStatement = this.connection.prepare(`
-        SELECT scan_id, id, parent_id, name, path, type, size_bytes, aggregated_size_bytes,
-               created_at, modified_at
-        FROM entries WHERE scan_id = ? AND id = ?
+        ${SELECT_ENTRY} WHERE entry.scan_id = ? AND entry.id = ?
       `)
       this.selectEntryStatement.setReadBigInts(true)
+      this.countSnapshotEntriesStatement = this.connection.prepare(`
+        SELECT COUNT(*) AS entry_count,
+               COUNT(*) FILTER (WHERE type = 'file') AS file_count,
+               COUNT(*) FILTER (WHERE type = 'directory') AS directory_count
+        FROM entries WHERE scan_id = ?
+      `)
+      this.countSnapshotEntriesStatement.setReadBigInts(true)
+      this.countDirectoryChildrenStatement = this.connection.prepare(`
+        SELECT COUNT(*) AS child_count FROM entries WHERE scan_id = ? AND parent_id = ?
+      `)
+      this.countDirectoryChildrenStatement.setReadBigInts(true)
+      // Sort UTF-16BE name keys and ASCII snapshot IDs, then fetch metadata for just the page.
+      this.listDirectoryPageStatement = this.connection.prepare(`
+        WITH page AS MATERIALIZED (
+          SELECT id, name FROM entries WHERE scan_id = $scanId AND parent_id = $entryId
+          ORDER BY name, id COLLATE BINARY LIMIT $limit OFFSET $offset
+        )
+        ${SELECT_ENTRY}
+        JOIN page ON entry.scan_id = $scanId AND entry.id = page.id
+        ORDER BY page.name, page.id COLLATE BINARY
+      `)
+      this.listDirectoryPageStatement.setReadBigInts(true)
+      // At deep offsets SQLite's LIMIT sort can maintain offset + limit keys in a temporary
+      // B-tree. Ranking uses SQLite's full sorter and passes only the page keys to the join.
+      this.listDeepDirectoryPageStatement = this.connection.prepare(`
+        WITH page AS MATERIALIZED (
+          SELECT id, position FROM (
+            SELECT id, ROW_NUMBER() OVER (ORDER BY name, id COLLATE BINARY) AS position
+            FROM entries WHERE scan_id = $scanId AND parent_id = $entryId
+          )
+          WHERE position > $offset AND position <= $offset + $limit
+          LIMIT $limit
+        )
+        ${SELECT_ENTRY}
+        JOIN page ON entry.scan_id = $scanId AND entry.id = page.id
+        ORDER BY page.position
+      `)
+      this.listDeepDirectoryPageStatement.setReadBigInts(true)
 
       this.selectFinalizedDirectoryStatement = this.connection.prepare(`
         SELECT 1 FROM entries
@@ -316,7 +404,86 @@ export class ScanDatabase {
     return { ...scan, status: scan.status }
   }
 
+  getScanSnapshot(): ScanSnapshotAvailability {
+    const scan = this.getPublishedScan()
+    if (!scan) return { snapshot: null, unavailable: null }
+
+    const publication = { scan, rootEntryId: this.selectRootIdStatement.get(scan.id)?.id }
+    validateScanPublication(publication)
+    const root = this.readPublishedRoot(scan, publication.rootEntryId)
+    const counts = this.countSnapshotEntriesStatement.get(scan.id)
+    if (
+      counts?.file_count !== BigInt(scan.summary.fileCount) ||
+      counts.directory_count !== BigInt(scan.summary.directoryCount)
+    ) {
+      throw new Error('Persisted entry counts differ from the scan summary.')
+    }
+    return {
+      snapshot: {
+        entries: { scanId: scan.id, rootEntryId: root.id },
+        root,
+        completedAt: scan.finishedAt,
+        summary: scan.summary,
+        entryCount: readInteger(counts.entry_count, 'entryCount'),
+        incomplete: scan.summary.errorCount > 0
+      },
+      unavailable: null
+    }
+  }
+
+  getScanEntry(request: ScanEntryRequest): FileEntry {
+    validateSnapshotRequest(request, false)
+    return this.requirePublishedEntry(request)
+  }
+
+  listScanDirectory(request: ScanDirectoryRequest): ScanDirectoryPage {
+    validateSnapshotRequest(request, true)
+    const directory = this.requirePublishedEntry(request)
+    if (directory.type !== 'directory') {
+      throw new SnapshotAccessError('NOT_DIRECTORY', 'Entry is not a directory.')
+    }
+    const { scanId, entryId: directoryId, offset, limit } = request
+    const counts = this.countDirectoryChildrenStatement.get(scanId, directoryId)
+    const totalCount = readInteger(counts?.child_count ?? null, 'totalCount')
+    const length = Math.min(limit, Math.max(0, totalCount - offset))
+    const statement =
+      offset >= DEEP_DIRECTORY_OFFSET
+        ? this.listDeepDirectoryPageStatement
+        : this.listDirectoryPageStatement
+    const entries =
+      length === 0
+        ? []
+        : statement
+            .all({ $scanId: scanId, $entryId: directoryId, $limit: length, $offset: offset })
+            .map((row) => validateEntryReference(readEntry(row)))
+    const end = offset + length
+    return { scanId, directoryId, entries, totalCount, nextOffset: end < totalCount ? end : null }
+  }
+
+  private requirePublishedEntry({ scanId, entryId }: ScanEntryRequest): FileEntry {
+    const published = this.getPublishedScan()
+    if (!published || (published.id !== scanId && this.getScan(scanId))) {
+      throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'This scan has no available snapshot.')
+    }
+    if (published.id !== scanId) {
+      throw new SnapshotAccessError(
+        'SNAPSHOT_EXPIRED',
+        'This snapshot reference is no longer available.'
+      )
+    }
+    const entry = this.getEntry(scanId, entryId)
+    if (!entry) {
+      throw new SnapshotAccessError('ENTRY_NOT_FOUND', 'Entry does not exist in this snapshot.')
+    }
+    return validateEntryReference(entry)
+  }
+
   private validatePublishedTree(scan: CompletedScan, rootEntryId: string): void {
+    this.readPublishedRoot(scan, rootEntryId)
+    this.validateSnapshot(scan)
+  }
+
+  private readPublishedRoot(scan: CompletedScan, rootEntryId: string): FileEntry {
     const root = this.getEntry(scan.id, rootEntryId)
     if (
       !root ||
@@ -329,7 +496,7 @@ export class ScanDatabase {
     if (root.aggregatedSizeBytes !== scan.summary.totalBytes) {
       throw new Error('The scan root is unfinished or its total differs from the scan summary.')
     }
-    this.validateSnapshot(scan)
+    return root
   }
 
   private requireOnlyBuildingScan(scanId: string): void {
@@ -358,33 +525,7 @@ export class ScanDatabase {
   getEntry(scanId: string, id: string): FileEntry | null {
     this.requireOpen()
     const row = this.selectEntryStatement.get(scanId, id)
-    if (!row) return null
-
-    const { type } = row
-    if (
-      type !== 'file' &&
-      type !== 'directory' &&
-      type !== 'symlink' &&
-      type !== 'other' &&
-      type !== 'unknown'
-    ) {
-      throw new Error('Stored entry has an invalid type.')
-    }
-    return {
-      id: readText(row.id, 'entry ID'),
-      scanId: readText(row.scan_id, 'scan ID'),
-      parentId: row.parent_id === null ? null : readText(row.parent_id, 'parent ID'),
-      name: readFilesystemText(row.name, 'name'),
-      path: readFilesystemText(row.path, 'path'),
-      type,
-      sizeBytes: row.size_bytes === null ? null : readInteger(row.size_bytes, 'sizeBytes'),
-      aggregatedSizeBytes:
-        row.aggregated_size_bytes === null
-          ? null
-          : readInteger(row.aggregated_size_bytes, 'aggregatedSizeBytes'),
-      createdAt: row.created_at === null ? null : readText(row.created_at, 'createdAt'),
-      modifiedAt: row.modified_at === null ? null : readText(row.modified_at, 'modifiedAt')
-    }
+    return row ? readEntry(row) : null
   }
 
   /** Persist discoveries and finalizations in order, acknowledging only a committed batch. */

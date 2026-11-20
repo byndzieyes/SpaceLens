@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path'
-import type { FileEntry, ScanSession } from '../../shared/scan'
+import type { FileEntry, ScanSession, ScanSummary } from '../../shared/scan'
 import { SCANNER_BATCH_SIZE } from '../scanner/workerProtocol'
 
 export type FinalizedDirectory = FileEntry & {
@@ -40,6 +40,16 @@ export function nullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string'
 }
 
+export function isScanSummary(value: unknown): value is ScanSummary {
+  return (
+    record(value) &&
+    integer(value.fileCount) &&
+    integer(value.directoryCount) &&
+    integer(value.totalBytes) &&
+    integer(value.errorCount)
+  )
+}
+
 export function isStorageScan(value: unknown): value is ScanSession {
   if (!record(value) || !nonempty(value.id) || !nonempty(value.rootPath)) return false
   const { status, summary, startedAt, finishedAt } = value
@@ -49,11 +59,7 @@ export function isStorageScan(value: unknown): value is ScanSession {
       ? finishedAt === null
       : (status === 'completed' || status === 'cancelled' || status === 'failed') &&
         typeof finishedAt === 'string') &&
-    record(summary) &&
-    integer(summary.fileCount) &&
-    integer(summary.directoryCount) &&
-    integer(summary.totalBytes) &&
-    integer(summary.errorCount)
+    isScanSummary(summary)
   )
 }
 

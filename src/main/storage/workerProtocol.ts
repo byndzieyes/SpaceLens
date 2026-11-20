@@ -1,6 +1,15 @@
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
+  MAX_SCAN_DIRECTORY_PAGE_SIZE,
+  type ScanDirectoryPage,
+  type ScanDirectoryRequest,
+  type ScanEntryRequest,
+  type ScanSnapshotAvailability
+} from '../../shared/snapshot'
+import { validateSnapshotRequest } from '../scanner/snapshot'
+import {
   integer,
+  isScanSummary,
   isSnapshotId,
   isStorageEntry,
   isStorageScan,
@@ -24,6 +33,9 @@ interface StorageCommands {
   publishScan: { payload: ScanPublication; result: null }
   discardBuildingScan: { payload: { scanId: string }; result: null }
   getPublishedScan: { payload: null; result: CompletedScan | null }
+  getScanSnapshot: { payload: null; result: ScanSnapshotAvailability }
+  getScanEntry: { payload: ScanEntryRequest; result: FileEntry }
+  listScanDirectory: { payload: ScanDirectoryRequest; result: ScanDirectoryPage }
   getScan: { payload: { id: string }; result: ScanSession | null }
   insertEntry: { payload: FileEntry; result: null }
   applyBatch: { payload: StorageBatch; result: null }
@@ -91,8 +103,19 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       break
     case 'recoverStorage':
     case 'getPublishedScan':
+    case 'getScanSnapshot':
       if (payload === null) return { requestId, operation, payload }
       break
+    case 'getScanEntry': {
+      const request = payload as ScanEntryRequest
+      validateSnapshotRequest(request, false)
+      return { requestId, operation, payload: request }
+    }
+    case 'listScanDirectory': {
+      const request = payload as ScanDirectoryRequest
+      validateSnapshotRequest(request, true)
+      return { requestId, operation, payload: request }
+    }
     case 'getScan':
       if (record(payload) && nonempty(payload.id)) {
         return { requestId, operation, payload: { id: payload.id } }
@@ -122,6 +145,47 @@ function isNull(value: unknown): value is null {
   return value === null
 }
 
+function isSnapshotAvailability(value: unknown): value is ScanSnapshotAvailability {
+  if (!record(value) || value.unavailable !== null) return false
+  const { snapshot } = value
+  if (snapshot === null) return true
+  if (!record(snapshot)) return false
+  const { entries, root, summary, completedAt, entryCount, incomplete } = snapshot
+  return (
+    record(entries) &&
+    isSnapshotId(entries.scanId) &&
+    isSnapshotId(entries.rootEntryId) &&
+    isStorageEntry(root) &&
+    root.scanId === entries.scanId &&
+    root.id === entries.rootEntryId &&
+    root.type === 'directory' &&
+    root.parentId === null &&
+    isScanSummary(summary) &&
+    root.aggregatedSizeBytes === summary.totalBytes &&
+    nonempty(completedAt) &&
+    integer(entryCount) &&
+    entryCount - summary.fileCount >= summary.directoryCount &&
+    incomplete === summary.errorCount > 0
+  )
+}
+
+function isDirectoryPage(value: unknown): value is ScanDirectoryPage {
+  if (!record(value)) return false
+  const { scanId, directoryId, entries, totalCount, nextOffset } = value
+  return (
+    isSnapshotId(scanId) &&
+    isSnapshotId(directoryId) &&
+    integer(totalCount) &&
+    (nextOffset === null || (integer(nextOffset) && nextOffset < totalCount)) &&
+    Array.isArray(entries) &&
+    entries.length <= MAX_SCAN_DIRECTORY_PAGE_SIZE &&
+    entries.length <= totalCount &&
+    Array.from(entries).every(
+      (entry) => isStorageEntry(entry) && entry.scanId === scanId && entry.parentId === directoryId
+    )
+  )
+}
+
 const resultValidators: { [T in StorageOperation]: (value: unknown) => value is StorageResult<T> } =
   {
     initialize: isNull,
@@ -132,6 +196,9 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     discardBuildingScan: isNull,
     getPublishedScan: (value): value is CompletedScan | null =>
       value === null || (isStorageScan(value) && value.status === 'completed'),
+    getScanSnapshot: isSnapshotAvailability,
+    getScanEntry: isStorageEntry,
+    listScanDirectory: isDirectoryPage,
     getScan: (value): value is ScanSession | null => value === null || isStorageScan(value),
     insertEntry: isNull,
     applyBatch: isNull,
