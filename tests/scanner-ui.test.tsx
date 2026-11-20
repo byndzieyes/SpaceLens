@@ -456,7 +456,7 @@ test('Recent Scans uses Main summaries, survives navigation and ignores stale re
 })
 
 test.each(['limit-exceeded', 'invalid-data'] as const)(
-  'offers Explorer even when the completed scan has no Treemap after %s',
+  'offers Explorer when the completed scan has legacy memory retention outcome %s',
   async (reason) => {
     const completed = {
       id: 'scan-a',
@@ -473,7 +473,9 @@ test.each(['limit-exceeded', 'invalid-data'] as const)(
       latestCompleted: completed,
       snapshotUnavailable: { scanId: 'scan-a', reason }
     })
-    expect(within(panel()).getByText(/browse its saved entries in Explorer/)).toBeVisible()
+    expect(
+      within(panel()).queryByText(/Treemap is temporarily unavailable/)
+    ).not.toBeInTheDocument()
     expect(within(panel()).getByRole('button', { name: 'Open in Explorer' })).toBeEnabled()
     expect(within(panel()).getByText('300 MB')).toBeVisible()
     const recent = (): ReturnType<typeof within> =>
@@ -487,9 +489,6 @@ test.each(['limit-exceeded', 'invalid-data'] as const)(
         latestCompleted: completed,
         snapshotUnavailable: { scanId: 'scan-a', reason }
       })
-      expect(
-        within(panel()).queryByText(/browse its saved entries in Explorer/)
-      ).not.toBeInTheDocument()
       expect(recent().getByText(completed.path)).toBeVisible()
     }
     emit({

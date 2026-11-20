@@ -12,7 +12,7 @@ SQLite uses its default `DELETE` rollback journal. Snapshot replacement and reco
 
 Explorer uses the latest published SQLite snapshot after recovery, including after a restart. The Directory Tree, Contents, Details, and navigation can browse the previous publication while a scan is running. A successful publication refreshes an open Explorer and resets its navigation to the new root. Known logical bytes may be incomplete after recoverable filesystem errors.
 
-Directory pages contain at most 100 direct children, sorted by name then ID in UTF-16 order. References expire on replacement. Treemap uses an in-memory snapshot only when it matches the SQLite publication. It is temporarily unavailable after a restart or when the new snapshot exceeds the memory limits of 100,000 entries, an estimated 64 MiB, or 64 KiB per entry. The other Explorer panels can still browse saved entries.
+Directory pages contain at most 100 direct children, sorted by name then ID in UTF-16 order. References expire on replacement. Treemap reads the same SQLite publication, including after restart. It ranks up to 100 direct children by known size and groups the remaining entries into Other. It uses logical file sizes and the scanner's stored directory totals.
 
 Main serializes reads and scanner writes through one Storage Worker. Scanner writes take priority over queued reads. Up to 16 reads may wait for a turn, each with a 10-second queue deadline. Document changes and shutdown drop queued Explorer work. An active query may finish before the next write because SQLite runs synchronously inside the Worker. Cancellation remains available through traversal and batch persistence and closes when the final publication request is sent.
 

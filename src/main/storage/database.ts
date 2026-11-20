@@ -1,12 +1,19 @@
 import { DatabaseSync, type SQLOutputValue, type StatementSync } from 'node:sqlite'
 import type { FileEntry, ScanSession } from '../../shared/scan'
-import type {
-  ScanDirectoryPage,
-  ScanDirectoryRequest,
-  ScanEntryRequest,
-  ScanSnapshotAvailability
+import {
+  MAX_SCAN_TREEMAP_ENTRIES,
+  type ScanDirectoryPage,
+  type ScanDirectoryRequest,
+  type ScanDirectoryTreemap,
+  type ScanDirectoryTreemapRequest,
+  type ScanEntryRequest,
+  type ScanSnapshotAvailability
 } from '../../shared/snapshot'
-import { SnapshotAccessError, validateSnapshotRequest } from '../scanner/snapshot'
+import {
+  SnapshotAccessError,
+  validateSnapshotRequest,
+  validateTreemapRequest
+} from '../scanner/snapshot'
 import {
   isSnapshotId,
   validateBuildingScan,
@@ -25,12 +32,20 @@ const SELECT_SCAN = `
   SELECT id, root_path, status, started_at, finished_at, total_bytes, file_count,
          directory_count, error_count FROM scans
 `
-const SELECT_ENTRY = `
-  SELECT entry.scan_id, entry.id, entry.parent_id, entry.name, entry.path, entry.type,
+const ENTRY_COLUMNS = `entry.scan_id, entry.id, entry.parent_id, entry.name, entry.path, entry.type,
          entry.size_bytes, entry.aggregated_size_bytes, entry.created_at, entry.modified_at
-  FROM entries AS entry
 `
+const SELECT_ENTRY = `SELECT ${ENTRY_COLUMNS} FROM entries AS entry`
 const DEEP_DIRECTORY_OFFSET = 10_000
+const TREEMAP_BYTES = `CASE type WHEN 'file' THEN size_bytes WHEN 'directory' THEN aggregated_size_bytes END`
+const TREEMAP_CHILDREN = `FROM entries WHERE scan_id = $scanId AND parent_id = $entryId`
+const TREEMAP_TOTALS = `SELECT COUNT(*) AS child_count, COALESCE(SUM(bytes), 0) AS known_bytes,
+  COUNT(*) FILTER (WHERE bytes IS NULL) AS unknown_count,
+  COUNT(*) FILTER (WHERE bytes = 0) AS zero_count`
+
+function treemapSizeOverflow(): SnapshotAccessError {
+  return new SnapshotAccessError('SIZE_OVERFLOW', 'The directory exceeds the supported byte total.')
+}
 
 function bindInteger(value: number, column: string): bigint {
   if (!Number.isSafeInteger(value) || value < 0) {
@@ -172,6 +187,7 @@ export class ScanDatabase {
   private readonly countDirectoryChildrenStatement: StatementSync
   private readonly listDirectoryPageStatement: StatementSync
   private readonly listDeepDirectoryPageStatement: StatementSync
+  private readonly selectTreemapStatement: StatementSync
   private readonly selectFinalizedDirectoryStatement: StatementSync
   private readonly selectUnfinalizedChildStatement: StatementSync
   private readonly finalizeDirectoryStatement: StatementSync
@@ -272,6 +288,31 @@ export class ScanDatabase {
         ORDER BY page.position
       `)
       this.listDeepDirectoryPageStatement.setReadBigInts(true)
+
+      // Rank only keys and sizes. The metadata join reads no more than the requested Top-N.
+      this.selectTreemapStatement = this.connection.prepare(`
+        WITH top_entries AS MATERIALIZED (
+          SELECT id, name, ${TREEMAP_BYTES} AS bytes ${TREEMAP_CHILDREN}
+          ORDER BY bytes DESC NULLS LAST, name, id COLLATE BINARY LIMIT $limit
+        ), directory_totals AS (
+          ${TREEMAP_TOTALS} FROM (SELECT ${TREEMAP_BYTES} AS bytes ${TREEMAP_CHILDREN})
+        ), top_totals AS (
+          ${TREEMAP_TOTALS} FROM top_entries
+        )
+        SELECT ${ENTRY_COLUMNS},
+               directory_totals.child_count AS total_count,
+               directory_totals.known_bytes AS total_known_bytes,
+               directory_totals.unknown_count AS unknown_count,
+               directory_totals.child_count - top_totals.child_count AS other_count,
+               directory_totals.known_bytes - top_totals.known_bytes AS other_known_bytes,
+               directory_totals.unknown_count - top_totals.unknown_count AS other_unknown_count,
+               directory_totals.zero_count - top_totals.zero_count AS other_zero_count
+        FROM directory_totals CROSS JOIN top_totals
+        LEFT JOIN top_entries ON TRUE
+        LEFT JOIN entries AS entry ON entry.scan_id = $scanId AND entry.id = top_entries.id
+        ORDER BY top_entries.bytes DESC NULLS LAST, top_entries.name, top_entries.id COLLATE BINARY
+      `)
+      this.selectTreemapStatement.setReadBigInts(true)
 
       this.selectFinalizedDirectoryStatement = this.connection.prepare(`
         SELECT 1 FROM entries
@@ -458,6 +499,57 @@ export class ScanDatabase {
             .map((row) => validateEntryReference(readEntry(row)))
     const end = offset + length
     return { scanId, directoryId, entries, totalCount, nextOffset: end < totalCount ? end : null }
+  }
+
+  getScanDirectoryTreemap(request: ScanDirectoryTreemapRequest): ScanDirectoryTreemap {
+    validateTreemapRequest(request)
+    const directory = this.requirePublishedEntry(request)
+    if (directory.type !== 'directory') {
+      throw new SnapshotAccessError('NOT_DIRECTORY', 'Entry is not a directory.')
+    }
+    const { scanId, entryId: directoryId, limit = MAX_SCAN_TREEMAP_ENTRIES } = request
+    let rows: Record<string, SQLOutputValue>[]
+    try {
+      rows = this.selectTreemapStatement.all({
+        $scanId: scanId,
+        $entryId: directoryId,
+        $limit: limit
+      })
+    } catch (error) {
+      // Integer SUM is exact and SQLite rejects an overflow of its signed 64-bit range.
+      if (error instanceof Error && error.message === 'integer overflow')
+        throw treemapSizeOverflow()
+      throw error
+    }
+    // The aggregate row also exists for empty directories, with NULL entry columns.
+    const counts = rows[0]
+    if (
+      typeof counts.total_known_bytes === 'bigint' &&
+      counts.total_known_bytes > MAX_SAFE_INTEGER
+    ) {
+      throw treemapSizeOverflow()
+    }
+    const totalCount = readInteger(counts.total_count, 'totalCount')
+    const entries =
+      totalCount === 0 ? [] : rows.map((row) => validateEntryReference(readEntry(row)))
+    const count = readInteger(counts.other_count, 'other.count')
+    return {
+      scanId,
+      directoryId,
+      entries,
+      totalCount,
+      individualCount: entries.length,
+      unknownCount: readInteger(counts.unknown_count, 'unknownCount'),
+      other:
+        count === 0
+          ? null
+          : {
+              count,
+              knownBytes: readInteger(counts.other_known_bytes, 'other.knownBytes'),
+              unknownCount: readInteger(counts.other_unknown_count, 'other.unknownCount'),
+              zeroCount: readInteger(counts.other_zero_count, 'other.zeroCount')
+            }
+    }
   }
 
   private requirePublishedEntry({ scanId, entryId }: ScanEntryRequest): FileEntry {

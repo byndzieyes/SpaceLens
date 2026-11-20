@@ -1,12 +1,16 @@
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
+  MAX_SCAN_TREEMAP_ENTRIES,
+  knownTreemapBytes,
   type ScanDirectoryPage,
   type ScanDirectoryRequest,
+  type ScanDirectoryTreemap,
+  type ScanDirectoryTreemapRequest,
   type ScanEntryRequest,
   type ScanSnapshotAvailability
 } from '../../shared/snapshot'
-import { validateSnapshotRequest } from '../scanner/snapshot'
+import { validateSnapshotRequest, validateTreemapRequest } from '../scanner/snapshot'
 import {
   integer,
   isScanSummary,
@@ -36,6 +40,7 @@ interface StorageCommands {
   getScanSnapshot: { payload: null; result: ScanSnapshotAvailability }
   getScanEntry: { payload: ScanEntryRequest; result: FileEntry }
   listScanDirectory: { payload: ScanDirectoryRequest; result: ScanDirectoryPage }
+  getScanDirectoryTreemap: { payload: ScanDirectoryTreemapRequest; result: ScanDirectoryTreemap }
   getScan: { payload: { id: string }; result: ScanSession | null }
   insertEntry: { payload: FileEntry; result: null }
   applyBatch: { payload: StorageBatch; result: null }
@@ -116,6 +121,9 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       validateSnapshotRequest(request, true)
       return { requestId, operation, payload: request }
     }
+    case 'getScanDirectoryTreemap':
+      validateTreemapRequest(payload)
+      return { requestId, operation, payload }
     case 'getScan':
       if (record(payload) && nonempty(payload.id)) {
         return { requestId, operation, payload: { id: payload.id } }
@@ -186,6 +194,64 @@ function isDirectoryPage(value: unknown): value is ScanDirectoryPage {
   )
 }
 
+function isDirectoryTreemap(value: unknown): value is ScanDirectoryTreemap {
+  if (!record(value)) return false
+  const { scanId, directoryId, entries, totalCount, individualCount, unknownCount, other } = value
+  if (
+    !isSnapshotId(scanId) ||
+    !isSnapshotId(directoryId) ||
+    !integer(totalCount) ||
+    !integer(individualCount) ||
+    individualCount > Math.min(totalCount, MAX_SCAN_TREEMAP_ENTRIES) ||
+    (totalCount > 0 && individualCount === 0) ||
+    !integer(unknownCount) ||
+    !Array.isArray(entries) ||
+    entries.length !== individualCount
+  )
+    return false
+
+  const ids = new Set<string>()
+  let individualUnknown = 0
+  let knownBytes = 0
+  for (const entry of entries) {
+    if (
+      !isStorageEntry(entry) ||
+      entry.scanId !== scanId ||
+      entry.parentId !== directoryId ||
+      !isSnapshotId(entry.id) ||
+      entry.id === directoryId ||
+      ids.has(entry.id)
+    )
+      return false
+    ids.add(entry.id)
+    const bytes = knownTreemapBytes(entry)
+    if (bytes === null) individualUnknown++
+    else {
+      if (bytes > Number.MAX_SAFE_INTEGER - knownBytes) return false
+      knownBytes += bytes
+    }
+  }
+
+  const remaining = totalCount - individualCount
+  if (remaining === 0) return other === null && unknownCount === individualUnknown
+  if (
+    !record(other) ||
+    other.count !== remaining ||
+    !integer(other.unknownCount) ||
+    !integer(other.zeroCount) ||
+    !integer(other.knownBytes) ||
+    other.unknownCount !== unknownCount - individualUnknown
+  )
+    return false
+  const positive = remaining - other.unknownCount - other.zeroCount
+  return (
+    positive >= 0 &&
+    other.knownBytes >= positive &&
+    (positive > 0 || other.knownBytes === 0) &&
+    other.knownBytes <= Number.MAX_SAFE_INTEGER - knownBytes
+  )
+}
+
 const resultValidators: { [T in StorageOperation]: (value: unknown) => value is StorageResult<T> } =
   {
     initialize: isNull,
@@ -199,6 +265,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     getScanSnapshot: isSnapshotAvailability,
     getScanEntry: isStorageEntry,
     listScanDirectory: isDirectoryPage,
+    getScanDirectoryTreemap: isDirectoryTreemap,
     getScan: (value): value is ScanSession | null => value === null || isStorageScan(value),
     insertEntry: isNull,
     applyBatch: isNull,

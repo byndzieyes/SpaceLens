@@ -139,12 +139,6 @@ function TreemapRequest({
         Loading treemap…
       </p>
     )
-  if (state.status === 'error' && state.code === 'SNAPSHOT_UNAVAILABLE')
-    return (
-      <p role="status" className="py-6 text-sm text-text-secondary">
-        {state.message}
-      </p>
-    )
   if (state.status === 'error')
     return (
       <ExplorerRequestError

@@ -300,29 +300,9 @@ export function registerScannerIpc(
         if (channel === IPC_CHANNELS.getScanDirectoryTreemap) {
           const request = args[0]
           validateTreemapRequest(request)
-          const { scanId, entryId } = request
-          const value = await storage.read(signal, async (client) => {
-            const entry = await client.getScanEntry({ scanId, entryId })
-            if (signal.aborted) throw new StorageUnavailableError()
-            if (entry.type !== 'directory') {
-              throw new SnapshotAccessError('NOT_DIRECTORY', 'Entry is not a directory.')
-            }
-            // The SQLite entry check and the same-scan memory lookup share one turn in the queue.
-            try {
-              return manager.getScanDirectoryTreemap(request)
-            } catch (error) {
-              if (
-                error instanceof SnapshotAccessError &&
-                (error.code === 'SNAPSHOT_UNAVAILABLE' || error.code === 'SNAPSHOT_EXPIRED')
-              ) {
-                throw new SnapshotAccessError(
-                  'SNAPSHOT_UNAVAILABLE',
-                  'Treemap is temporarily unavailable for this saved snapshot. Directory browsing is available.'
-                )
-              }
-              throw error
-            }
-          })
+          const value = await storage.read(signal, (client) =>
+            client.getScanDirectoryTreemap(request)
+          )
           return reply({ ok: true, value })
         }
         const request = args[0] as ScanEntryRequest | ScanDirectoryRequest

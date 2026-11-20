@@ -776,6 +776,195 @@ test('matches Memory Snapshot metadata and page ordering for mixed names, types 
     expect(db.listScanDirectory(request)).toEqual(memory.listDirectory(request))
     expect(db.listScanDirectory(request).entries[0].id).toBe(id)
   }
+
+  for (const [entryId, limit] of [
+    [top.id, 1],
+    [top.id, 100],
+    [empty.id, 100],
+    [nested.id, 100]
+  ] as const) {
+    const request = { scanId: pending.id, entryId, limit }
+    expect(db.getScanDirectoryTreemap(request)).toEqual(memory.getDirectoryTreemap(request))
+  }
+  expect(
+    db.getScanDirectoryTreemap({ scanId: pending.id, entryId: top.id, limit: 1 })
+  ).toMatchObject({
+    entries: [{ id: nested.id, aggregatedSizeBytes: max }],
+    unknownCount: 4,
+    other: { count: files.length + 4, knownBytes: 0, unknownCount: 4, zeroCount: files.length }
+  })
+})
+
+test.each([0, 1, 37, 100, 101, 138])(
+  'matches Treemap Top-N and Other for %i direct children',
+  (count) => {
+    const db = open()
+    const pending = building()
+    const top = root()
+    const files = Array.from({ length: count }, (_, index) => {
+      const name = index === count - 1 ? 'zz-largest' : `file-${String(index).padStart(3, '0')}`
+      return {
+        ...file(pending.id, `file-${index}`),
+        name,
+        path: join(rootPath, name),
+        sizeBytes: index === count - 1 ? 1000 : index % 10
+      }
+    }).reverse()
+    const bytes = files.reduce((total, entry) => total + entry.sizeBytes, 0)
+    const operations = [discover(top), ...files.map(discover), finalize(top, bytes)]
+    const saved = completed(pending, { fileCount: count, totalBytes: bytes })
+    const memory = new ScanSnapshotStorage(pending.id, rootPath)
+    for (const operation of operations) memory.accept(operation)
+    expect(
+      memory.complete(
+        { type: 'summary', scanId: pending.id, rootEntryId: top.id, summary: saved.summary },
+        saved.finishedAt
+      )
+    ).toBe(true)
+    db.beginScan(pending)
+    for (let start = 0; start < operations.length; start += SCANNER_BATCH_SIZE) {
+      db.applyBatch(pending.id, operations.slice(start, start + SCANNER_BATCH_SIZE))
+    }
+    db.publishScan(saved, top.id)
+    const request = { scanId: pending.id, entryId: top.id }
+    const result = db.getScanDirectoryTreemap(request)
+    expect(result).toEqual(memory.getDirectoryTreemap(request))
+    expect(db.getScanDirectoryTreemap(request)).toEqual(result)
+    expect(result.entries).toHaveLength(Math.min(100, count))
+    expect(result.entries[0]?.name).toBe(count ? 'zz-largest' : undefined)
+    expect(result.other?.count ?? 0).toBe(Math.max(0, count - 100))
+    expect(
+      result.entries.reduce(
+        (total, entry) => total + entry.sizeBytes!,
+        result.other?.knownBytes ?? 0
+      )
+    ).toBe(bytes)
+    const limited = { ...request, limit: 1 }
+    expect(db.getScanDirectoryTreemap(limited)).toEqual(memory.getDirectoryTreemap(limited))
+    expect(db.getScanDirectoryTreemap(limited).other?.knownBytes ?? 0).toBe(
+      count > 1 ? bytes - 1000 : 0
+    )
+  }
+)
+
+test.each([0, null])(
+  'groups direct files with size %s while preserving zero and unknown counts',
+  (sizeBytes) => {
+    const db = open()
+    const pending = building()
+    db.beginScan(pending)
+    db.applyBatch(pending.id, [
+      discover(root()),
+      discover({ ...file(pending.id, 'a'), sizeBytes }),
+      discover({ ...file(pending.id, 'b'), sizeBytes }),
+      finalize(root(), 0)
+    ])
+    const unknown = Number(sizeBytes === null)
+    db.publishScan(
+      completed(pending, { fileCount: 2, totalBytes: 0, errorCount: 2 * unknown }),
+      'root'
+    )
+    expect(
+      db.getScanDirectoryTreemap({ scanId: pending.id, entryId: 'root', limit: 1 })
+    ).toMatchObject({
+      entries: [{ id: 'a', sizeBytes }],
+      totalCount: 2,
+      unknownCount: 2 * unknown,
+      other: { count: 1, knownBytes: 0, unknownCount: unknown, zeroCount: 1 - unknown }
+    })
+  }
+)
+
+test('breaks equal-size and equal-name Treemap ties by binary entry ID at the cutoff', () => {
+  const db = open()
+  const pending = building()
+  db.beginScan(pending)
+  db.applyBatch(pending.id, [
+    discover(root()),
+    ...['z', 'a', 'A'].map((id) => discover(file(pending.id, id))),
+    finalize(root(), 60)
+  ])
+  db.publishScan(completed(pending, { fileCount: 3, totalBytes: 60 }), 'root')
+  const result = db.getScanDirectoryTreemap({ scanId: pending.id, entryId: 'root', limit: 2 })
+  expect(result.entries.map(({ id }) => id)).toEqual(['A', 'a'])
+  expect(result.other).toEqual({ count: 1, knownBytes: 20, unknownCount: 0, zeroCount: 0 })
+})
+
+test('rejects Treemap access to unavailable, expired, missing and invalid directories', () => {
+  const db = open()
+  const first = readyScan(db)
+  const request = { scanId: first.id, entryId: 'root' }
+  expect(() => db.getScanDirectoryTreemap(request)).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
+  )
+  db.publishScan(first, 'root')
+  expect(() => db.getScanDirectoryTreemap({ ...request, entryId: 'file' })).toThrow(
+    expect.objectContaining({ code: 'NOT_DIRECTORY' })
+  )
+  expect(() => db.getScanDirectoryTreemap({ ...request, entryId: 'missing' })).toThrow(
+    expect.objectContaining({ code: 'ENTRY_NOT_FOUND' })
+  )
+  for (const invalid of [
+    null,
+    { ...request, scanId: '../scan' },
+    { ...request, entryId: '' },
+    { ...request, offset: 0 },
+    { ...request, limit: 0 },
+    { ...request, limit: 101 },
+    { ...request, limit: 2.5 },
+    { ...request, limit: undefined }
+  ]) {
+    expect(() => Reflect.apply(db.getScanDirectoryTreemap, db, [invalid])).toThrow(
+      expect.objectContaining({ code: 'INVALID_REQUEST' })
+    )
+  }
+  const replacement = readyScan(db, 'next')
+  expect(() => db.getScanDirectoryTreemap({ ...request, scanId: replacement.id })).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
+  )
+  expect(db.getScanDirectoryTreemap(request).entries).toEqual([file(first.id)])
+  db.publishScan(replacement, 'root')
+  expect(() => db.getScanDirectoryTreemap(request)).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
+  )
+  db.close()
+  const reopened = open()
+  reopened.recoverStorage()
+  expect(reopened.getScanDirectoryTreemap({ ...request, scanId: replacement.id }).entries).toEqual([
+    file(replacement.id)
+  ])
+})
+
+test('keeps the safe byte boundary exact and rejects both unsafe totals and SQLite integer overflows', () => {
+  const db = open()
+  const pending = building()
+  const max = Number.MAX_SAFE_INTEGER
+  db.beginScan(pending)
+  db.applyBatch(pending.id, [
+    discover(root()),
+    discover({ ...file(), sizeBytes: max - 10 }),
+    discover({ ...file(pending.id, 'tail'), sizeBytes: 10 }),
+    finalize(root(), max)
+  ])
+  db.publishScan(completed(pending, { fileCount: 2, totalBytes: max }), 'root')
+  const request = { scanId: pending.id, entryId: 'root', limit: 1 }
+  const safe = db.getScanDirectoryTreemap(request)
+  expect(safe.entries[0].sizeBytes! + safe.other!.knownBytes).toBe(max)
+  expect(safe.other).toEqual({ count: 1, knownBytes: 10, unknownCount: 0, zeroCount: 0 })
+
+  // A normal publication rejects these totals. Exercise reading a corrupt persisted database.
+  inspectDatabase((sql) =>
+    sql.prepare("UPDATE entries SET size_bytes = 11 WHERE id = 'tail'").run()
+  )
+  expect(() => db.getScanDirectoryTreemap(request)).toThrow(
+    expect.objectContaining({ code: 'SIZE_OVERFLOW' })
+  )
+  inspectDatabase((sql) =>
+    sql.prepare("UPDATE entries SET size_bytes = ? WHERE type = 'file'").run((1n << 63n) - 1n)
+  )
+  expect(() => db.getScanDirectoryTreemap(request)).toThrow(
+    expect.objectContaining({ code: 'SIZE_OVERFLOW' })
+  )
 })
 
 test('rejects invalid Explorer requests before reading', () => {

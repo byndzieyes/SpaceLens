@@ -3,6 +3,8 @@ import type { FileEntry, ScanSession } from '../../shared/scan'
 import type {
   ScanDirectoryPage,
   ScanDirectoryRequest,
+  ScanDirectoryTreemap,
+  ScanDirectoryTreemapRequest,
   ScanEntryRequest,
   ScanSnapshotAvailability
 } from '../../shared/snapshot'
@@ -105,6 +107,10 @@ export class StorageWorkerClient {
 
   listScanDirectory(request: ScanDirectoryRequest): Promise<ScanDirectoryPage> {
     return this.run('listScanDirectory', request)
+  }
+
+  getScanDirectoryTreemap(request: ScanDirectoryTreemapRequest): Promise<ScanDirectoryTreemap> {
+    return this.run('getScanDirectoryTreemap', request)
   }
 
   getScan(id: string): Promise<ScanSession | null> {

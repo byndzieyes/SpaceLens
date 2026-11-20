@@ -17,10 +17,6 @@ export function ScanPanel({
   const running = scan?.session.status === 'running'
   const status = scan?.session.status
   const incomplete = (scan?.session.summary.errorCount ?? 0) > 0
-  const unavailable =
-    status === 'completed' && scanner.snapshotUnavailable?.scanId === scan?.session.id
-      ? scanner.snapshotUnavailable
-      : null
   const canBrowse =
     ready &&
     !pending &&
@@ -146,12 +142,6 @@ export function ScanPanel({
           {status === 'cancelled' && (
             <p className="text-sm text-text-secondary">
               The scan stopped before completion. These are partial totals.
-            </p>
-          )}
-          {unavailable && (
-            <p role="status" className="text-sm text-warning">
-              Treemap is temporarily unavailable for this scan. You can still browse its saved
-              entries in Explorer.
             </p>
           )}
           {status === 'failed' && (

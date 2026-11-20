@@ -78,12 +78,12 @@ function mockApp(): {
   listeners: Set<(snapshot: ScanStateSnapshot) => void>
   publish: (
     storage: ScanSnapshotStorage,
-    options?: { retainTreemap?: boolean; notify?: boolean }
+    options?: { memoryRetained?: boolean; notify?: boolean }
   ) => void
+  restore: (storage: ScanSnapshotStorage) => void
   runNext: (id: string) => void
 } {
   let published: ScanSnapshotStorage | null = null
-  let treemap: ScanSnapshotStorage | null = null
   let state: ScanStateSnapshot = { revision: 0, state: null }
   const listeners = new Set<(snapshot: ScanStateSnapshot) => void>()
   const activeScan = (id: string, status: ScanStatus, rootPath: string): ScanSessionState => {
@@ -119,10 +119,9 @@ function mockApp(): {
   }
   const publish = (
     storage: ScanSnapshotStorage,
-    { retainTreemap = true, notify = true } = {}
+    { memoryRetained = true, notify = true } = {}
   ): void => {
     published = storage
-    if (retainTreemap) treemap = storage
     const { root, summary } = storage.describe()
     const patch = {
       state: activeScan(storage.scanId, 'completed', root.path),
@@ -134,7 +133,7 @@ function mockApp(): {
         fileCount: summary.fileCount,
         errorCount: summary.errorCount
       },
-      snapshotUnavailable: retainTreemap
+      snapshotUnavailable: memoryRetained
         ? null
         : { scanId: storage.scanId, reason: 'limit-exceeded' as const }
     }
@@ -173,15 +172,7 @@ function mockApp(): {
       read(request.scanId, (store) => store.getEntry(request.entryId))
     ),
     getScanDirectoryTreemap: vi.fn<SpaceLensAPI['getScanDirectoryTreemap']>(async (request) =>
-      read(request.scanId, () => {
-        if (treemap?.scanId !== request.scanId) {
-          throw new SnapshotAccessError(
-            'SNAPSHOT_UNAVAILABLE',
-            'Treemap is temporarily unavailable for this saved snapshot. Directory browsing is available.'
-          )
-        }
-        return treemap.getDirectoryTreemap(request)
-      })
+      read(request.scanId, (store) => store.getDirectoryTreemap(request))
     ),
     listScanDirectory: vi.fn<SpaceLensAPI['listScanDirectory']>(async (request) =>
       read(request.scanId, (store) => store.listDirectory(request))
@@ -210,6 +201,9 @@ function mockApp(): {
     api,
     listeners,
     publish,
+    restore: (storage) => {
+      published = storage
+    },
     runNext: (id: string) => {
       nextId = id
     }
@@ -298,7 +292,7 @@ test('a settled scan opens Explorer with one published identity across all four 
   expect(api.cancelScan).not.toHaveBeenCalled()
 })
 
-test('preserves the prior publication during a scan and cancellation, then browses a replacement without a matching Treemap', async () => {
+test('preserves the prior Treemap during a scan and cancellation, then renders a replacement without memory retention', async () => {
   const main = mockApp()
   main.publish(retained('scan-a', 'Alpha'))
   main.runNext('scan-b')
@@ -316,31 +310,16 @@ test('preserves the prior publication during a scan and cancellation, then brows
   expect(main.api.cancelScan).toHaveBeenCalledExactlyOnceWith({ scanId: 'scan-b' })
   open('Explorer')
   await chart('Alpha')
-  fireEvent.doubleClick(panel('Treemap').getByRole('button', { name: 'Nested, directory, 2 KB' }))
-  await chart('Nested')
-  fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'inside.bin' }))
-  await panel('Details').findByRole('heading', { name: 'inside.bin' })
-  const calls = main.api.getScanDirectoryTreemap.mock.calls.length
-  act(() => main.publish(retained('scan-c', 'Large', 0, 104), { retainTreemap: false }))
-  expect(await panel('Treemap').findByText(/Treemap is temporarily unavailable/)).toHaveAttribute(
-    'role',
-    'status'
+  act(() => main.publish(retained('scan-c', 'Replacement'), { memoryRetained: false }))
+  const replacementChart = await chart('Replacement')
+  fireEvent.click(
+    within(replacementChart).getByRole('button', { name: 'Replacement.txt, file, 3 KB' })
   )
-  expect(panel('Treemap').queryByRole('figure')).not.toBeInTheDocument()
-  expect(panel('Details').getByText('No item selected')).toBeVisible()
-  expect(button('Back')).toHaveAttribute('aria-disabled', 'true')
-  fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'Large.txt' }))
-  await panel('Details').findByRole('heading', { name: 'Large.txt' })
-  fireEvent.click(button('Next page'))
-  await panel('Directory Contents').findByText(/Page 2.*106 entries/)
-  expect(main.api.getScanDirectoryTreemap).toHaveBeenCalledTimes(calls + 1)
+  await panel('Details').findByRole('heading', { name: 'Replacement.txt' })
   expect(main.api.getScanDirectoryTreemap).toHaveBeenLastCalledWith({
     scanId: 'scan-c',
     entryId: 'root'
   })
-  open('Overview')
-  await screen.findByText(/You can still browse its saved entries in Explorer/)
-  expect(button('Open in Explorer')).toBeEnabled()
 })
 
 test('refreshes automatically on publication and ignores late panel data from the old snapshot', async () => {
@@ -439,13 +418,26 @@ test('leaving Explorer ignores pending availability and a new publication is res
   expect(main.api.getScanDirectoryTreemap).not.toHaveBeenCalled()
   open('Explorer')
   await screen.findByText(/No published snapshot yet/)
-  act(() => main.publish(retained('scan-new', 'Published'), { retainTreemap: false }))
+  act(() => main.publish(retained('scan-new', 'Published'), { memoryRetained: false }))
   await panel('Directory Contents').findByRole('button', { name: 'Published.txt' })
-  expect(await panel('Treemap').findByText(/Treemap is temporarily unavailable/)).toHaveAttribute(
-    'role',
-    'status'
-  )
+  await chart('Published')
   expect(main.api.cancelScan).not.toHaveBeenCalled()
+})
+
+test('opens Treemap from a saved publication when the new session has no scan metadata', async () => {
+  const main = mockApp()
+  main.restore(retained('saved', 'Saved', 0, 104))
+  render(<App />)
+  expect(screen.getByText('No scans yet')).toBeVisible()
+  open('Explorer')
+  const figure = await chart('Saved')
+  expect(within(figure).getByRole('img', { name: /Other.*6 grouped entries/ })).toBeVisible()
+  fireEvent.click(within(figure).getByRole('button', { name: 'Saved.txt, file, 3 KB' }))
+  await panel('Details').findByRole('heading', { name: 'Saved.txt' })
+  expect(main.api.getScanDirectoryTreemap).toHaveBeenCalledExactlyOnceWith({
+    scanId: 'saved',
+    entryId: 'root'
+  })
 })
 
 test('Top-N and inert Other coexist with independent Contents pagination and selection resets', async () => {

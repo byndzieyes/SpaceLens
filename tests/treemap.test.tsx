@@ -290,7 +290,12 @@ test('distinguishes empty, zero-total, unknown-only, and mixed known/unknown siz
   }
 })
 
-test.each(['SNAPSHOT_EXPIRED', 'ENTRY_NOT_FOUND', 'SIZE_OVERFLOW'] as const)(
+test.each([
+  'SNAPSHOT_EXPIRED',
+  'SNAPSHOT_UNAVAILABLE',
+  'ENTRY_NOT_FOUND',
+  'SIZE_OVERFLOW'
+] as const)(
   'offers the appropriate recovery for %s without claiming an empty directory',
   async (code) => {
     list.mockResolvedValueOnce({ ok: false, error: { code, message: 'Original error' } })
@@ -298,7 +303,7 @@ test.each(['SNAPSHOT_EXPIRED', 'ENTRY_NOT_FOUND', 'SIZE_OVERFLOW'] as const)(
     render(<DirectoryTreemap {...props} onRefresh={refresh} />)
     expect(await screen.findByRole('alert')).toHaveTextContent(`${code}: Original error`)
     expect(screen.queryByText(/This directory is empty/)).not.toBeInTheDocument()
-    if (code === 'SNAPSHOT_EXPIRED') {
+    if (code === 'SNAPSHOT_EXPIRED' || code === 'SNAPSHOT_UNAVAILABLE') {
       expect(screen.getByRole('alert')).toHaveTextContent('Use Refresh snapshot')
       fireEvent.click(screen.getByRole('button', { name: 'Refresh snapshot for Treemap' }))
       expect(refresh).toHaveBeenCalledOnce()
@@ -310,15 +315,6 @@ test.each(['SNAPSHOT_EXPIRED', 'ENTRY_NOT_FOUND', 'SIZE_OVERFLOW'] as const)(
     }
   }
 )
-
-test('reports a temporary Treemap gap without prompting a retry or claiming the directory is empty', async () => {
-  const message = 'Treemap is temporarily unavailable for this saved snapshot.'
-  list.mockResolvedValueOnce({ ok: false, error: { code: 'SNAPSHOT_UNAVAILABLE', message } })
-  render(<DirectoryTreemap {...props} />)
-  expect(await screen.findByText(message)).toHaveAttribute('role', 'status')
-  expect(screen.queryByText(/This directory is empty/)).not.toBeInTheDocument()
-  expect(screen.queryByRole('button')).not.toBeInTheDocument()
-})
 
 test('transport failures are recoverable and invalid summary identity does not produce a chart', async () => {
   list

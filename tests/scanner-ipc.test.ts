@@ -9,7 +9,6 @@ import type { ScanSessionManager, ScanSessionSubscriber } from '../src/main/scan
 import { registerScannerIpc, registerScannerShutdown } from '../src/main/scannerIpc'
 import { registerAppInfoHandler } from '../src/main/ipc'
 import { verifyScanDirectory } from '../src/main/scanner/directoryApproval'
-import { SnapshotAccessError } from '../src/main/scanner/snapshot'
 import { ScanStorageError } from '../src/main/scanner/persistence'
 import {
   StorageUnavailableError,
@@ -54,7 +53,8 @@ let unsubscribe: ReturnType<typeof vi.fn>
 const queries = {
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
-  listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>()
+  listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
+  getScanDirectoryTreemap: vi.fn<StorageWorkerClient['getScanDirectoryTreemap']>()
 }
 const storage: Pick<ScanStorageCoordinator, 'read'> = {
   read: async (_signal, query) => query(queries)
@@ -185,12 +185,14 @@ test('retrieval uses fixed, authorized channels and forwards bounded ID-only que
     entries: [],
     other: null
   }
-  vi.mocked(manager.getScanDirectoryTreemap).mockReturnValue(aggregated)
+  queries.getScanDirectoryTreemap.mockResolvedValue(aggregated)
   expect(await invoke(IPC_CHANNELS.getScanDirectoryTreemap, [treemap])).toEqual({
     ok: true,
     value: aggregated
   })
-  expect(manager.getScanDirectoryTreemap).toHaveBeenCalledExactlyOnceWith(treemap)
+  expect(queries.getScanDirectoryTreemap).toHaveBeenCalledExactlyOnceWith(treemap)
+  expect(queries.getScanEntry).toHaveBeenCalledTimes(1)
+  expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
   expect(manager.getScanSnapshot).not.toHaveBeenCalled()
   expect(manager.getScanEntry).not.toHaveBeenCalled()
   expect(manager.listScanDirectory).not.toHaveBeenCalled()
@@ -239,6 +241,7 @@ test.each([
     expect(queries.getScanSnapshot).not.toHaveBeenCalled()
     expect(queries.getScanEntry).not.toHaveBeenCalled()
     expect(queries.listScanDirectory).not.toHaveBeenCalled()
+    expect(queries.getScanDirectoryTreemap).not.toHaveBeenCalled()
     expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
   }
 )
@@ -295,49 +298,49 @@ test('validates Treemap requests before dispatch and preserves structured failur
     })
   }
   expect(queries.getScanEntry).not.toHaveBeenCalled()
+  expect(queries.getScanDirectoryTreemap).not.toHaveBeenCalled()
   expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
-  queries.getScanEntry.mockResolvedValue({ type: 'directory' } as Awaited<
-    ReturnType<StorageWorkerClient['getScanEntry']>
-  >)
-  for (const code of ['NOT_DIRECTORY', 'ENTRY_NOT_FOUND', 'SIZE_OVERFLOW'] as const) {
-    vi.mocked(manager.getScanDirectoryTreemap).mockImplementationOnce(() => {
-      throw new SnapshotAccessError(code, 'Public message')
-    })
+  for (const code of [
+    'NOT_DIRECTORY',
+    'ENTRY_NOT_FOUND',
+    'SIZE_OVERFLOW',
+    'SNAPSHOT_EXPIRED',
+    'SNAPSHOT_UNAVAILABLE'
+  ] as const) {
+    queries.getScanDirectoryTreemap.mockRejectedValueOnce(
+      new StorageWorkerError({
+        name: 'SnapshotAccessError',
+        code,
+        message: 'Public message',
+        sqliteCode: null
+      })
+    )
     expect(await invoke(IPC_CHANNELS.getScanDirectoryTreemap, [valid])).toEqual({
       ok: false,
       error: { code, message: 'Public message' }
     })
   }
+  expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
 })
 
-test('blocks a stale Treemap request and reports a temporary gap for a published scan without matching memory', async () => {
+test('discards a pending SQLite Treemap response when its renderer navigates', async () => {
   const request = { scanId: id, entryId: otherId }
-  queries.getScanEntry.mockRejectedValueOnce(
-    new StorageWorkerError({
-      name: 'SnapshotAccessError',
-      code: 'SNAPSHOT_EXPIRED',
-      message: 'Expired',
-      sqliteCode: null
-    })
-  )
-  expect(await invoke(IPC_CHANNELS.getScanDirectoryTreemap, [request])).toMatchObject({
-    ok: false,
-    error: { code: 'SNAPSHOT_EXPIRED' }
+  const pending =
+    Promise.withResolvers<Awaited<ReturnType<StorageWorkerClient['getScanDirectoryTreemap']>>>()
+  queries.getScanDirectoryTreemap.mockReturnValueOnce(pending.promise)
+  const received = invoke(IPC_CHANNELS.getScanDirectoryTreemap, [request])
+  renderer.emit('did-start-navigation', { isMainFrame: true })
+  pending.resolve({
+    scanId: id,
+    directoryId: otherId,
+    entries: [],
+    totalCount: 0,
+    individualCount: 0,
+    unknownCount: 0,
+    other: null
   })
+  expect(await received).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
   expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
-  queries.getScanEntry.mockResolvedValueOnce({ type: 'directory' } as Awaited<
-    ReturnType<StorageWorkerClient['getScanEntry']>
-  >)
-  vi.mocked(manager.getScanDirectoryTreemap).mockImplementationOnce(() => {
-    throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'Old snapshot')
-  })
-  expect(await invoke(IPC_CHANNELS.getScanDirectoryTreemap, [request])).toMatchObject({
-    ok: false,
-    error: {
-      code: 'SNAPSHOT_UNAVAILABLE',
-      message: expect.stringContaining('Treemap is temporarily unavailable')
-    }
-  })
 })
 
 test('reports storage failure and discards a pending reply after renderer navigation', async () => {

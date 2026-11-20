@@ -69,6 +69,8 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().getScanEntry(request.payload)
     case 'listScanDirectory':
       return requireDatabase().listScanDirectory(request.payload)
+    case 'getScanDirectoryTreemap':
+      return requireDatabase().getScanDirectoryTreemap(request.payload)
     case 'getScan':
       return requireDatabase().getScan(request.payload.id)
     case 'insertEntry':

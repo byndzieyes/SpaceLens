@@ -445,9 +445,11 @@ test('rejects active and queued Explorer callers on shutdown and lets scanner cl
     'shutting down'
   )
   await received.promise
-  const queued = expect(storage.read(signal, (db) => db.getScanSnapshot())).rejects.toThrow(
-    'shutting down'
-  )
+  const queued = expect(
+    storage.read(signal, (db) =>
+      db.getScanDirectoryTreemap({ scanId: 'interrupted', entryId: root.id })
+    )
+  ).rejects.toThrow('shutting down')
   storage.stopReads()
   await Promise.all([active, queued])
   const cleanup = storage.discardBuildingScan('interrupted')
@@ -473,9 +475,11 @@ test('fails all queued work on Worker exit and does not dispatch a waiting write
   await client.initialize(databasePath)
   const storage = new ScanStorageCoordinator(Promise.resolve(client))
   const { signal } = new AbortController()
-  const first = expect(storage.read(signal, (db) => db.getScanSnapshot())).rejects.toBeInstanceOf(
-    StorageUnavailableError
-  )
+  const first = expect(
+    storage.read(signal, (db) =>
+      db.getScanDirectoryTreemap({ scanId: 'previous', entryId: root.id })
+    )
+  ).rejects.toBeInstanceOf(StorageUnavailableError)
   await Promise.resolve()
   const second = expect(storage.read(signal, (db) => db.getScanSnapshot())).rejects.toBeInstanceOf(
     StorageUnavailableError
@@ -486,7 +490,7 @@ test('fails all queued work on Worker exit and does not dispatch a waiting write
   await Promise.all([first, second, write])
   expect(sent.mock.calls.map(([request]) => (request as StorageRequest).operation)).toEqual([
     'initialize',
-    'getScanSnapshot'
+    'getScanDirectoryTreemap'
   ])
   await expect(client.dispose()).rejects.toThrow('exited unexpectedly')
   expectReleased(worker)
@@ -580,24 +584,35 @@ test('queries published Explorer snapshots through the Worker and returns struct
   })
 })
 
-test('returns bounded Worker pages for a wide directory including deep and final offsets', async () => {
+test('returns bounded pages and Treemap data for a directory with more than 100,000 children', async () => {
   const pending = lifecycleScan('wide')
-  const count = 12_097
-  const label = (index: number): string => `file-${String(index).padStart(5, '0')}`
+  const count = 100_017
+  const totalBytes = (count * (count - 1)) / 2
+  const label = (index: number): string => `file-${String(index).padStart(6, '0')}`
   // Seed the read fixture in one transaction so the test does not depend on disk sync speed.
   const seed = new ScanDatabase(databasePath)
   try {
     seed.beginScan(pending)
     seed.transaction(() => {
-      seed.insertEntry({ ...root, scanId: pending.id, aggregatedSizeBytes: 0 })
+      seed.insertEntry({ ...root, scanId: pending.id, aggregatedSizeBytes: totalBytes })
       for (let index = count - 1; index >= 0; index--) {
         const id = label(index)
         const name = index >= 9_998 && index <= 10_002 ? label(9_998) : id
-        seed.insertEntry({ ...file, id, scanId: pending.id, name, path: join(rootPath, name) })
+        seed.insertEntry({
+          ...file,
+          id,
+          scanId: pending.id,
+          name,
+          path: join(rootPath, name),
+          sizeBytes: index
+        })
       }
     })
     const metadata = readyMetadata(pending)
-    seed.publishScan({ ...metadata, summary: { ...metadata.summary, fileCount: count } }, root.id)
+    seed.publishScan(
+      { ...metadata, summary: { ...metadata.summary, fileCount: count, totalBytes } },
+      root.id
+    )
   } finally {
     seed.close()
   }
@@ -607,7 +622,7 @@ test('returns bounded Worker pages for a wide directory including deep and final
     [0, 100, 100],
     [9_900, 100, 10_000],
     [10_000, 100, 10_100],
-    [12_000, 97, null],
+    [100_000, 17, null],
     [count, 0, null]
   ] as const) {
     const page = await client.listScanDirectory({
@@ -622,6 +637,76 @@ test('returns bounded Worker pages for a wide directory including deep and final
       Array.from({ length }, (_, i) => label(offset + i))
     )
   }
+  const ranked = await client.getScanDirectoryTreemap({ scanId: pending.id, entryId: root.id })
+  const otherCount = count - 100
+  expect(ranked.entries.map(({ id }) => id)).toEqual(
+    Array.from({ length: 100 }, (_, i) => label(count - 1 - i))
+  )
+  expect(ranked).toMatchObject({
+    totalCount: count,
+    individualCount: 100,
+    unknownCount: 0,
+    other: {
+      count: otherCount,
+      knownBytes: (otherCount * (otherCount - 1)) / 2,
+      zeroCount: 1,
+      unknownCount: 0
+    }
+  })
+}, 15_000)
+
+test('runs Treemap queries through the real Worker after recovery and returns typed request errors', async () => {
+  const seed = bundled()
+  await seed.initialize(databasePath)
+  const saved = await preparePublication(seed, lifecycleScan('saved'))
+  await seed.publishScan(saved, root.id)
+  await seed.dispose()
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.recoverStorage()
+  const request = { scanId: saved.id, entryId: root.id, limit: 1 }
+  await expect(client.getScanDirectoryTreemap(request)).resolves.toEqual({
+    scanId: saved.id,
+    directoryId: root.id,
+    entries: [{ ...file, scanId: saved.id }],
+    totalCount: 1,
+    individualCount: 1,
+    unknownCount: 0,
+    other: null
+  })
+  for (const [input, code] of [
+    [{ ...request, limit: 101 }, 'INVALID_REQUEST'],
+    [{ ...request, entryId: file.id }, 'NOT_DIRECTORY'],
+    [{ ...request, entryId: 'missing' }, 'ENTRY_NOT_FOUND'],
+    [{ ...request, scanId: 'expired' }, 'SNAPSHOT_EXPIRED']
+  ] as const) {
+    await expect(client.getScanDirectoryTreemap(input)).rejects.toMatchObject({
+      name: 'SnapshotAccessError',
+      code
+    })
+  }
+  await client.dispose()
+  await expect(client.getScanDirectoryTreemap(request)).rejects.toThrow('closing or closed')
+})
+
+test('rejects a Worker Treemap response with inconsistent Other counts', async () => {
+  const worker = start(`
+    const { parentPort } = require('node:worker_threads')
+    parentPort.on('message', ({ requestId, operation }) => {
+      const result = operation === 'getScanDirectoryTreemap'
+        ? { scanId: 'scan-a', directoryId: 'root', entries: [${JSON.stringify(file)}], totalCount: 2,
+            individualCount: 1, unknownCount: 0, other: { count: 1, knownBytes: 5, unknownCount: 1, zeroCount: 1 } }
+        : null
+      parentPort.postMessage({ requestId, ok: true, result })
+    })
+  `)
+  const client = wrap(worker)
+  await client.initialize(databasePath)
+  await expect(
+    client.getScanDirectoryTreemap({ scanId: 'scan-a', entryId: 'root' })
+  ).rejects.toThrow('invalid response')
+  await expect(client.dispose()).rejects.toThrow('invalid response')
+  expectReleased(worker)
 })
 
 test('rejects a malformed Worker page response and terminates the client', async () => {

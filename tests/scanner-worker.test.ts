@@ -207,6 +207,9 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
       requests.read(signal, (db) => db.getScanSnapshot()),
       requests.read(signal, (db) => db.getScanEntry({ scanId: first.id, entryId: empty.id })),
       requests.read(signal, (db) =>
+        db.getScanDirectoryTreemap({ scanId: first.id, entryId: oldMemory.root.id })
+      ),
+      requests.read(signal, (db) =>
         db.listScanDirectory({
           scanId: first.id,
           entryId: oldMemory.root.id,
@@ -217,9 +220,12 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
     ])
     expect(instance.cancel()).toBe(true)
     release.resolve()
-    const [metadata, entry, page] = await browsing
+    const [metadata, entry, chart, page] = await browsing
     expect(metadata.snapshot).toEqual(oldMemory)
     expect(entry).toEqual(empty)
+    expect(chart).toEqual(
+      instance.getScanDirectoryTreemap({ scanId: first.id, entryId: oldMemory.root.id })
+    )
     expect(page.entries.map(({ name }) => name)).toEqual(['empty', 'nested'])
     const cancelled = (await cancellation).session
     expect(cancelled.status).toBe('cancelled')
@@ -297,6 +303,15 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
     expect(lastPage).toMatchObject({ totalCount: 130, nextOffset: null })
     expect(firstPage.entries).toHaveLength(100)
     expect(lastPage.entries).toHaveLength(30)
+    const chartAfterLimit = await requests.read(signal, (db) =>
+      db.getScanDirectoryTreemap({ scanId: second.id, entryId: saved.root.id })
+    )
+    expect(chartAfterLimit).toMatchObject({
+      scanId: second.id,
+      individualCount: 100,
+      totalCount: 130,
+      other: { count: 30, knownBytes: 29, zeroCount: 1, unknownCount: 0 }
+    })
     await expect(
       requests.read(signal, (db) => db.getScanEntry({ scanId: first.id, entryId: empty.id }))
     ).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })

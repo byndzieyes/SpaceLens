@@ -10,7 +10,7 @@ export const MAX_QUEUED_EXPLORER_READS = 16
 
 type ExplorerQueries = Pick<
   StorageWorkerClient,
-  'getScanSnapshot' | 'getScanEntry' | 'listScanDirectory'
+  'getScanSnapshot' | 'getScanEntry' | 'listScanDirectory' | 'getScanDirectoryTreemap'
 >
 
 /** A request that could not be sent, or a read whose reply can no longer be used. */
