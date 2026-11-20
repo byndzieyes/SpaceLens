@@ -10,6 +10,7 @@ import { registerScannerIpc, registerScannerShutdown } from '../src/main/scanner
 import { registerAppInfoHandler } from '../src/main/ipc'
 import { verifyScanDirectory } from '../src/main/scanner/directoryApproval'
 import { SnapshotAccessError } from '../src/main/scanner/snapshot'
+import { ScanStorageError } from '../src/main/scanner/persistence'
 
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events')
@@ -101,16 +102,19 @@ beforeEach(() => {
   state = null
   renderer = makeRenderer()
   unsubscribe = vi.fn()
-  cancel = vi.fn()
+  cancel = vi.fn(() => true)
   dispose = vi.fn(async () => {})
   vi.mocked(dialog.showOpenDialog).mockResolvedValue({ canceled: false, filePaths: [rootPath] })
-  start = vi.fn(() => {
+  start = vi.fn(async () => {
     state = running()
     subscriber(state)
-    return new Promise<ScanSessionState>((done, fail) => {
-      settle = done
-      reject = fail
-    })
+    return {
+      scanId: id,
+      done: new Promise<ScanSessionState>((done, fail) => {
+        settle = done
+        reject = fail
+      })
+    }
   })
   manager = {
     getState: () => state,
@@ -120,7 +124,7 @@ beforeEach(() => {
     getScanEntry: vi.fn(),
     listScanDirectory: vi.fn(),
     getScanDirectoryTreemap: vi.fn(),
-    start,
+    launch: start,
     cancel,
     dispose,
     subscribe: (callback: ScanSessionSubscriber) => {
@@ -317,7 +321,7 @@ test('accepts an approved root promptly, exposes current state, and rejects conc
   const accepted = await invoke(IPC_CHANNELS.startScan, [{ rootPath }])
   expect(accepted).toEqual({ ok: true, value: { scanId: id } })
   expect(accepted).not.toBeInstanceOf(Promise)
-  expect(start).toHaveBeenCalledExactlyOnceWith(rootPath)
+  expect(start).toHaveBeenCalledExactlyOnceWith(rootPath, expect.any(Function))
   expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
     ok: true,
     value: { state: { session: { id, status: 'running' } } }
@@ -327,6 +331,67 @@ test('accepts an approved root promptly, exposes current state, and rejects conc
     error: { code: 'SCAN_ACTIVE' }
   })
   settle(state!)
+})
+
+test('rejects a storage admission failure without returning a scan ID or exposing internal details', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  await invoke(IPC_CHANNELS.selectScanDirectory)
+  start.mockRejectedValueOnce(
+    new ScanStorageError('starting the scan', new Error('private database path'))
+  )
+  expect(await invoke(IPC_CHANNELS.startScan, [{ rootPath }])).toEqual({
+    ok: false,
+    error: { code: 'UNAVAILABLE', message: 'SQLite failed while starting the scan.' }
+  })
+  expect(state).toBeNull()
+  expect(renderer.send).not.toHaveBeenCalled()
+})
+
+test('keeps admission pending and rechecks authorization after the building row is ready', async () => {
+  await invoke(IPC_CHANNELS.selectScanDirectory)
+  const ready = Promise.withResolvers<void>()
+  const verify = vi.mocked(verifyScanDirectory)
+  start.mockImplementationOnce(async (_path: string, confirmStart: () => Promise<void>) => {
+    await ready.promise
+    await confirmStart()
+    throw new Error('Unexpected admission after navigation')
+  })
+  const reply = invoke(IPC_CHANNELS.startScan, [{ rootPath }])
+  await vi.waitFor(() => expect(start).toHaveBeenCalledOnce())
+  expect(verify).toHaveBeenCalledOnce()
+  expect(state).toBeNull()
+  expect(await invoke(IPC_CHANNELS.startScan, [{ rootPath }])).toMatchObject({
+    error: { code: 'SCAN_ACTIVE' }
+  })
+  renderer.emit('did-start-navigation', { isMainFrame: true })
+  ready.resolve()
+  expect(await reply).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+  expect(state).toBeNull()
+})
+
+test('refuses cancellation during publication and exposes a sanitized uncertain storage outcome', () => {
+  state = running()
+  cancel.mockReturnValueOnce(false)
+  expect(invoke(IPC_CHANNELS.cancelScan, [{ scanId: id }])).toMatchObject({
+    ok: false,
+    error: { code: 'NOT_RUNNING', message: expect.stringContaining('finishing publication') }
+  })
+  state = {
+    ...state,
+    session: { ...state.session, status: 'failed', finishedAt: '2026-11-09T00:01:00Z' },
+    failure: { name: 'ScanStorageError', code: 'SCAN_STORAGE_UNCERTAIN', message: 'internal stack' }
+  }
+  expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
+    ok: true,
+    value: {
+      state: {
+        failure: {
+          code: 'SCAN_STORAGE_UNCERTAIN',
+          message: 'SQLite did not confirm a write. The saved result is unknown.'
+        }
+      }
+    }
+  })
 })
 
 test.each([

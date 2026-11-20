@@ -14,6 +14,7 @@ export type ScanEventConsumer = (event: ScanOutputEvent) => void | Promise<void>
 export type ScanProgressConsumer = (progress: ScanProgress) => void | Promise<void>
 
 export interface ScannerWorkerOptions {
+  readonly beforeAck?: (events: readonly ScanOutputEvent[]) => void | Promise<void>
   readonly onProgress?: ScanProgressConsumer
   readonly signal?: AbortSignal
 }
@@ -25,7 +26,7 @@ export async function consumeScannerWorker(
   consume: ScanEventConsumer,
   options?: ScanProgressConsumer | ScannerWorkerOptions
 ): Promise<ScanSummaryEvent> {
-  const { onProgress, signal } =
+  const { beforeAck, onProgress, signal } =
     typeof options === 'function' ? { onProgress: options } : (options ?? {})
   const progress = onProgress ? new ScanProgressTracker(scanId) : undefined
   let cancelling = false
@@ -70,6 +71,8 @@ export async function consumeScannerWorker(
       if (settled || cancelling) return
       progress?.accept(event)
     }
+    if (settled || cancelling) return
+    if (beforeAck) await beforeAck(message.events)
     if (settled || cancelling) return
     // Progress describes consumed events and shares their acknowledgment boundary.
     if (progress && onProgress) await onProgress(progress.snapshot())

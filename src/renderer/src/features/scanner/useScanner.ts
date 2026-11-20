@@ -138,7 +138,13 @@ export function useScanner(): ScanView & {
         update({ pending: 'starting' })
         const result = await api.startScan({ rootPath: selection.value.rootPath })
         if (!active) return
-        if (!result.ok) update({ error: requestError(result.error.code) })
+        if (!result.ok)
+          update({
+            error:
+              result.error.code === 'UNAVAILABLE'
+                ? result.error.message
+                : requestError(result.error.code)
+          })
         // Never invent a running session from an acceptance response. It may already
         // have finished, or a newer session may have arrived through the subscription.
         else if (current.scan?.session.id !== result.value.scanId) update({ ready: false })
@@ -167,7 +173,13 @@ export function useScanner(): ScanView & {
         )
           return
         if (!result.ok) {
-          update({ cancelling: null, error: requestError(result.error.code) })
+          update({
+            cancelling: null,
+            error:
+              result.error.code === 'NOT_RUNNING'
+                ? result.error.message
+                : requestError(result.error.code)
+          })
           await refresh()
         }
         // Keep 'cancelling' until a terminal snapshot confirms worker settlement.

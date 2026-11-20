@@ -24,6 +24,7 @@ import {
   validateTreemapRequest
 } from './scanner/snapshot'
 import type { ScanSessionManager } from './scanner/sessionManager'
+import { ScanStorageError } from './scanner/persistence'
 import {
   inspectScanDirectory,
   verifyScanDirectory,
@@ -32,6 +33,15 @@ import {
 
 function failure(code: ScannerIpcErrorCode, message: string): ScannerIpcResult<never> {
   return { ok: false, error: { code, message } }
+}
+
+class ScanStartRejected extends Error {
+  constructor(
+    readonly code: ScannerIpcErrorCode,
+    message: string
+  ) {
+    super(message)
+  }
 }
 
 function singleField(args: unknown[], key: string): string | null {
@@ -73,6 +83,16 @@ function validRoot(path: string): boolean {
 
 function publicState(state: ScanSessionState | null): ScanSessionState | null {
   if (!state) return null
+  const storageCode = state.failure?.name === 'ScanStorageError' ? state.failure.code : null
+  const failureCode =
+    storageCode === 'SCAN_STORAGE_FAILED' || storageCode === 'SCAN_STORAGE_UNCERTAIN'
+      ? storageCode
+      : 'SCAN_FAILED'
+  const messages = {
+    SCAN_FAILED: 'The scan could not be completed.',
+    SCAN_STORAGE_FAILED: 'SQLite could not save this scan.',
+    SCAN_STORAGE_UNCERTAIN: 'SQLite did not confirm a write. The saved result is unknown.'
+  }
   return {
     session: { ...state.session, summary: { ...state.session.summary } },
     progress: { ...state.progress },
@@ -81,8 +101,8 @@ function publicState(state: ScanSessionState | null): ScanSessionState | null {
         ? null
         : {
             name: 'Error',
-            code: 'SCAN_FAILED',
-            message: 'The scan could not be completed.'
+            code: failureCode,
+            message: messages[failureCode]
           }
   }
 }
@@ -311,45 +331,46 @@ export function registerScannerIpc(
             const selected = approval
             const version = contextVersion
             starting = true
+            const confirmStart = async (): Promise<void> => {
+              let valid = false
+              try {
+                valid = await verifyScanDirectory(selected)
+              } catch {
+                /* Unavailable locations revoke their approval. */
+              }
+              if (disposed || version !== contextVersion || !authorized(event))
+                throw new ScanStartRejected(
+                  'UNAVAILABLE',
+                  'The scan context is no longer available.'
+                )
+              if (approval !== selected)
+                throw new ScanStartRejected(
+                  'PATH_NOT_AUTHORIZED',
+                  'Select the directory again before scanning.'
+                )
+              if (!valid) {
+                approval = null
+                throw new ScanStartRejected(
+                  'DIRECTORY_UNAVAILABLE',
+                  'The selected directory changed or is no longer accessible. Select it again.'
+                )
+              }
+            }
             return (async (): Promise<ScannerIpcResult<ScanAccepted>> => {
               try {
-                let valid = false
-                try {
-                  valid = await verifyScanDirectory(selected)
-                } catch {
-                  /* Unavailable locations revoke their approval. */
-                }
-                if (disposed || version !== contextVersion || !authorized(event))
-                  return failure('UNAVAILABLE', 'The scan context is no longer available.')
-                if (approval !== selected)
-                  return failure(
-                    'PATH_NOT_AUTHORIZED',
-                    'Select the directory again before scanning.'
-                  )
-                if (!valid) {
-                  approval = null
-                  return failure(
-                    'DIRECTORY_UNAVAILABLE',
-                    'The selected directory changed or is no longer accessible. Select it again.'
-                  )
-                }
+                await confirmStart()
                 if (manager.getState()?.session.status === 'running')
                   return failure('SCAN_ACTIVE', 'A scan is already active.')
-                // start() reserves its running session synchronously. Its promise represents
-                // terminal settlement, so do not await it in the IPC acceptance response.
-                void manager
-                  .start(selected.path)
-                  .catch(() => console.error('Scanner start could not settle normally.'))
-                const accepted = manager.getState()
-                if (
-                  !accepted ||
-                  accepted.session.id === previous?.session.id ||
-                  accepted.session.status !== 'running'
-                ) {
-                  return failure('INTERNAL_ERROR', 'The scan could not be started.')
+                const { scanId, done } = await manager.launch(selected.path, confirmStart)
+                void done.catch(() => console.error('Scanner start could not settle normally.'))
+                return { ok: true, value: { scanId } }
+              } catch (error) {
+                if (error instanceof ScanStartRejected) return failure(error.code, error.message)
+                if (error instanceof ScanStorageError) {
+                  console.error('Scan persistence could not start.', error)
+                  return failure('UNAVAILABLE', error.message)
                 }
-                return { ok: true, value: { scanId: accepted.session.id } }
-              } catch {
+                if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
                 return failure('INTERNAL_ERROR', 'The scan could not be started.')
               } finally {
                 starting = false
@@ -368,7 +389,12 @@ export function registerScannerIpc(
             return failure('SCAN_MISMATCH', 'This scan is no longer current.')
           if (current.session.status !== 'running')
             return failure('NOT_RUNNING', 'This scan is no longer running.')
-          manager.cancel()
+          if (!manager.cancel()) {
+            return failure(
+              'NOT_RUNNING',
+              'The scan is finishing publication and can no longer be cancelled.'
+            )
+          }
           return { ok: true, value: { scanId } }
         } catch {
           return failure('INTERNAL_ERROR', 'The scanner request could not be processed.')

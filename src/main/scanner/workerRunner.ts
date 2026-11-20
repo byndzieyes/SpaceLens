@@ -12,7 +12,7 @@ import { parseScannerWorkerRequest } from './workerProtocol'
 import type { ScanSummaryEvent } from './summary'
 
 /**
- * Resolve only after every event/progress callback finishes, completion is received,
+ * Resolve only after every event, pre-ACK, and progress callback finishes, completion is received,
  * and the worker exits normally. Optional progress runs once per consumed batch
  * (including the final partial batch), before acknowledgment. It reports known
  * work only, including on partial failures; await the result to establish success.

@@ -3,6 +3,8 @@ import { resolve } from 'node:path'
 import type { RecentScanSummary, ScanProgress, ScanSessionState } from '../../shared/scan'
 export type { ScanSessionState } from '../../shared/scan'
 import { ScanCancelledError } from './cancellation'
+import { batchOperations, ScanStorageError, writeScan, type ScanPersistence } from './persistence'
+import type { BuildingScan } from '../storage/payloads'
 import { ScanProgressTracker } from './progress'
 import {
   DEFAULT_SNAPSHOT_LIMITS,
@@ -23,7 +25,7 @@ import type {
 import type { FileEntry } from '../../shared/scan'
 import type { ScanSummaryEvent } from './summary'
 import type { ScanEventConsumer } from './workerClient'
-import { serializeWorkerFailure, type ScannerWorkerFailure } from './workerProtocol'
+import { serializeWorkerFailure } from './workerProtocol'
 import { runScannerWorker } from './workerRunner'
 
 /** Synchronous observers only; asynchronous work belongs in the event consumer. */
@@ -35,7 +37,15 @@ interface ActiveScan {
   readonly tracker: ScanProgressTracker
   readonly snapshot: ScanSnapshotStorage
   readonly done: Promise<ScanSessionState>
+  acceptingEvents: boolean
+  publishing: boolean
+  batch?: Promise<void>
   errorCount: number
+}
+
+interface StartedScan {
+  readonly scanId: string
+  readonly done: Promise<ScanSessionState>
 }
 
 function copy(state: ScanSessionState): ScanSessionState {
@@ -62,7 +72,10 @@ export class ScanSessionManager {
   private unavailable: ScanSnapshotAvailability['unavailable'] = null
   private readonly snapshotLimits: SnapshotLimits
 
-  constructor(limits: SnapshotLimits = DEFAULT_SNAPSHOT_LIMITS) {
+  constructor(
+    limits: SnapshotLimits = DEFAULT_SNAPSHOT_LIMITS,
+    private readonly storageReady?: Promise<ScanPersistence>
+  ) {
     if (
       !Number.isSafeInteger(limits.maxEntries) ||
       limits.maxEntries < 0 ||
@@ -128,6 +141,21 @@ export class ScanSessionManager {
   }
 
   async start(rootPath: string, consume: ScanEventConsumer = () => {}): Promise<ScanSessionState> {
+    return this.reserve(rootPath, consume).done
+  }
+
+  /** Resolve only after persistent admission. The returned scan settles independently. */
+  async launch(rootPath: string, confirmStart: () => Promise<void>): Promise<StartedScan> {
+    const { accepted, scanId, done } = this.reserve(rootPath, () => {}, confirmStart)
+    await Promise.race([accepted, done])
+    return { scanId, done }
+  }
+
+  private reserve(
+    rootPath: string,
+    consume: ScanEventConsumer,
+    confirmStart?: () => Promise<void>
+  ): StartedScan & { accepted: Promise<void> } {
     if (this.disposed) throw new Error('Scan session manager is disposed.')
     if (this.active !== null) throw new Error('A scan is already active.')
     if (typeof rootPath !== 'string' || rootPath.length === 0)
@@ -135,35 +163,91 @@ export class ScanSessionManager {
     const id = randomUUID()
     const tracker = new ScanProgressTracker(id)
     const path = resolve(rootPath)
-    this.state = {
-      session: {
-        id,
-        rootPath: path,
-        status: 'running',
-        startedAt: new Date().toISOString(),
-        finishedAt: null,
-        summary: { fileCount: 0, directoryCount: 0, totalBytes: 0, errorCount: 0 }
-      },
-      progress: tracker.snapshot(),
-      failure: null
+    const session: BuildingScan = {
+      id,
+      rootPath: path,
+      status: 'running',
+      startedAt: new Date().toISOString(),
+      finishedAt: null,
+      summary: { fileCount: 0, directoryCount: 0, totalBytes: 0, errorCount: 0 }
+    }
+    const accepted = Promise.withResolvers<void>()
+    const activate = (): void => {
+      active.acceptingEvents = true
+      this.state = { session, progress: tracker.snapshot(), failure: null }
+      this.notify()
+      accepted.resolve()
     }
     const active: ActiveScan = {
       id,
       tracker,
       snapshot: new ScanSnapshotStorage(id, path, this.snapshotLimits),
       controller: new AbortController(),
+      acceptingEvents: false,
+      publishing: false,
       errorCount: 0,
       // Establish the active reservation before callbacks can cancel/dispose/reenter.
-      done: Promise.resolve().then(() => this.execute(active, path, consume))
+      done: Promise.resolve().then(async () => {
+        let storage: ScanPersistence | undefined
+        if (this.storageReady) {
+          try {
+            storage = await this.prepareStorage(active, session, this.storageReady, confirmStart)
+          } catch (error) {
+            active.snapshot.discard()
+            this.active = null
+            throw error
+          }
+          activate()
+        }
+        return this.execute(active, path, consume, storage)
+      })
     }
     this.active = active
-    this.notify()
-    return active.done
+    if (!this.storageReady) activate()
+    return { scanId: id, accepted: accepted.promise, done: active.done }
   }
 
-  /** Remains running until worker settlement; repeated requests have no effect. */
-  cancel(): void {
-    this.active?.controller.abort()
+  private async prepareStorage(
+    active: ActiveScan,
+    session: BuildingScan,
+    ready: Promise<ScanPersistence>,
+    confirmStart?: () => Promise<void>
+  ): Promise<ScanPersistence> {
+    const storage = await ready.catch((error: unknown) => {
+      if (active.controller.signal.aborted) throw new ScanCancelledError()
+      throw new ScanStorageError('initializing scan storage', error)
+    })
+    if (active.controller.signal.aborted) throw new ScanCancelledError()
+    await writeScan('starting the scan', () => storage.beginScan(session))
+    const { signal } = active.controller
+    try {
+      if (signal.aborted) throw new ScanCancelledError()
+      if (confirmStart) {
+        const cancelled = Promise.withResolvers<never>()
+        const onAbort = (): void => cancelled.reject(new ScanCancelledError())
+        signal.addEventListener('abort', onAbort, { once: true })
+        try {
+          await Promise.race([confirmStart(), cancelled.promise])
+        } finally {
+          signal.removeEventListener('abort', onAbort)
+        }
+      }
+      if (signal.aborted) throw new ScanCancelledError()
+      return storage
+    } catch (error) {
+      await writeScan('discarding the incomplete scan', () =>
+        storage.discardBuildingScan(active.id)
+      )
+      throw error
+    }
+  }
+
+  /** A publication already sent to SQLite must settle before another scan can start. */
+  cancel(): boolean {
+    const active = this.active
+    if (!active || active.publishing) return false
+    active.controller.abort()
+    return true
   }
 
   /** Permanently reject new starts, remove observers, and await active worker cleanup. */
@@ -176,12 +260,18 @@ export class ScanSessionManager {
     this.published = null
     this.active?.snapshot.discard()
     this.unavailable = null
-    this.disposal = this.active?.done.then(() => undefined) ?? Promise.resolve()
+    this.disposal =
+      this.active?.done.then(
+        () => undefined,
+        (error: unknown) => {
+          if (!(error instanceof ScanCancelledError)) throw error
+        }
+      ) ?? Promise.resolve()
     return this.disposal
   }
 
   private current(active: ActiveScan): boolean {
-    return this.active === active && this.state?.session.status === 'running'
+    return this.active === active && active.acceptingEvents && !active.controller.signal.aborted
   }
 
   private refresh(active: ActiveScan): void {
@@ -204,17 +294,19 @@ export class ScanSessionManager {
   private async execute(
     active: ActiveScan,
     path: string,
-    consume: ScanEventConsumer
+    consume: ScanEventConsumer,
+    storage?: ScanPersistence
   ): Promise<ScanSessionState> {
     let status: 'completed' | 'cancelled' | 'failed' = 'completed'
-    let failure: ScannerWorkerFailure | null = null
+    let failure: unknown
     let completedResult: ScanSummaryEvent | null = null
+    let completedAt: string | undefined
     try {
       const result = await runScannerWorker(
         path,
         active.id,
         async (event) => {
-          if (!this.current(active) || active.controller.signal.aborted) return
+          if (!this.current(active)) return
           // The consumer receives its own event, so mutations cannot alter accounting
           // or the runner's final-summary/progress validation.
           await consume(structuredClone(event))
@@ -230,8 +322,18 @@ export class ScanSessionManager {
         },
         {
           signal: active.controller.signal,
+          beforeAck:
+            storage &&
+            ((events) => {
+              if (!this.current(active)) return
+              const operations = batchOperations(events)
+              active.batch = writeScan('writing a scan batch', () =>
+                storage.applyBatch(active.id, operations)
+              )
+              return active.batch
+            }),
           onProgress: (progress) => {
-            if (!this.current(active) || active.controller.signal.aborted) return
+            if (!this.current(active)) return
             const known = active.tracker.snapshot()
             if (
               Object.keys(known).some(
@@ -243,7 +345,11 @@ export class ScanSessionManager {
             this.notify()
           }
         }
-      )
+      ).finally(() => {
+        active.acceptingEvents = false
+      })
+      if (active.batch) await active.batch
+      if (active.controller.signal.aborted) throw new ScanCancelledError()
       active.tracker.accept(result)
       if (result.summary.errorCount !== active.errorCount)
         throw new Error('Worker error count differs from consumed session events.')
@@ -251,19 +357,57 @@ export class ScanSessionManager {
         ...this.state!,
         session: { ...this.state!.session, summary: { ...result.summary } }
       }
+      completedAt = new Date().toISOString()
+      if (storage) {
+        const completed = {
+          ...this.state.session,
+          status: 'completed' as const,
+          finishedAt: completedAt
+        }
+        // From this point cancellation would race an atomic publication already in flight.
+        active.publishing = true
+        await writeScan('publishing the scan', () =>
+          storage.publishScan(completed, result.rootEntryId)
+        )
+      }
       completedResult = result
     } catch (error) {
       if (active.controller.signal.aborted && error instanceof ScanCancelledError)
         status = 'cancelled'
       else {
         status = 'failed'
-        failure = serializeWorkerFailure(error)
+        failure = error
       }
     }
+    if (status !== 'completed' && storage) {
+      // Scanner cancellation can settle before an in-flight pre-ACK callback returns.
+      try {
+        await active.batch
+      } catch (error) {
+        status = 'failed'
+        failure = error
+      }
+      if (!(failure instanceof ScanStorageError && failure.uncertain)) {
+        try {
+          await writeScan('discarding the incomplete scan', () =>
+            storage.discardBuildingScan(active.id)
+          )
+        } catch (error) {
+          if (status === 'failed') console.error('Scan failed before storage cleanup.', failure)
+          status = 'failed'
+          failure = error
+        }
+      }
+    }
+    if (failure instanceof ScanStorageError) console.error('Scan persistence failed.', failure)
     this.state = {
       ...this.state!,
-      failure,
-      session: { ...this.state!.session, status, finishedAt: new Date().toISOString() }
+      failure: status === 'failed' ? serializeWorkerFailure(failure) : null,
+      session: {
+        ...this.state!.session,
+        status,
+        finishedAt: status === 'completed' ? completedAt! : new Date().toISOString()
+      }
     }
     if (this.state.session.status === 'completed') {
       const session = this.state.session

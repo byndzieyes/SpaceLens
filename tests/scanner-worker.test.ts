@@ -20,13 +20,20 @@ import type { ScanOutputEvent, ScanSummaryEvent } from '../src/main/scanner/summ
 import type { runScannerWorker } from '../src/main/scanner/workerRunner'
 import type { ScanProgress } from '../src/shared/scan'
 import type { ScanSessionManager, ScanSessionState } from '../src/main/scanner/sessionManager'
+import type { createStorageWorkerClient } from '../src/main/storage/workerRunner'
+import { batchOperations } from '../src/main/scanner/persistence'
 
 const require = createRequire(import.meta.url)
 const scanId = 'worker-test'
 const workers = new Set<Worker>()
 const artifacts = new Map<
   string,
-  { runner: typeof runScannerWorker; workerPath: string; Manager: typeof ScanSessionManager }
+  {
+    runner: typeof runScannerWorker
+    workerPath: string
+    Manager: typeof ScanSessionManager
+    storage: typeof createStorageWorkerClient
+  }
 >()
 let suitePath: string
 let rootPath: string
@@ -64,10 +71,14 @@ beforeAll(async () => {
       const { ScanSessionManager } = require(join(relocated, 'scanSessionManager.js')) as {
         ScanSessionManager: typeof import('../src/main/scanner/sessionManager').ScanSessionManager
       }
+      const { createStorageWorkerClient } = require(join(relocated, 'storageWorkerRunner.js')) as {
+        createStorageWorkerClient: typeof import('../src/main/storage/workerRunner').createStorageWorkerClient
+      }
       artifacts.set(mode, {
         runner: module.runScannerWorker,
         workerPath: join(relocated, worker),
-        Manager: ScanSessionManager
+        Manager: ScanSessionManager,
+        storage: createStorageWorkerClient
       })
     }
   } finally {
@@ -116,6 +127,148 @@ function expectReleased(worker: Worker): void {
     expect(worker.listenerCount(event)).toBe(0)
   }
 }
+
+test.each([true, false])(
+  'sends the scanner ACK only if the pre-ACK writer succeeds (%s)',
+  async (commit) => {
+    const worker = start()
+    const sent = vi.spyOn(worker, 'postMessage')
+    const write = Promise.withResolvers<void>()
+    const beforeAck = vi.fn(() => write.promise)
+    const progress = vi.fn()
+    const done = consumeScannerWorker(worker, scanId, () => {}, { beforeAck, onProgress: progress })
+    const outcome = commit
+      ? expect(done).resolves.toMatchObject({ scanId })
+      : expect(done).rejects.toThrow('Write rejected')
+    await vi.waitFor(() => expect(beforeAck).toHaveBeenCalledOnce())
+    expect(sent).not.toHaveBeenCalled()
+    expect(progress).not.toHaveBeenCalled()
+    if (commit) write.resolve()
+    else write.reject(new Error('Write rejected'))
+    await outcome
+    const acks = sent.mock.calls.filter(([message]) => message.type === 'ack')
+    expect(acks).toEqual(commit ? [[{ type: 'ack', scanId, sequence: 0 }]] : [])
+    expectReleased(worker)
+  }
+)
+
+test('runs live scans through SQLite, keeps prior results on cancellation and failure, and outgrows the memory cap', async () => {
+  const built = artifacts.get('production')!
+  const storage = built.storage()
+  const databasePath = join(suitePath, 'integration.sqlite')
+  const instance = new built.Manager(
+    { maxEntries: 5, maxEstimatedBytes: 1024 * 1024 },
+    Promise.resolve(storage)
+  )
+  const release = Promise.withResolvers<void>()
+  const written = Promise.withResolvers<void>()
+  const report = vi.spyOn(console, 'error').mockImplementation(() => {})
+  try {
+    await storage.initialize(databasePath)
+    await mkdir(join(rootPath, 'nested'))
+    await writeFile(join(rootPath, 'empty'), '')
+    await writeFile(join(rootPath, 'nested', 'data'), 'abc')
+    const apply = storage.applyBatch.bind(storage)
+    const batches = vi.spyOn(storage, 'applyBatch')
+    const first = (await instance.start(rootPath)).session
+    expect(first).toMatchObject({
+      status: 'completed',
+      summary: { fileCount: 2, directoryCount: 2, totalBytes: 3 }
+    })
+    expect(await storage.getPublishedScan()).toEqual(first)
+    const oldMemory = instance.getScanSnapshot().snapshot!
+    const firstOperations = batches.mock.calls[0][1]
+    expect(firstOperations.filter(({ type }) => type === 'entry')).toHaveLength(4)
+    expect(firstOperations.filter(({ type }) => type === 'directory-finalized')).toHaveLength(2)
+    expect(firstOperations.at(-1)).toMatchObject({
+      type: 'directory-finalized',
+      entry: { parentId: null, aggregatedSizeBytes: 3 }
+    })
+    expect(firstOperations.every(({ entry }) => entry.scanId === first.id)).toBe(true)
+    const empty = firstOperations.find(({ entry }) => entry.name === 'empty')!.entry
+    expect(await storage.getEntry(first.id, empty.id)).toMatchObject({ sizeBytes: 0 })
+    expect(instance.getScanEntry({ scanId: first.id, entryId: empty.id })).toEqual(empty)
+
+    batches.mockImplementationOnce(async (id, operations) => {
+      await apply(id, operations)
+      written.resolve()
+      await release.promise
+    })
+    const cancellation = instance.start(rootPath)
+    await written.promise
+    expect(instance.cancel()).toBe(true)
+    release.resolve()
+    const cancelled = (await cancellation).session
+    expect(cancelled.status).toBe('cancelled')
+    expect(await storage.getScan(cancelled.id)).toBeNull()
+    expect(await storage.getPublishedScan()).toEqual(first)
+    expect(instance.getScanSnapshot().snapshot).toEqual(oldMemory)
+
+    const failed = (await instance.start(join(rootPath, 'missing'))).session
+    expect(failed.status).toBe('failed')
+    expect(await storage.getScan(failed.id)).toBeNull()
+    expect(await storage.getPublishedScan()).toEqual(first)
+
+    // Produce an actual constraint rejection after the scanner creates a valid batch.
+    batches.mockImplementationOnce((id, operations) => apply(id, [...operations, operations[0]]))
+    const rejected = await instance.start(rootPath)
+    expect(rejected).toMatchObject({
+      session: { status: 'failed' },
+      failure: { code: 'SCAN_STORAGE_FAILED' }
+    })
+    expect(await storage.getScan(rejected.session.id)).toBeNull()
+    expect(await storage.getPublishedScan()).toEqual(first)
+    expect(instance.getScanSnapshot().snapshot).toEqual(oldMemory)
+    expect(report).toHaveBeenCalled()
+
+    const publish = storage.publishScan.bind(storage)
+    vi.spyOn(storage, 'publishScan').mockImplementationOnce((scan, rootId) =>
+      publish(
+        { ...scan, summary: { ...scan.summary, fileCount: scan.summary.fileCount + 1 } },
+        rootId
+      )
+    )
+    const rejectedPublication = await instance.start(rootPath)
+    expect(rejectedPublication).toMatchObject({
+      session: { status: 'failed' },
+      failure: { code: 'SCAN_STORAGE_FAILED' }
+    })
+    expect(await storage.getScan(rejectedPublication.session.id)).toBeNull()
+    expect(await storage.getPublishedScan()).toEqual(first)
+    expect(instance.getScanSnapshot().snapshot).toEqual(oldMemory)
+
+    await Promise.all(
+      Array.from({ length: SCANNER_BATCH_SIZE }, (_, index) =>
+        writeFile(join(rootPath, `extra-${index}`), 'x')
+      )
+    )
+    const second = (await instance.start(rootPath)).session
+    expect(second).toMatchObject({
+      status: 'completed',
+      summary: { fileCount: 130, totalBytes: 131 }
+    })
+    const secondBatches = batches.mock.calls.filter(([id]) => id === second.id)
+    expect(secondBatches).toHaveLength(2)
+    expect(secondBatches[0][1]).toHaveLength(SCANNER_BATCH_SIZE)
+    expect(secondBatches[1][1].at(-1)?.type).toBe('directory-finalized')
+    expect(
+      secondBatches
+        .flatMap(([, operations]) => operations)
+        .every(({ entry }) => entry.scanId === second.id)
+    ).toBe(true)
+    expect(await storage.getPublishedScan()).toEqual(second)
+    expect(await storage.getScan(first.id)).toBeNull()
+    expect(instance.getScanSnapshot()).toEqual({
+      snapshot: oldMemory,
+      unavailable: { scanId: second.id, reason: 'limit-exceeded' }
+    })
+  } finally {
+    release.resolve()
+    await instance.dispose()
+    await storage.dispose()
+  }
+  await expect(storage.getPublishedScan()).rejects.toThrow('closing or closed')
+})
 
 test.each(['development', 'production'])(
   'generated %s manager retains finalized nested entries from a real worker',
@@ -1032,8 +1185,7 @@ test('reports known bytes with unknown file metadata and does not count junction
   await writeFile(join(rootPath, 'unknown'), 'unknown size')
   await writeFile(join(rootPath, 'known'), '12345')
   await writeFile(join(rootPath, 'empty'), '')
-  const worker = start(
-    `
+  const scannerSource = `
     const { workerData } = require('node:worker_threads');
     const fs = require('node:fs/promises');
     const original = fs.lstat;
@@ -1043,19 +1195,51 @@ test('reports known bytes with unknown file metadata and does not count junction
       return stats;
     };
     require(workerData.workerPath);
-  `,
-    { unknown: join(rootPath, 'unknown') }
-  )
+  `
   const progress = vi.fn()
   const events: ScanOutputEvent[] = []
-  const result = await consumeScannerWorker(
-    worker,
-    scanId,
-    (event) => {
-      events.push(event)
-    },
-    progress
-  )
+  const storage = artifacts.get('production')!.storage()
+  const startedAt = new Date().toISOString()
+  const scan = {
+    id: scanId,
+    rootPath,
+    startedAt,
+    summary: { fileCount: 0, directoryCount: 0, totalBytes: 0, errorCount: 0 }
+  }
+  let result: ScanSummaryEvent
+  try {
+    await storage.initialize(join(suitePath, 'unknown-integration.sqlite'))
+    await storage.beginScan({ ...scan, status: 'running', finishedAt: null })
+    const worker = start(scannerSource, { unknown: join(rootPath, 'unknown') })
+    result = await consumeScannerWorker(
+      worker,
+      scanId,
+      (event) => {
+        events.push(event)
+      },
+      {
+        onProgress: progress,
+        beforeAck: (events) => storage.applyBatch(scanId, batchOperations(events))
+      }
+    )
+    await storage.publishScan(
+      {
+        ...scan,
+        status: 'completed',
+        finishedAt: new Date().toISOString(),
+        summary: result.summary
+      },
+      result.rootEntryId
+    )
+    expect(await storage.getPublishedScan()).toMatchObject({ summary: result.summary })
+    const unknown = events.find((event) => event.type === 'entry' && event.entry.name === 'unknown')
+    expect(unknown?.type).toBe('entry')
+    if (unknown?.type === 'entry')
+      expect(await storage.getEntry(scanId, unknown.entry.id)).toMatchObject({ sizeBytes: null })
+    expectReleased(worker)
+  } finally {
+    await storage.dispose()
+  }
   expect(events.filter((event) => event.type === 'error')).toEqual([
     expect.objectContaining({ error: expect.objectContaining({ code: 'UNKNOWN_FILE_SIZE' }) })
   ])
@@ -1067,7 +1251,6 @@ test('reports known bytes with unknown file metadata and does not count junction
     processedBytes: 5,
     currentPath: rootPath
   })
-  expectReleased(worker)
 })
 
 test.each(['sync', 'async'] as const)(

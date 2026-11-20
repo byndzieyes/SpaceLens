@@ -1,4 +1,5 @@
 import { app, BrowserWindow, session } from 'electron'
+import { mkdir } from 'node:fs/promises'
 import { join, resolve } from 'path'
 import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
@@ -6,10 +7,22 @@ import icon from '../../resources/icon.png?asset'
 import { registerAppInfoHandler } from './ipc'
 import { ScanSessionManager } from './scanner/sessionManager'
 import { registerScannerIpc, registerScannerShutdown } from './scannerIpc'
+import { createStorageWorkerClient } from './storage/workerRunner'
+import type { StorageWorkerClient } from './storage/workerClient'
 
-const scanManager = new ScanSessionManager()
+let scanManager: ScanSessionManager | undefined
 let scannerIpc: ReturnType<typeof registerScannerIpc> | undefined
-registerScannerShutdown(() => (scannerIpc ? scannerIpc.dispose() : scanManager.dispose()))
+let storage: StorageWorkerClient | undefined
+let quitting = false
+registerScannerShutdown(async () => {
+  quitting = true
+  try {
+    if (scannerIpc) await scannerIpc.dispose()
+    else await scanManager?.dispose()
+  } finally {
+    await storage?.dispose()
+  }
+})
 
 const rendererUrl =
   is.dev && process.env['ELECTRON_RENDERER_URL']
@@ -50,6 +63,7 @@ function createWindow(): void {
 // initialization and is ready to create browser windows.
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(async () => {
+  if (quitting) return
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.spacelens.app')
 
@@ -61,6 +75,18 @@ app.whenReady().then(async () => {
   })
 
   registerAppInfoHandler(rendererUrl)
+  const storageReady = (async () => {
+    const directory = app.getPath('userData')
+    await mkdir(directory, { recursive: true })
+    if (quitting) throw new Error('The application is shutting down.')
+    storage = createStorageWorkerClient()
+    await storage.initialize(join(directory, 'scans.sqlite'))
+    return storage
+  })()
+  void storageReady.catch((error: unknown) => {
+    if (!quitting) console.error('Scan storage initialization failed.', error)
+  })
+  scanManager = new ScanSessionManager(undefined, storageReady)
   // Only native directory selection can grant this renderer permission to scan a root.
   scannerIpc = registerScannerIpc(scanManager, rendererUrl)
 
@@ -80,12 +106,13 @@ app.whenReady().then(async () => {
     }
   }
 
+  if (quitting) return
   createWindow()
 
   app.on('activate', function () {
     // On macOS it's common to re-create a window in the app when the
     // dock icon is clicked and there are no other windows open.
-    if (BrowserWindow.getAllWindows().length === 0) createWindow()
+    if (!quitting && BrowserWindow.getAllWindows().length === 0) createWindow()
   })
 })
 

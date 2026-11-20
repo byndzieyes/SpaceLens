@@ -84,14 +84,14 @@ beforeEach(async () => {
       },
       failure: null
     }
-    return state
+    return { scanId: state.session.id, done: Promise.resolve(state) }
   })
   boundary = registerScannerIpc(
     {
       getState: () => state,
       getLatestCompleted: () => null,
       getSnapshotUnavailable: () => null,
-      start,
+      launch: start,
       cancel: vi.fn(),
       subscribe: () => () => {},
       dispose: async () => {}
@@ -121,7 +121,7 @@ test('selects one accessible empty directory in the owner window without startin
   })
   expect(start).not.toHaveBeenCalled()
   expect(await request()).toMatchObject({ ok: true })
-  expect(start).toHaveBeenCalledExactlyOnceWith(selected)
+  expect(start).toHaveBeenCalledExactlyOnceWith(selected, expect.any(Function))
 })
 test('cancellation is a normal result and grants no new permission', async () => {
   vi.mocked(dialog.showOpenDialog).mockResolvedValue({ canceled: true, filePaths: [] })
@@ -268,7 +268,7 @@ test('cancelling keeps the previous explicitly selected directory authorized', a
     value: { cancelled: true }
   })
   expect(await request()).toMatchObject({ ok: true })
-  expect(start).toHaveBeenCalledExactlyOnceWith(selected)
+  expect(start).toHaveBeenCalledExactlyOnceWith(selected, expect.any(Function))
 })
 
 test('a new successful selection replaces the old approval', async () => {
