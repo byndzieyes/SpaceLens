@@ -30,9 +30,28 @@ import {
   verifyScanDirectory,
   type DirectoryApproval
 } from './scanner/directoryApproval'
+import { StorageUnavailableError, type ScanStorageCoordinator } from './storage/coordinator'
+import { StorageWorkerError } from './storage/workerClient'
 
 function failure(code: ScannerIpcErrorCode, message: string): ScannerIpcResult<never> {
   return { ok: false, error: { code, message } }
+}
+
+function snapshotFailure(error: unknown): ScannerIpcResult<never> {
+  if (error instanceof SnapshotAccessError) return failure(error.code, error.message)
+  if (error instanceof StorageUnavailableError) return failure('UNAVAILABLE', error.message)
+  if (error instanceof StorageWorkerError && error.name === 'SnapshotAccessError') {
+    switch (error.code) {
+      case 'INVALID_REQUEST':
+      case 'SNAPSHOT_UNAVAILABLE':
+      case 'SNAPSHOT_EXPIRED':
+      case 'ENTRY_NOT_FOUND':
+      case 'NOT_DIRECTORY':
+      case 'SIZE_OVERFLOW':
+        return failure(error.code, error.message)
+    }
+  }
+  return failure('INTERNAL_ERROR', 'The snapshot request could not be processed.')
 }
 
 class ScanStartRejected extends Error {
@@ -110,7 +129,8 @@ function publicState(state: ScanSessionState | null): ScanSessionState | null {
 /** Only the native picker grants approval, scoped to the attached renderer document. */
 export function registerScannerIpc(
   manager: ScanSessionManager,
-  rendererUrl: string
+  rendererUrl: string,
+  storage: Pick<ScanStorageCoordinator, 'read'>
 ): { attachRenderer: (renderer: WebContents) => void; dispose: () => Promise<void> } {
   let renderer: WebContents | null = null
   let disposed = false
@@ -127,10 +147,13 @@ export function registerScannerIpc(
   let contextVersion = 0
   let pickerBusy = false
   let starting = false
+  let explorerContext = new AbortController()
 
   const clearApproval = (): void => {
     approval = null
     contextVersion++
+    explorerContext.abort()
+    explorerContext = new AbortController()
   }
   const onNavigation = (
     details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>
@@ -257,34 +280,63 @@ export function registerScannerIpc(
     IPC_CHANNELS.getScanDirectoryTreemap
   ] as const
   for (const channel of snapshotChannels) {
-    ipcMain.handle(channel, (event, ...args: unknown[]) => {
+    ipcMain.handle(channel, async (event, ...args: unknown[]) => {
       if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
       if (!authorized(event)) return failure('UNAUTHORIZED', 'Scanner access is not authorized.')
+      const { signal } = explorerContext
+      const reply = <T>(result: ScannerIpcResult<T>): ScannerIpcResult<T> =>
+        signal.aborted || !authorized(event)
+          ? failure('UNAVAILABLE', 'The Explorer context is no longer available.')
+          : result
       try {
         if (channel === IPC_CHANNELS.getScanSnapshot) {
           if (args.length !== 0)
             return failure('INVALID_REQUEST', 'getScanSnapshot does not accept arguments.')
-          return { ok: true, value: manager.getScanSnapshot() }
+          const value = await storage.read(signal, (client) => client.getScanSnapshot())
+          return reply({ ok: true, value })
         }
         if (args.length !== 1)
           return failure('INVALID_REQUEST', 'One snapshot request is required.')
         if (channel === IPC_CHANNELS.getScanDirectoryTreemap) {
           const request = args[0]
           validateTreemapRequest(request)
-          return { ok: true, value: manager.getScanDirectoryTreemap(request) }
+          const { scanId, entryId } = request
+          const value = await storage.read(signal, async (client) => {
+            const entry = await client.getScanEntry({ scanId, entryId })
+            if (signal.aborted) throw new StorageUnavailableError()
+            if (entry.type !== 'directory') {
+              throw new SnapshotAccessError('NOT_DIRECTORY', 'Entry is not a directory.')
+            }
+            // The SQLite entry check and the same-scan memory lookup share one turn in the queue.
+            try {
+              return manager.getScanDirectoryTreemap(request)
+            } catch (error) {
+              if (
+                error instanceof SnapshotAccessError &&
+                (error.code === 'SNAPSHOT_UNAVAILABLE' || error.code === 'SNAPSHOT_EXPIRED')
+              ) {
+                throw new SnapshotAccessError(
+                  'SNAPSHOT_UNAVAILABLE',
+                  'Treemap is temporarily unavailable for this saved snapshot. Directory browsing is available.'
+                )
+              }
+              throw error
+            }
+          })
+          return reply({ ok: true, value })
         }
         const request = args[0] as ScanEntryRequest | ScanDirectoryRequest
         validateSnapshotRequest(request, channel === IPC_CHANNELS.listScanDirectory)
-        return {
-          ok: true,
-          value:
-            channel === IPC_CHANNELS.getScanEntry
-              ? manager.getScanEntry(request)
-              : manager.listScanDirectory(request as ScanDirectoryRequest)
+        if (channel === IPC_CHANNELS.getScanEntry) {
+          const value = await storage.read(signal, (client) => client.getScanEntry(request))
+          return reply({ ok: true, value })
         }
+        const value = await storage.read(signal, (client) =>
+          client.listScanDirectory(request as ScanDirectoryRequest)
+        )
+        return reply({ ok: true, value })
       } catch (error) {
-        if (error instanceof SnapshotAccessError) return failure(error.code, error.message)
-        return failure('INTERNAL_ERROR', 'The snapshot request could not be processed.')
+        return reply(snapshotFailure(error))
       }
     })
   }

@@ -28,10 +28,9 @@ export type ExplorerSnapshotState =
   | { readonly status: 'missing'; readonly snapshot: null; readonly unavailable: null }
 
 /**
- * Resolve the one published in-memory snapshot without loading its children.
- * Its entries.scanId and root.id identify the explorable root; a completed scan
- * summary alone does not. Summary-only metadata supplies a scan ID and reason,
- * not that scan's summary or root. Data disappears when the application exits.
+ * Resolve the published SQLite snapshot without loading its children.
+ * Its entries.scanId and root.id identify the explorable root. A completed
+ * scan summary alone does not identify a browsable snapshot.
  *
  * For entry details, use window.spaceLens.getScanEntry({ scanId, entryId })
  * directly: it already returns ScannerIpcResult<FileEntry>. Keep IDs from the

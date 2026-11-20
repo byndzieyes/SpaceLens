@@ -37,19 +37,21 @@ export function useExplorer(): ExplorerState & {
   const current = useRef(state)
   const sequence = useRef(0)
   const mounted = useRef(false)
+  const refreshing = useRef(false)
   const publish = (next: ExplorerState): void => {
     current.current = next
     setState(next)
   }
-  const refreshSnapshot = async (): Promise<void> => {
+  const refreshSnapshot = async (replacing = false): Promise<void> => {
     if (!mounted.current) return
     const ticket = ++sequence.current
-    publish({ ...current.current, loading: true, error: null })
+    refreshing.current = true
+    publish({ ...(replacing ? initial : current.current), loading: true, error: null })
     try {
       const result = await resolveExplorerSnapshot()
       if (!mounted.current || ticket !== sequence.current) return
       if (!result.ok) {
-        publish({ ...current.current, loading: false, error: result.error })
+        publish({ ...initial, loading: false, error: result.error })
         return
       }
       const previous = current.current
@@ -72,19 +74,34 @@ export function useExplorer(): ExplorerState & {
     } catch {
       if (mounted.current && ticket === sequence.current)
         publish({
-          ...current.current,
+          ...initial,
           loading: false,
           error: {
             code: 'TRANSPORT_ERROR',
             message: 'Snapshot availability could not be loaded. Retry the request.'
           }
         })
+    } finally {
+      if (ticket === sequence.current) refreshing.current = false
     }
   }
   useEffect(() => {
     const requests = sequence
     mounted.current = true
     const ticket = requests.current
+    let revision = -1
+    let latestPublished: string | undefined
+    const unsubscribe = window.spaceLens.onScanStateChanged((update) => {
+      if (update.revision <= revision) return
+      revision = update.revision
+      const session = update.state?.session
+      const published =
+        update.latestCompleted?.id ?? (session?.status === 'completed' ? session.id : undefined)
+      if (!published || latestPublished === published) return
+      latestPublished = published
+      const previous = current.current.availability?.snapshot?.entries.scanId
+      if (previous !== published) void refreshSnapshot(previous !== undefined)
+    })
     // A discarded Strict Mode mount does not need its own availability request.
     queueMicrotask(() => {
       if (requests.current === ticket) void refreshSnapshot()
@@ -92,8 +109,10 @@ export function useExplorer(): ExplorerState & {
     return () => {
       mounted.current = false
       requests.current++
+      refreshing.current = false
+      unsubscribe()
     }
-    // Availability is queried on activation; refresh is an explicit action.
+    // Availability is queried on activation and when the scanner reports a new publication.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
@@ -102,7 +121,8 @@ export function useExplorer(): ExplorerState & {
     mode: 'new' | 'back' | 'forward' = 'new'
   ): Promise<void> => {
     const before = current.current
-    if (!mounted.current || before.availability?.status !== 'available') return
+    if (!mounted.current || refreshing.current || before.availability?.status !== 'available')
+      return
     const snapshot = before.availability.snapshot
     const oldId = before.breadcrumbs.at(-1)?.id
     const ticket = ++sequence.current

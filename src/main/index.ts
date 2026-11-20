@@ -8,6 +8,7 @@ import { registerAppInfoHandler } from './ipc'
 import { ScanSessionManager } from './scanner/sessionManager'
 import { writeScan } from './scanner/persistence'
 import { registerScannerIpc, registerScannerShutdown } from './scannerIpc'
+import { ScanStorageCoordinator } from './storage/coordinator'
 import { createStorageWorkerClient } from './storage/workerRunner'
 import type { StorageWorkerClient } from './storage/workerClient'
 
@@ -15,9 +16,11 @@ let scanManager: ScanSessionManager | undefined
 let scannerIpc: ReturnType<typeof registerScannerIpc> | undefined
 let storage: StorageWorkerClient | undefined
 let storageReady: Promise<StorageWorkerClient> | undefined
+let storageRequests: ScanStorageCoordinator | undefined
 let quitting = false
 registerScannerShutdown(async () => {
   quitting = true
+  storageRequests?.stopReads()
   try {
     if (scannerIpc) await scannerIpc.dispose()
     else await scanManager?.dispose()
@@ -102,12 +105,15 @@ app.whenReady().then(async () => {
     await writeScan('recovering scan storage', () => client.recoverStorage())
     return client
   })()
-  void storageReady.catch((error: unknown) => {
+  const requests = new ScanStorageCoordinator(storageReady)
+  storageRequests = requests
+  const scanStorageReady = storageReady.then(() => requests)
+  void scanStorageReady.catch((error: unknown) => {
     if (!quitting) console.error('Scan storage startup failed.', error)
   })
-  scanManager = new ScanSessionManager(undefined, storageReady)
+  scanManager = new ScanSessionManager(undefined, scanStorageReady)
   // Only native directory selection can grant this renderer permission to scan a root.
-  scannerIpc = registerScannerIpc(scanManager, rendererUrl)
+  scannerIpc = registerScannerIpc(scanManager, rendererUrl, requests)
 
   if (!app.isPackaged && process.env['NODE_ENV'] === 'development') {
     const extensionPath = process.env['REACT_DEVTOOLS_PATH']?.trim()

@@ -21,6 +21,7 @@ import type { runScannerWorker } from '../src/main/scanner/workerRunner'
 import type { ScanProgress } from '../src/shared/scan'
 import type { ScanSessionManager, ScanSessionState } from '../src/main/scanner/sessionManager'
 import type { createStorageWorkerClient } from '../src/main/storage/workerRunner'
+import { ScanStorageCoordinator } from '../src/main/storage/coordinator'
 import { batchOperations } from '../src/main/scanner/persistence'
 
 const require = createRequire(import.meta.url)
@@ -156,15 +157,20 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
   const built = artifacts.get('production')!
   const storage = built.storage()
   const databasePath = join(suitePath, 'integration.sqlite')
+  const ready = Promise.withResolvers<typeof storage>()
+  const requests = new ScanStorageCoordinator(ready.promise)
+  const { signal } = new AbortController()
   const instance = new built.Manager(
     { maxEntries: 5, maxEstimatedBytes: 1024 * 1024 },
-    Promise.resolve(storage)
+    ready.promise.then(() => requests)
   )
   const release = Promise.withResolvers<void>()
   const written = Promise.withResolvers<void>()
   const report = vi.spyOn(console, 'error').mockImplementation(() => {})
   try {
     await storage.initialize(databasePath)
+    await storage.recoverStorage()
+    ready.resolve(storage)
     await mkdir(join(rootPath, 'nested'))
     await writeFile(join(rootPath, 'empty'), '')
     await writeFile(join(rootPath, 'nested', 'data'), 'abc')
@@ -196,8 +202,25 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
     })
     const cancellation = instance.start(rootPath)
     await written.promise
+    expect(instance.getState()?.session.status).toBe('running')
+    const browsing = Promise.all([
+      requests.read(signal, (db) => db.getScanSnapshot()),
+      requests.read(signal, (db) => db.getScanEntry({ scanId: first.id, entryId: empty.id })),
+      requests.read(signal, (db) =>
+        db.listScanDirectory({
+          scanId: first.id,
+          entryId: oldMemory.root.id,
+          offset: 0,
+          limit: 100
+        })
+      )
+    ])
     expect(instance.cancel()).toBe(true)
     release.resolve()
+    const [metadata, entry, page] = await browsing
+    expect(metadata.snapshot).toEqual(oldMemory)
+    expect(entry).toEqual(empty)
+    expect(page.entries.map(({ name }) => name)).toEqual(['empty', 'nested'])
     const cancelled = (await cancellation).session
     expect(cancelled.status).toBe('cancelled')
     expect(await storage.getScan(cancelled.id)).toBeNull()
@@ -262,8 +285,24 @@ test('runs live scans through SQLite, keeps prior results on cancellation and fa
       snapshot: oldMemory,
       unavailable: { scanId: second.id, reason: 'limit-exceeded' }
     })
+    const saved = (await requests.read(signal, (db) => db.getScanSnapshot())).snapshot!
+    expect(saved.entries.scanId).toBe(second.id)
+    expect(saved.entryCount).toBe(132)
+    const list = (offset: number): ReturnType<typeof storage.listScanDirectory> =>
+      requests.read(signal, (db) =>
+        db.listScanDirectory({ scanId: second.id, entryId: saved.root.id, offset, limit: 100 })
+      )
+    const [firstPage, lastPage] = await Promise.all([list(0), list(100)])
+    expect(firstPage).toMatchObject({ totalCount: 130, nextOffset: 100 })
+    expect(lastPage).toMatchObject({ totalCount: 130, nextOffset: null })
+    expect(firstPage.entries).toHaveLength(100)
+    expect(lastPage.entries).toHaveLength(30)
+    await expect(
+      requests.read(signal, (db) => db.getScanEntry({ scanId: first.id, entryId: empty.id }))
+    ).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
   } finally {
     release.resolve()
+    requests.stopReads()
     await instance.dispose()
     await storage.dispose()
   }

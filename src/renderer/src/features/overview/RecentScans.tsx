@@ -27,8 +27,8 @@ export function RecentScans({ scans, unavailableScanId }: RecentScansProps): Rea
         )}
       </div>
       <p className="text-xs text-text-secondary">
-        Latest completed scan from this application session only. Results are cleared when the
-        application closes. Sizes are known logical file bytes, not allocated disk space.
+        This list shows the latest scan completed in this application session. Sizes are known
+        logical file bytes, not allocated disk space.
       </p>
       <Card aria-labelledby={titleId} className="min-w-0">
         {recentScans.length === 0 ? (

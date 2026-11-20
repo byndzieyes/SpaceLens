@@ -96,7 +96,8 @@ beforeEach(async () => {
       subscribe: () => () => {},
       dispose: async () => {}
     } as unknown as ScanSessionManager,
-    url
+    url,
+    { read: vi.fn() }
   )
   boundary.attachRenderer(renderer as unknown as WebContents)
 })

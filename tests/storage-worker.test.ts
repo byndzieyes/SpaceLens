@@ -11,6 +11,11 @@ import { resolveConfig } from 'electron-vite'
 import { build } from 'vite'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
+import {
+  MAX_QUEUED_EXPLORER_READS,
+  ScanStorageCoordinator,
+  StorageUnavailableError
+} from '../src/main/storage/coordinator'
 import { ScanDatabase } from '../src/main/storage/database'
 import type {
   BuildingScan,
@@ -348,6 +353,144 @@ async function preparePublication(
   ])
   return readyMetadata(pending)
 }
+
+test('coordinates a real Worker after startup and dispatches publication before queued Explorer reads', async () => {
+  const client = bundled()
+  const ready = Promise.withResolvers<StorageWorkerClient>()
+  const storage = new ScanStorageCoordinator(ready.promise)
+  const { signal } = new AbortController()
+  const release = Promise.withResolvers<void>()
+  const received = Promise.withResolvers<void>()
+  const direct = client.getScanSnapshot.bind(client)
+  const metadata = vi.spyOn(client, 'getScanSnapshot').mockImplementationOnce(async () => {
+    const snapshot = await direct()
+    received.resolve()
+    await release.promise
+    return snapshot
+  })
+  const oldRead = storage.read(signal, (db) => db.getScanSnapshot())
+  try {
+    await client.initialize(databasePath)
+    await client.recoverStorage()
+    const old = await preparePublication(client, lifecycleScan('previous'))
+    await client.publishScan(old, root.id)
+    const next = await preparePublication(client, lifecycleScan('next'))
+    expect(metadata).not.toHaveBeenCalled()
+    ready.resolve(client)
+    await received.promise
+
+    const oldEntry = expect(
+      storage.read(signal, (db) => db.getScanEntry({ scanId: old.id, entryId: file.id }))
+    ).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
+    const nextSnapshot = storage.read(signal, (db) => db.getScanSnapshot())
+    const page = storage.read(signal, (db) =>
+      db.listScanDirectory({ scanId: next.id, entryId: root.id, offset: 0, limit: 100 })
+    )
+    const publish = storage.publishScan(next, root.id)
+    release.resolve()
+    expect((await oldRead).snapshot?.entries.scanId).toBe(old.id)
+    await publish
+    await oldEntry
+    expect((await nextSnapshot).snapshot?.entries.scanId).toBe(next.id)
+    expect(await page).toMatchObject({ scanId: next.id, totalCount: 1, nextOffset: null })
+  } finally {
+    storage.stopReads()
+    release.resolve()
+    await oldRead.catch(() => {})
+  }
+})
+
+test('bounds waits during startup, drops abandoned renderer work and allows a new request in its place', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const ready = Promise.withResolvers<StorageWorkerClient>()
+  const storage = new ScanStorageCoordinator(ready.promise)
+  const abandoned = new AbortController()
+  const live = new AbortController()
+  const query = vi.fn((db: Pick<StorageWorkerClient, 'getScanSnapshot'>) => db.getScanSnapshot())
+  const waiting = Array.from({ length: MAX_QUEUED_EXPLORER_READS }, (_, index) =>
+    storage.read(index === 0 ? abandoned.signal : live.signal, query)
+  )
+  const results = Promise.allSettled(waiting)
+  await expect(storage.read(live.signal, query)).rejects.toThrow('busy')
+  abandoned.abort()
+  const replacement = expect(storage.read(live.signal, query)).rejects.toThrow('timed out')
+  await vi.advanceTimersByTimeAsync(STORAGE_REQUEST_TIMEOUT_MS)
+  await replacement
+  const [first, ...others] = await results
+  expect(first).toMatchObject({
+    status: 'rejected',
+    reason: { message: expect.stringContaining('no longer active') }
+  })
+  expect(others).toHaveLength(MAX_QUEUED_EXPLORER_READS - 1)
+  expect(
+    others.every((one) => one.status === 'rejected' && one.reason.message.includes('timed out'))
+  ).toBe(true)
+  expect(query).not.toHaveBeenCalled()
+})
+
+test('rejects active and queued Explorer callers on shutdown and lets scanner cleanup finish', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await preparePublication(client, lifecycleScan('interrupted'))
+  const storage = new ScanStorageCoordinator(Promise.resolve(client))
+  const release =
+    Promise.withResolvers<Awaited<ReturnType<StorageWorkerClient['getScanSnapshot']>>>()
+  const received = Promise.withResolvers<void>()
+  vi.spyOn(client, 'getScanSnapshot').mockImplementationOnce(() => {
+    received.resolve()
+    return release.promise
+  })
+  const { signal } = new AbortController()
+  const active = expect(storage.read(signal, (db) => db.getScanSnapshot())).rejects.toThrow(
+    'shutting down'
+  )
+  await received.promise
+  const queued = expect(storage.read(signal, (db) => db.getScanSnapshot())).rejects.toThrow(
+    'shutting down'
+  )
+  storage.stopReads()
+  await Promise.all([active, queued])
+  const cleanup = storage.discardBuildingScan('interrupted')
+  release.resolve({ snapshot: null, unavailable: null })
+  await cleanup
+  await expect(client.getScan('interrupted')).resolves.toBeNull()
+  await expect(storage.read(signal, (db) => db.getScanSnapshot())).rejects.toBeInstanceOf(
+    StorageUnavailableError
+  )
+  await client.dispose()
+})
+
+test('fails all queued work on Worker exit and does not dispatch a waiting write', async () => {
+  const worker = start(`
+    const { parentPort } = require('node:worker_threads')
+    parentPort.on('message', ({ requestId, operation }) => {
+      if (operation === 'initialize') parentPort.postMessage({ requestId, ok: true, result: null })
+      else process.exit(7)
+    })
+  `)
+  const sent = vi.spyOn(worker, 'postMessage')
+  const client = wrap(worker)
+  await client.initialize(databasePath)
+  const storage = new ScanStorageCoordinator(Promise.resolve(client))
+  const { signal } = new AbortController()
+  const first = expect(storage.read(signal, (db) => db.getScanSnapshot())).rejects.toBeInstanceOf(
+    StorageUnavailableError
+  )
+  await Promise.resolve()
+  const second = expect(storage.read(signal, (db) => db.getScanSnapshot())).rejects.toBeInstanceOf(
+    StorageUnavailableError
+  )
+  const write = expect(storage.beginScan(lifecycleScan('unsent'))).rejects.toBeInstanceOf(
+    StorageUnavailableError
+  )
+  await Promise.all([first, second, write])
+  expect(sent.mock.calls.map(([request]) => (request as StorageRequest).operation)).toEqual([
+    'initialize',
+    'getScanSnapshot'
+  ])
+  await expect(client.dispose()).rejects.toThrow('exited unexpectedly')
+  expectReleased(worker)
+})
 
 test('queries published Explorer snapshots through the Worker and returns structured errors', async () => {
   const client = bundled()

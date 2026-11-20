@@ -76,11 +76,14 @@ function retained(scanId: string, name: string, errors = 0, extras = 0): ScanSna
 function mockApp(): {
   api: Mocked<SpaceLensAPI>
   listeners: Set<(snapshot: ScanStateSnapshot) => void>
-  publish: (storage: ScanSnapshotStorage) => void
+  publish: (
+    storage: ScanSnapshotStorage,
+    options?: { retainTreemap?: boolean; notify?: boolean }
+  ) => void
   runNext: (id: string) => void
-  reportSummaryOnly: (scanId: string) => void
 } {
   let published: ScanSnapshotStorage | null = null
+  let treemap: ScanSnapshotStorage | null = null
   let state: ScanStateSnapshot = { revision: 0, state: null }
   const listeners = new Set<(snapshot: ScanStateSnapshot) => void>()
   const activeScan = (id: string, status: ScanStatus, rootPath: string): ScanSessionState => {
@@ -114,10 +117,14 @@ function mockApp(): {
     state = { ...state, ...patch, revision: state.revision + 1 }
     for (const listener of listeners) listener(state)
   }
-  const publish = (storage: ScanSnapshotStorage): void => {
+  const publish = (
+    storage: ScanSnapshotStorage,
+    { retainTreemap = true, notify = true } = {}
+  ): void => {
     published = storage
+    if (retainTreemap) treemap = storage
     const { root, summary } = storage.describe()
-    emit({
+    const patch = {
       state: activeScan(storage.scanId, 'completed', root.path),
       latestCompleted: {
         id: storage.scanId,
@@ -127,8 +134,12 @@ function mockApp(): {
         fileCount: summary.fileCount,
         errorCount: summary.errorCount
       },
-      snapshotUnavailable: null
-    })
+      snapshotUnavailable: retainTreemap
+        ? null
+        : { scanId: storage.scanId, reason: 'limit-exceeded' as const }
+    }
+    if (notify) emit(patch)
+    else state = { ...state, ...patch, revision: state.revision + 1 }
   }
   function read<T>(scanId: string, load: (store: ScanSnapshotStorage) => T): ScannerIpcResult<T> {
     if (published?.scanId !== scanId)
@@ -155,14 +166,22 @@ function mockApp(): {
       ok: true,
       value: {
         snapshot: published?.describe() ?? null,
-        unavailable: state.snapshotUnavailable ?? null
+        unavailable: null
       }
     })),
     getScanEntry: vi.fn<SpaceLensAPI['getScanEntry']>(async (request) =>
       read(request.scanId, (store) => store.getEntry(request.entryId))
     ),
     getScanDirectoryTreemap: vi.fn<SpaceLensAPI['getScanDirectoryTreemap']>(async (request) =>
-      read(request.scanId, (store) => store.getDirectoryTreemap(request))
+      read(request.scanId, () => {
+        if (treemap?.scanId !== request.scanId) {
+          throw new SnapshotAccessError(
+            'SNAPSHOT_UNAVAILABLE',
+            'Treemap is temporarily unavailable for this saved snapshot. Directory browsing is available.'
+          )
+        }
+        return treemap.getDirectoryTreemap(request)
+      })
     ),
     listScanDirectory: vi.fn<SpaceLensAPI['listScanDirectory']>(async (request) =>
       read(request.scanId, (store) => store.listDirectory(request))
@@ -193,19 +212,7 @@ function mockApp(): {
     publish,
     runNext: (id: string) => {
       nextId = id
-    },
-    reportSummaryOnly: (scanId: string) =>
-      emit({
-        state: activeScan(scanId, 'completed', '/scans/Summary'),
-        latestCompleted: {
-          id: scanId,
-          path: '/scans/Summary',
-          completedAt: timestamp,
-          totalBytes: 1500,
-          fileCount: 220
-        },
-        snapshotUnavailable: { scanId, reason: 'limit-exceeded' }
-      })
+    }
   }
 }
 
@@ -249,7 +256,7 @@ test('a settled scan opens Explorer with one published identity across all four 
   fireEvent.click(button('Open in Explorer'))
   await chart('Alpha')
   expect(screen.getByText('Incomplete snapshot: known sizes may be partial.')).toBeVisible()
-  expect(listeners.size).toBe(0)
+  expect(listeners.size).toBe(1)
   expect(api.getScanSnapshot).toHaveBeenCalledOnce()
   fireEvent.click(button('Expand Alpha'))
   const treeFolder = await panel('Directory Tree').findByRole('button', { name: 'Nested' })
@@ -291,7 +298,7 @@ test('a settled scan opens Explorer with one published identity across all four 
   expect(api.cancelScan).not.toHaveBeenCalled()
 })
 
-test('an older snapshot stays browsable during a scan, after cancellation, and after summary-only completion', async () => {
+test('preserves the prior publication during a scan and cancellation, then browses a replacement without a matching Treemap', async () => {
   const main = mockApp()
   main.publish(retained('scan-a', 'Alpha'))
   main.runNext('scan-b')
@@ -314,20 +321,29 @@ test('an older snapshot stays browsable during a scan, after cancellation, and a
   fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'inside.bin' }))
   await panel('Details').findByRole('heading', { name: 'inside.bin' })
   const calls = main.api.getScanDirectoryTreemap.mock.calls.length
-  act(() => main.reportSummaryOnly('scan-c'))
-  expect(screen.queryByText(/newer scan has summary-only results/)).not.toBeInTheDocument()
-  fireEvent.click(button('Refresh snapshot'))
-  await screen.findByText(/newer scan has summary-only results/)
-  expect(panel('Details').getByRole('heading', { name: 'inside.bin' })).toBeVisible()
-  expect(button('Back')).toHaveAttribute('aria-disabled', 'false')
-  expect(main.api.getScanDirectoryTreemap).toHaveBeenCalledTimes(calls)
+  act(() => main.publish(retained('scan-c', 'Large', 0, 104), { retainTreemap: false }))
+  expect(await panel('Treemap').findByText(/Treemap is temporarily unavailable/)).toHaveAttribute(
+    'role',
+    'status'
+  )
+  expect(panel('Treemap').queryByRole('figure')).not.toBeInTheDocument()
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+  expect(button('Back')).toHaveAttribute('aria-disabled', 'true')
+  fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'Large.txt' }))
+  await panel('Details').findByRole('heading', { name: 'Large.txt' })
+  fireEvent.click(button('Next page'))
+  await panel('Directory Contents').findByText(/Page 2.*106 entries/)
+  expect(main.api.getScanDirectoryTreemap).toHaveBeenCalledTimes(calls + 1)
+  expect(main.api.getScanDirectoryTreemap).toHaveBeenLastCalledWith({
+    scanId: 'scan-c',
+    entryId: 'root'
+  })
   open('Overview')
-  await screen.findByText(/scan has no browsable snapshot/)
-  expect(screen.queryByRole('button', { name: 'Open in Explorer' })).not.toBeInTheDocument()
-  expect(screen.getByText('220')).toBeVisible()
+  await screen.findByText(/You can still browse its saved entries in Explorer/)
+  expect(button('Open in Explorer')).toBeEnabled()
 })
 
-test('replacement is explicit after expiration and ignores late panel data from the old snapshot', async () => {
+test('refreshes automatically on publication and ignores late panel data from the old snapshot', async () => {
   const main = mockApp()
   const alpha = retained('scan-a', 'Alpha')
   const beta = retained('scan-b', 'Beta')
@@ -350,12 +366,8 @@ test('replacement is explicit after expiration and ignores late panel data from 
     expect(main.api.getScanEntry).toHaveBeenLastCalledWith({ scanId: 'scan-a', entryId: 'report' })
   )
   act(() => main.publish(beta))
-  fireEvent.click(button('Forward'))
-  await screen.findByText(/SNAPSHOT_EXPIRED.*Use Refresh snapshot/)
-  expect(main.api.getScanSnapshot).toHaveBeenCalledOnce()
-  expect(button('Forward')).toHaveAttribute('aria-disabled', 'false')
-  fireEvent.click(button('Refresh snapshot'))
   await chart('Beta')
+  expect(main.api.getScanSnapshot).toHaveBeenCalledTimes(2)
   await act(async () => pending.resolve({ ok: true, value: alpha.getEntry('report') }))
   expect(panel('Details').getByText('No item selected')).toBeVisible()
   expect(button('Forward')).toHaveAttribute('aria-disabled', 'true')
@@ -393,7 +405,7 @@ test('refreshes a replaced snapshot from an expired panel and focuses the toolba
   render(<App />)
   open('Explorer')
   await chart('Alpha')
-  act(() => main.publish(retained('scan-b', 'Beta')))
+  act(() => main.publish(retained('scan-b', 'Beta'), { notify: false }))
   fireEvent.click(button('Expand Alpha'))
   const tree = panel('Directory Tree')
   expect(await tree.findByRole('alert')).toHaveTextContent('Use Refresh snapshot')
@@ -406,7 +418,7 @@ test('refreshes a replaced snapshot from an expired panel and focuses the toolba
   expect(tree.queryByRole('alert')).not.toBeInTheDocument()
 })
 
-test('leaving Explorer ignores its pending availability response and a new app session can be summary-only', async () => {
+test('leaving Explorer ignores pending availability and a new publication is resolved from the missing state', async () => {
   const main = mockApp()
   const late = Promise.withResolvers<ScannerIpcResult<ScanSnapshotAvailability>>()
   main.api.getScanSnapshot.mockReturnValueOnce(late.promise)
@@ -427,11 +439,12 @@ test('leaving Explorer ignores its pending availability response and a new app s
   expect(main.api.getScanDirectoryTreemap).not.toHaveBeenCalled()
   open('Explorer')
   await screen.findByText(/No published snapshot yet/)
-  act(() => main.reportSummaryOnly('scan-a'))
-  fireEvent.click(button('Refresh snapshot'))
-  await screen.findByText(/temporary snapshot storage limit was reached/)
-  expect(main.api.listScanDirectory).not.toHaveBeenCalled()
-  expect(main.api.getScanDirectoryTreemap).not.toHaveBeenCalled()
+  act(() => main.publish(retained('scan-new', 'Published'), { retainTreemap: false }))
+  await panel('Directory Contents').findByRole('button', { name: 'Published.txt' })
+  expect(await panel('Treemap').findByText(/Treemap is temporarily unavailable/)).toHaveAttribute(
+    'role',
+    'status'
+  )
   expect(main.api.cancelScan).not.toHaveBeenCalled()
 })
 

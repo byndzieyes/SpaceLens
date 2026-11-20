@@ -299,12 +299,14 @@ test('Strict Mode leaves one subscription and ignores queries from the disposed 
   expect(api.cancelScan).not.toHaveBeenCalled()
 })
 
-test('navigation unsubscribes without cancelling and returning retrieves the ongoing scan', async () => {
+test('switching to Explorer removes the Overview listener without cancelling the scan', async () => {
   render(<App />)
   await screen.findByText('Ready to scan')
   emit(snapshot(1))
+  const [overview] = listeners
   fireEvent.click(screen.getByRole('button', { name: 'Explorer' }))
-  expect(listeners.size).toBe(0)
+  expect(listeners.size).toBe(1)
+  expect(listeners.has(overview)).toBe(false)
   expect(api.cancelScan).not.toHaveBeenCalled()
   latest = snapshot(2)
   fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
@@ -454,7 +456,7 @@ test('Recent Scans uses Main summaries, survives navigation and ignores stale re
 })
 
 test.each(['limit-exceeded', 'invalid-data'] as const)(
-  'explains summary-only completion after %s and preserves the notice across later attempts',
+  'offers Explorer even when the completed scan has no Treemap after %s',
   async (reason) => {
     const completed = {
       id: 'scan-a',
@@ -471,11 +473,13 @@ test.each(['limit-exceeded', 'invalid-data'] as const)(
       latestCompleted: completed,
       snapshotUnavailable: { scanId: 'scan-a', reason }
     })
-    expect(within(panel()).getByText(/this scan has no browsable snapshot/)).toBeVisible()
+    expect(within(panel()).getByText(/browse its saved entries in Explorer/)).toBeVisible()
+    expect(within(panel()).getByRole('button', { name: 'Open in Explorer' })).toBeEnabled()
     expect(within(panel()).getByText('300 MB')).toBeVisible()
     const recent = (): ReturnType<typeof within> =>
       within(screen.getByRole('region', { name: 'Recent Scans' }))
-    expect(recent().getByText(/filesystem entries were not retained/)).toBeVisible()
+    expect(recent().getByText(completed.path)).toBeVisible()
+    expect(recent().queryByText(/filesystem entries were not retained/)).not.toBeInTheDocument()
     expect(screen.queryByText(/Results are incomplete/)).not.toBeInTheDocument()
     for (const status of ['running', 'cancelled', 'failed'] as const) {
       emit({
@@ -484,25 +488,17 @@ test.each(['limit-exceeded', 'invalid-data'] as const)(
         snapshotUnavailable: { scanId: 'scan-a', reason }
       })
       expect(
-        within(panel()).queryByText(/this scan has no browsable snapshot/)
+        within(panel()).queryByText(/browse its saved entries in Explorer/)
       ).not.toBeInTheDocument()
-      expect(recent().getByText(/filesystem entries were not retained/)).toBeVisible()
+      expect(recent().getByText(completed.path)).toBeVisible()
     }
-    vi.mocked(api.getScanSnapshot).mockResolvedValue({
-      ok: true,
-      value: { snapshot: null, unavailable: { scanId: 'scan-a', reason } }
-    })
-    fireEvent.click(screen.getByRole('button', { name: 'Explorer' }))
-    await screen.findByText(/Summary only\. (The temporary|Filesystem entries)/)
-    fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
-    await screen.findByText(/filesystem entries were not retained/)
     emit({
       ...snapshot(10, 'completed', 'new'),
       latestCompleted: { ...completed, id: 'new' },
       snapshotUnavailable: null
     })
     expect(screen.queryByText(/filesystem entries were not retained/)).not.toBeInTheDocument()
-    expect(api.getScanSnapshot).toHaveBeenCalledOnce()
+    expect(api.getScanSnapshot).not.toHaveBeenCalled()
     expect(api.listScanDirectory).not.toHaveBeenCalled()
   }
 )

@@ -25,7 +25,6 @@ export function ScanPanel({
     ready &&
     !pending &&
     scan?.session.status === 'completed' &&
-    !unavailable &&
     scanner.latestCompleted?.id === scan.session.id
   const label = cancelling
     ? 'Cancellation requested'
@@ -151,11 +150,8 @@ export function ScanPanel({
           )}
           {unavailable && (
             <p role="status" className="text-sm text-warning">
-              Summary only.{' '}
-              {unavailable.reason === 'limit-exceeded'
-                ? 'The temporary snapshot storage limit was reached.'
-                : 'Filesystem entries could not be retained.'}{' '}
-              Scan statistics are available, but this scan has no browsable snapshot.
+              Treemap is temporarily unavailable for this scan. You can still browse its saved
+              entries in Explorer.
             </p>
           )}
           {status === 'failed' && (

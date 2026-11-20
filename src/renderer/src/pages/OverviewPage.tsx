@@ -49,10 +49,7 @@ export function OverviewPage({
         </div>
       </section>
 
-      <RecentScans
-        scans={scanner.latestCompleted ? [scanner.latestCompleted] : []}
-        unavailableScanId={scanner.snapshotUnavailable?.scanId}
-      />
+      <RecentScans scans={scanner.latestCompleted ? [scanner.latestCompleted] : []} />
     </div>
   )
 }

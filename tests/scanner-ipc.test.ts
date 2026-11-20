@@ -11,6 +11,11 @@ import { registerAppInfoHandler } from '../src/main/ipc'
 import { verifyScanDirectory } from '../src/main/scanner/directoryApproval'
 import { SnapshotAccessError } from '../src/main/scanner/snapshot'
 import { ScanStorageError } from '../src/main/scanner/persistence'
+import {
+  StorageUnavailableError,
+  type ScanStorageCoordinator
+} from '../src/main/storage/coordinator'
+import { StorageWorkerError, type StorageWorkerClient } from '../src/main/storage/workerClient'
 
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events')
@@ -46,6 +51,14 @@ let start: ReturnType<typeof vi.fn>
 let cancel: ReturnType<typeof vi.fn>
 let dispose: ReturnType<typeof vi.fn>
 let unsubscribe: ReturnType<typeof vi.fn>
+const queries = {
+  getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
+  getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
+  listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>()
+}
+const storage: Pick<ScanStorageCoordinator, 'read'> = {
+  read: async (_signal, query) => query(queries)
+}
 
 function makeRenderer(): EventEmitter & {
   isDestroyed: ReturnType<typeof vi.fn<() => boolean>>
@@ -99,6 +112,8 @@ function ack(revision: number, sender = event()): void {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  for (const query of Object.values(queries)) query.mockReset()
+  queries.getScanSnapshot.mockResolvedValue({ snapshot: null, unavailable: null })
   state = null
   renderer = makeRenderer()
   unsubscribe = vi.fn()
@@ -132,7 +147,7 @@ beforeEach(() => {
       return unsubscribe
     }
   } as unknown as ScanSessionManager
-  boundary = registerScannerIpc(manager, url)
+  boundary = registerScannerIpc(manager, url, storage)
   boundary.attachRenderer(renderer as unknown as WebContents)
   ack(0)
   renderer.send.mockClear()
@@ -145,21 +160,21 @@ afterEach(async () => {
   vi.restoreAllMocks()
 })
 
-test('retrieval uses fixed, authorized channels and forwards bounded ID-only queries', () => {
-  expect(invoke(IPC_CHANNELS.getScanSnapshot)).toEqual({
+test('retrieval uses fixed, authorized channels and forwards bounded ID-only queries to storage', async () => {
+  expect(await invoke(IPC_CHANNELS.getScanSnapshot)).toEqual({
     ok: true,
     value: { snapshot: null, unavailable: null }
   })
   const request = { scanId: id, entryId: otherId }
-  const value = { id: otherId, scanId: id }
-  vi.mocked(manager.getScanEntry).mockReturnValue(
-    value as ReturnType<ScanSessionManager['getScanEntry']>
+  const value = { id: otherId, scanId: id, type: 'directory' }
+  queries.getScanEntry.mockResolvedValue(
+    value as Awaited<ReturnType<StorageWorkerClient['getScanEntry']>>
   )
-  expect(invoke(IPC_CHANNELS.getScanEntry, [request])).toEqual({ ok: true, value })
-  expect(manager.getScanEntry).toHaveBeenCalledExactlyOnceWith(request)
+  expect(await invoke(IPC_CHANNELS.getScanEntry, [request])).toEqual({ ok: true, value })
+  expect(queries.getScanEntry).toHaveBeenCalledExactlyOnceWith(request)
   const page = { ...request, offset: 100, limit: 100 }
-  invoke(IPC_CHANNELS.listScanDirectory, [page])
-  expect(manager.listScanDirectory).toHaveBeenCalledExactlyOnceWith(page)
+  await invoke(IPC_CHANNELS.listScanDirectory, [page])
+  expect(queries.listScanDirectory).toHaveBeenCalledExactlyOnceWith(page)
   const treemap = { ...request, limit: 100 }
   const aggregated = {
     scanId: id,
@@ -171,11 +186,14 @@ test('retrieval uses fixed, authorized channels and forwards bounded ID-only que
     other: null
   }
   vi.mocked(manager.getScanDirectoryTreemap).mockReturnValue(aggregated)
-  expect(invoke(IPC_CHANNELS.getScanDirectoryTreemap, [treemap])).toEqual({
+  expect(await invoke(IPC_CHANNELS.getScanDirectoryTreemap, [treemap])).toEqual({
     ok: true,
     value: aggregated
   })
   expect(manager.getScanDirectoryTreemap).toHaveBeenCalledExactlyOnceWith(treemap)
+  expect(manager.getScanSnapshot).not.toHaveBeenCalled()
+  expect(manager.getScanEntry).not.toHaveBeenCalled()
+  expect(manager.listScanDirectory).not.toHaveBeenCalled()
 })
 
 test('state queries and terminal notifications include retention failure metadata without entries', () => {
@@ -206,26 +224,26 @@ test.each([
 ])(
   'rejects foreign senders, subframes, navigated documents, and shutdown on %s',
   async (channel) => {
-    expect(invoke(channel, [], event(makeRenderer()))).toMatchObject({
+    expect(await invoke(channel, [], event(makeRenderer()))).toMatchObject({
       ok: false,
       error: { code: 'UNAUTHORIZED' }
     })
     expect(
-      invoke(channel, [], { ...event(), senderFrame: { url } } as IpcMainInvokeEvent)
+      await invoke(channel, [], { ...event(), senderFrame: { url } } as IpcMainInvokeEvent)
     ).toMatchObject({ ok: false, error: { code: 'UNAUTHORIZED' } })
     renderer.mainFrame.url = 'https://foreign.example'
-    expect(invoke(channel)).toMatchObject({ ok: false, error: { code: 'UNAUTHORIZED' } })
+    expect(await invoke(channel)).toMatchObject({ ok: false, error: { code: 'UNAUTHORIZED' } })
     renderer.mainFrame.url = url
     await boundary.dispose()
-    expect(invoke(channel)).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
-    expect(manager.getScanSnapshot).not.toHaveBeenCalled()
-    expect(manager.getScanEntry).not.toHaveBeenCalled()
-    expect(manager.listScanDirectory).not.toHaveBeenCalled()
+    expect(await invoke(channel)).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+    expect(queries.getScanSnapshot).not.toHaveBeenCalled()
+    expect(queries.getScanEntry).not.toHaveBeenCalled()
+    expect(queries.listScanDirectory).not.toHaveBeenCalled()
     expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
   }
 )
 
-test('rejects path access, extra arguments, invalid IDs and unbounded pagination before dispatch', () => {
+test('rejects path access, extra arguments, invalid IDs and unbounded pagination before dispatch', async () => {
   for (const args of [
     [],
     [null],
@@ -234,7 +252,7 @@ test('rejects path access, extra arguments, invalid IDs and unbounded pagination
     [{ scanId: id, entryId: otherId, path: rootPath }],
     [{ scanId: id, entryId: otherId }, 'extra']
   ]) {
-    expect(invoke(IPC_CHANNELS.getScanEntry, args)).toMatchObject({
+    expect(await invoke(IPC_CHANNELS.getScanEntry, args)).toMatchObject({
       ok: false,
       error: { code: 'INVALID_REQUEST' }
     })
@@ -244,20 +262,20 @@ test('rejects path access, extra arguments, invalid IDs and unbounded pagination
     [{ scanId: id, entryId: otherId, offset: -1, limit: 100 }],
     [{ scanId: id, entryId: otherId, offset: 0, limit: 101 }]
   ]) {
-    expect(invoke(IPC_CHANNELS.listScanDirectory, args)).toMatchObject({
+    expect(await invoke(IPC_CHANNELS.listScanDirectory, args)).toMatchObject({
       ok: false,
       error: { code: 'INVALID_REQUEST' }
     })
   }
-  expect(invoke(IPC_CHANNELS.getScanSnapshot, [{}])).toMatchObject({
+  expect(await invoke(IPC_CHANNELS.getScanSnapshot, [{}])).toMatchObject({
     ok: false,
     error: { code: 'INVALID_REQUEST' }
   })
-  expect(manager.getScanEntry).not.toHaveBeenCalled()
-  expect(manager.listScanDirectory).not.toHaveBeenCalled()
+  expect(queries.getScanEntry).not.toHaveBeenCalled()
+  expect(queries.listScanDirectory).not.toHaveBeenCalled()
 })
 
-test('validates Treemap requests before dispatch and preserves structured failures', () => {
+test('validates Treemap requests before dispatch and preserves structured failures', async () => {
   const valid = { scanId: id, entryId: otherId }
   for (const args of [
     [],
@@ -271,27 +289,71 @@ test('validates Treemap requests before dispatch and preserves structured failur
       { ...valid, limit }
     ])
   ]) {
-    expect(invoke(IPC_CHANNELS.getScanDirectoryTreemap, args)).toMatchObject({
+    expect(await invoke(IPC_CHANNELS.getScanDirectoryTreemap, args)).toMatchObject({
       ok: false,
       error: { code: 'INVALID_REQUEST' }
     })
   }
+  expect(queries.getScanEntry).not.toHaveBeenCalled()
   expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
-  for (const code of [
-    'NOT_DIRECTORY',
-    'SNAPSHOT_EXPIRED',
-    'SNAPSHOT_UNAVAILABLE',
-    'ENTRY_NOT_FOUND',
-    'SIZE_OVERFLOW'
-  ] as const) {
+  queries.getScanEntry.mockResolvedValue({ type: 'directory' } as Awaited<
+    ReturnType<StorageWorkerClient['getScanEntry']>
+  >)
+  for (const code of ['NOT_DIRECTORY', 'ENTRY_NOT_FOUND', 'SIZE_OVERFLOW'] as const) {
     vi.mocked(manager.getScanDirectoryTreemap).mockImplementationOnce(() => {
       throw new SnapshotAccessError(code, 'Public message')
     })
-    expect(invoke(IPC_CHANNELS.getScanDirectoryTreemap, [valid])).toEqual({
+    expect(await invoke(IPC_CHANNELS.getScanDirectoryTreemap, [valid])).toEqual({
       ok: false,
       error: { code, message: 'Public message' }
     })
   }
+})
+
+test('blocks a stale Treemap request and reports a temporary gap for a published scan without matching memory', async () => {
+  const request = { scanId: id, entryId: otherId }
+  queries.getScanEntry.mockRejectedValueOnce(
+    new StorageWorkerError({
+      name: 'SnapshotAccessError',
+      code: 'SNAPSHOT_EXPIRED',
+      message: 'Expired',
+      sqliteCode: null
+    })
+  )
+  expect(await invoke(IPC_CHANNELS.getScanDirectoryTreemap, [request])).toMatchObject({
+    ok: false,
+    error: { code: 'SNAPSHOT_EXPIRED' }
+  })
+  expect(manager.getScanDirectoryTreemap).not.toHaveBeenCalled()
+  queries.getScanEntry.mockResolvedValueOnce({ type: 'directory' } as Awaited<
+    ReturnType<StorageWorkerClient['getScanEntry']>
+  >)
+  vi.mocked(manager.getScanDirectoryTreemap).mockImplementationOnce(() => {
+    throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'Old snapshot')
+  })
+  expect(await invoke(IPC_CHANNELS.getScanDirectoryTreemap, [request])).toMatchObject({
+    ok: false,
+    error: {
+      code: 'SNAPSHOT_UNAVAILABLE',
+      message: expect.stringContaining('Treemap is temporarily unavailable')
+    }
+  })
+})
+
+test('reports storage failure and discards a pending reply after renderer navigation', async () => {
+  queries.getScanSnapshot.mockRejectedValueOnce(new StorageUnavailableError())
+  expect(await invoke(IPC_CHANNELS.getScanSnapshot)).toMatchObject({
+    ok: false,
+    error: { code: 'UNAVAILABLE' }
+  })
+  const pending =
+    Promise.withResolvers<Awaited<ReturnType<StorageWorkerClient['getScanSnapshot']>>>()
+  queries.getScanSnapshot.mockReturnValueOnce(pending.promise)
+  const received = invoke(IPC_CHANNELS.getScanSnapshot)
+  renderer.emit('did-start-navigation', { isMainFrame: true })
+  pending.resolve({ snapshot: null, unavailable: null })
+  expect(await received).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+  expect(manager.getScanSnapshot).not.toHaveBeenCalled()
 })
 
 test.each([
@@ -299,22 +361,28 @@ test.each([
   'SNAPSHOT_EXPIRED',
   'ENTRY_NOT_FOUND',
   'NOT_DIRECTORY'
-] as const)('returns the precise storage outcome %s without exposing internal errors', (code) => {
-  vi.mocked(manager.getScanEntry).mockImplementation(() => {
-    throw new SnapshotAccessError(code, 'Public message')
-  })
-  expect(invoke(IPC_CHANNELS.getScanEntry, [{ scanId: id, entryId: otherId }])).toEqual({
-    ok: false,
-    error: { code, message: 'Public message' }
-  })
-  vi.mocked(manager.getScanEntry).mockImplementation(() => {
-    throw new Error('private internals')
-  })
-  expect(invoke(IPC_CHANNELS.getScanEntry, [{ scanId: id, entryId: otherId }])).toEqual({
-    ok: false,
-    error: { code: 'INTERNAL_ERROR', message: 'The snapshot request could not be processed.' }
-  })
-})
+] as const)(
+  'returns the precise storage outcome %s without exposing internal errors',
+  async (code) => {
+    queries.getScanEntry.mockRejectedValueOnce(
+      new StorageWorkerError({
+        name: 'SnapshotAccessError',
+        code,
+        message: 'Public message',
+        sqliteCode: null
+      })
+    )
+    expect(await invoke(IPC_CHANNELS.getScanEntry, [{ scanId: id, entryId: otherId }])).toEqual({
+      ok: false,
+      error: { code, message: 'Public message' }
+    })
+    queries.getScanEntry.mockRejectedValueOnce(new Error('private internals'))
+    expect(await invoke(IPC_CHANNELS.getScanEntry, [{ scanId: id, entryId: otherId }])).toEqual({
+      ok: false,
+      error: { code: 'INTERNAL_ERROR', message: 'The snapshot request could not be processed.' }
+    })
+  }
+)
 
 test('accepts an approved root promptly, exposes current state, and rejects concurrent starts', async () => {
   await invoke(IPC_CHANNELS.selectScanDirectory)
@@ -477,7 +545,7 @@ test('requires explicit approval independently of absolute path validation', asy
   expect(start).not.toHaveBeenCalled()
   await boundary.dispose()
   vi.mocked(ipcMain.handle).mockClear()
-  boundary = registerScannerIpc(manager, url)
+  boundary = registerScannerIpc(manager, url, storage)
   boundary.attachRenderer(renderer as unknown as WebContents)
   expect(invoke(IPC_CHANNELS.startScan, [{ rootPath }])).toMatchObject({
     ok: false,

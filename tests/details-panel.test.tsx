@@ -285,6 +285,7 @@ function mountExplorer(): {
   vi.stubGlobal('spaceLens', {
     getScanSnapshot: getSnapshot,
     getScanEntry: getEntry,
+    onScanStateChanged: () => () => {},
     getScanDirectoryTreemap: vi.fn<SpaceLensAPI['getScanDirectoryTreemap']>(
       async ({ scanId, entryId }) => ({
         ok: true,

@@ -57,6 +57,10 @@ export class StorageWorkerClient {
     worker.on('exit', this.onExit)
   }
 
+  get isReady(): boolean {
+    return this.state === 'ready'
+  }
+
   async initialize(databasePath: string): Promise<void> {
     if (this.state !== 'idle') {
       throw (

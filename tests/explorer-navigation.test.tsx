@@ -28,10 +28,12 @@ const snapshot: ScanSnapshot = {
 }
 const api = {
   getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(),
-  getScanEntry: vi.fn<SpaceLensAPI['getScanEntry']>()
+  getScanEntry: vi.fn<SpaceLensAPI['getScanEntry']>(),
+  onScanStateChanged: vi.fn<SpaceLensAPI['onScanStateChanged']>()
 }
 beforeEach(() => {
   vi.resetAllMocks()
+  api.onScanStateChanged.mockReturnValue(() => {})
   api.getScanSnapshot.mockResolvedValue({
     ok: true,
     value: { snapshot, unavailable: { scanId: 'newer', reason: 'limit-exceeded' } }
