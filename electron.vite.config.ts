@@ -18,7 +18,8 @@ export default defineConfig(({ command, mode }) => {
           input: {
             index: resolve('src/main/index.ts'),
             scannerWorkerRunner: resolve('src/main/scanner/workerRunner.ts'),
-            scanSessionManager: resolve('src/main/scanner/sessionManager.ts')
+            scanSessionManager: resolve('src/main/scanner/sessionManager.ts'),
+            storageWorkerRunner: resolve('src/main/storage/workerRunner.ts')
           }
         }
       }
