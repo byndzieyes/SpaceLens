@@ -65,6 +65,7 @@ export class ScanSessionManager {
   private latestCompleted: RecentScanSummary | null = null
   private state: ScanSessionState | null = null
   private active: ActiveScan | null = null
+  private storageBlocked: ScanStorageError | undefined
   private readonly subscribers = new Set<ScanSessionSubscriber>()
   private disposed = false
   private disposal: Promise<void> | undefined
@@ -158,6 +159,7 @@ export class ScanSessionManager {
   ): StartedScan & { accepted: Promise<void> } {
     if (this.disposed) throw new Error('Scan session manager is disposed.')
     if (this.active !== null) throw new Error('A scan is already active.')
+    if (this.storageBlocked) throw this.storageBlocked
     if (typeof rootPath !== 'string' || rootPath.length === 0)
       throw new TypeError('Root path must not be empty.')
     const id = randomUUID()
@@ -193,6 +195,7 @@ export class ScanSessionManager {
           try {
             storage = await this.prepareStorage(active, session, this.storageReady, confirmStart)
           } catch (error) {
+            if (error instanceof ScanStorageError && error.uncertain) this.storageBlocked = error
             active.snapshot.discard()
             this.active = null
             throw error
@@ -215,6 +218,7 @@ export class ScanSessionManager {
   ): Promise<ScanPersistence> {
     const storage = await ready.catch((error: unknown) => {
       if (active.controller.signal.aborted) throw new ScanCancelledError()
+      if (error instanceof ScanStorageError) throw error
       throw new ScanStorageError('initializing scan storage', error)
     })
     if (active.controller.signal.aborted) throw new ScanCancelledError()
@@ -235,9 +239,16 @@ export class ScanSessionManager {
       if (signal.aborted) throw new ScanCancelledError()
       return storage
     } catch (error) {
-      await writeScan('discarding the incomplete scan', () =>
-        storage.discardBuildingScan(active.id)
-      )
+      await this.discardIncompleteScan(storage, active.id)
+      throw error
+    }
+  }
+
+  private async discardIncompleteScan(storage: ScanPersistence, scanId: string): Promise<void> {
+    try {
+      await writeScan('discarding the incomplete scan', () => storage.discardBuildingScan(scanId))
+    } catch (error) {
+      if (error instanceof ScanStorageError) this.storageBlocked = error
       throw error
     }
   }
@@ -389,9 +400,7 @@ export class ScanSessionManager {
       }
       if (!(failure instanceof ScanStorageError && failure.uncertain)) {
         try {
-          await writeScan('discarding the incomplete scan', () =>
-            storage.discardBuildingScan(active.id)
-          )
+          await this.discardIncompleteScan(storage, active.id)
         } catch (error) {
           if (status === 'failed') console.error('Scan failed before storage cleanup.', failure)
           status = 'failed'
@@ -399,7 +408,10 @@ export class ScanSessionManager {
         }
       }
     }
-    if (failure instanceof ScanStorageError) console.error('Scan persistence failed.', failure)
+    if (failure instanceof ScanStorageError) {
+      if (failure.uncertain) this.storageBlocked = failure
+      console.error('Scan persistence failed.', failure)
+    }
     this.state = {
       ...this.state!,
       failure: status === 'failed' ? serializeWorkerFailure(failure) : null,

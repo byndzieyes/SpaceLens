@@ -18,6 +18,7 @@ import {
 
 interface StorageCommands {
   initialize: { payload: { databasePath: string }; result: null }
+  recoverStorage: { payload: null; result: null }
   insertScan: { payload: ScanSession; result: null }
   beginScan: { payload: BuildingScan; result: null }
   publishScan: { payload: ScanPublication; result: null }
@@ -29,6 +30,8 @@ interface StorageCommands {
   getEntry: { payload: { scanId: string; id: string }; result: FileEntry | null }
   close: { payload: null; result: null }
 }
+
+export const RECOVERY_CLOSED_CODE = 'RECOVERY_CLOSED'
 
 export type StorageOperation = keyof StorageCommands
 export type StoragePayload<T extends StorageOperation> = StorageCommands[T]['payload']
@@ -86,6 +89,7 @@ export function parseStorageRequest(value: unknown): StorageRequest {
         return { requestId, operation, payload: { scanId: payload.scanId } }
       }
       break
+    case 'recoverStorage':
     case 'getPublishedScan':
       if (payload === null) return { requestId, operation, payload }
       break
@@ -121,6 +125,7 @@ function isNull(value: unknown): value is null {
 const resultValidators: { [T in StorageOperation]: (value: unknown) => value is StorageResult<T> } =
   {
     initialize: isNull,
+    recoverStorage: isNull,
     insertScan: isNull,
     beginScan: isNull,
     publishScan: isNull,

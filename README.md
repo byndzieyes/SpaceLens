@@ -4,9 +4,15 @@ Desktop filesystem storage analysis application. Overview displays demo storage 
 
 Recent Scans displays "No scans yet" until a scan completes in the current application session. SpaceLens stores scanner batches in `scans.sqlite` under Electron's `userData` directory and publishes the completed scan after SQLite commits. The app keeps the most recent published SQLite scan and a scan under construction. The Overview still starts with an empty session after restart.
 
+At startup, Electron's single-instance lock protects the application profile while the Storage Worker validates the saved publication and removes interrupted scans in a transaction. New scans wait for recovery. If recovery fails, a write outcome is unknown, or a building scan cannot be discarded, SpaceLens blocks further scans for that session. Restarting runs recovery against the committed SQLite state.
+
+Storage requests have a 10-second deadline. On normal shutdown Main waits for scanner and startup work to settle, then gives the Worker two seconds to close. If the Worker must be terminated, the client waits up to another two seconds for it to exit.
+
+SQLite uses its default `DELETE` rollback journal. Snapshot replacement and recovery free pages for future writes, so the database can stay near its previous peak size after the old rows are removed. A rollback journal may be present during a write or after an interruption. SQLite handles journal recovery when the database is reopened.
+
 Explorer uses the in-memory snapshot. Main retains at most one completed memory snapshot and one under construction. Each is limited to 100,000 entries and an estimated 64 MiB (512 bytes per entry/index plus UTF-16 string lengths), with a 64 KiB per-entry cap. If a scan exceeds a memory limit, SQLite can still publish it and Overview can show its summary while Explorer continues showing the previous browsable snapshot, if available. Known logical bytes may be incomplete after recoverable filesystem errors.
 
-The typed `getScanSnapshot()`, `getScanEntry({ scanId, entryId })`, and `listScanDirectory({ scanId, entryId, offset, limit })` preload methods expose completed memory snapshots. Directory pages contain at most 100 direct children, sorted by name then ID in UTF-16 order. References expire on replacement. Snapshot metadata includes recoverable-error counts and an incomplete indicator. Cancellation remains available through traversal and batch persistence. It closes when the final publication request is sent. If the worker loses a write reply, SpaceLens reports the unknown outcome and leaves reconciliation for startup recovery.
+The typed `getScanSnapshot()`, `getScanEntry({ scanId, entryId })`, and `listScanDirectory({ scanId, entryId, offset, limit })` preload methods expose completed memory snapshots. Directory pages contain at most 100 direct children, sorted by name then ID in UTF-16 order. References expire on replacement. Snapshot metadata includes recoverable-error counts and an incomplete indicator. Cancellation remains available through traversal and batch persistence. It closes when the final publication request is sent.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 

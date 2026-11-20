@@ -12,7 +12,7 @@ import { runScannerWorker } from '../src/main/scanner/workerRunner'
 import type { ScanEventConsumer, ScannerWorkerOptions } from '../src/main/scanner/workerClient'
 import type { ScanSummaryEvent } from '../src/main/scanner/summary'
 import { StorageWorkerError } from '../src/main/storage/workerClient'
-import type { ScanPersistence } from '../src/main/scanner/persistence'
+import { ScanStorageError, type ScanPersistence } from '../src/main/scanner/persistence'
 
 vi.mock('../src/main/scanner/workerRunner', () => ({ runScannerWorker: vi.fn() }))
 
@@ -85,19 +85,20 @@ async function launch(
   return { ...accepted, run: runs.at(-1)! }
 }
 
-test('waits for initialization and a building row before accepting or traversing', async () => {
+test('waits for startup recovery and a building row before accepting or traversing', async () => {
   const storage = storageMock()
-  const ready = Promise.withResolvers<ScanPersistence>()
+  const recovery = Promise.withResolvers<void>()
   const building = Promise.withResolvers<void>()
   storage.beginScan.mockReturnValueOnce(building.promise)
-  const instance = persistentManager(ready.promise)
+  const instance = persistentManager(recovery.promise.then(() => storage))
   const confirm = vi.fn(async () => {})
   const accepted = instance.launch(rootPath, confirm)
   await Promise.resolve()
   expect(storage.beginScan).not.toHaveBeenCalled()
   expect(instance.getState()).toBeNull()
   await expect(instance.start(rootPath)).rejects.toThrow('already active')
-  ready.resolve(storage)
+  expect(confirm).not.toHaveBeenCalled()
+  recovery.resolve()
   await vi.waitFor(() => expect(storage.beginScan).toHaveBeenCalledOnce())
   expect(instance.getState()).toBeNull()
   expect(runScannerWorker).not.toHaveBeenCalled()
@@ -110,6 +111,22 @@ test('waits for initialization and a building row before accepting or traversing
   runs[0].reject(new ScanCancelledError())
   expect((await done).session.status).toBe('cancelled')
   expect(storage.discardBuildingScan).toHaveBeenCalledExactlyOnceWith(scanId)
+})
+
+test('failed recovery prevents every scan start before authorization or traversal', async () => {
+  const storage = storageMock()
+  const recovery = Promise.withResolvers<void>()
+  const instance = persistentManager(recovery.promise.then(() => storage))
+  const confirm = vi.fn(async () => {})
+  const error = new ScanStorageError('recovering scan storage', new Error('Invalid publication'))
+  const accepted = expect(instance.launch(rootPath, confirm)).rejects.toBe(error)
+  recovery.reject(error)
+  await accepted
+  await expect(instance.launch(rootPath, confirm)).rejects.toBe(error)
+  expect(storage.beginScan).not.toHaveBeenCalled()
+  expect(confirm).not.toHaveBeenCalled()
+  expect(runScannerWorker).not.toHaveBeenCalled()
+  expect(instance.getLatestCompleted()).toBeNull()
 })
 
 test('rejects initialization and begin failures before acknowledging the start', async () => {
@@ -214,6 +231,13 @@ test.each(['batch', 'publication'] as const)(
     vi.spyOn(console, 'error').mockImplementation(() => {})
     const storage = storageMock()
     const instance = persistentManager(Promise.resolve(storage))
+    const earlier = await launch(instance)
+    await root(earlier.run)
+    await finish(instance, earlier.run)
+    expect((await earlier.done).session.status).toBe('completed')
+    const previousSnapshot = instance.getScanSnapshot().snapshot
+    expect(previousSnapshot?.entries.scanId).toBe(earlier.scanId)
+    storage.publishScan.mockClear()
     const { run, done } = await launch(instance)
     const crash = new Error('Storage worker exited unexpectedly')
     if (stage === 'batch') {
@@ -233,9 +257,29 @@ test.each(['batch', 'publication'] as const)(
     })
     expect(storage.discardBuildingScan).not.toHaveBeenCalled()
     expect(storage.publishScan).toHaveBeenCalledTimes(stage === 'batch' ? 0 : 1)
-    expect(instance.getLatestCompleted()).toBeNull()
+    expect(instance.getLatestCompleted()).toMatchObject({ id: earlier.scanId })
+    expect(instance.getScanSnapshot().snapshot).toEqual(previousSnapshot)
+    await expect(launch(instance)).rejects.toMatchObject({ code: 'SCAN_STORAGE_UNCERTAIN' })
+    expect(storage.beginScan).toHaveBeenCalledTimes(2)
   }
 )
+
+test('blocks new scans when discard definitely fails and leaves a building scan unresolved', async () => {
+  vi.spyOn(console, 'error').mockImplementation(() => {})
+  const storage = storageMock()
+  storage.discardBuildingScan.mockRejectedValueOnce(storageRejection())
+  const instance = persistentManager(Promise.resolve(storage))
+  const { run, done, scanId } = await launch(instance)
+  instance.cancel()
+  run.reject(new ScanCancelledError())
+  expect(await done).toMatchObject({
+    session: { status: 'failed' },
+    failure: { code: 'SCAN_STORAGE_FAILED' }
+  })
+  await expect(launch(instance)).rejects.toMatchObject({ code: 'SCAN_STORAGE_FAILED' })
+  expect(storage.beginScan).toHaveBeenCalledOnce()
+  expect(storage.discardBuildingScan).toHaveBeenCalledExactlyOnceWith(scanId)
+})
 
 test('closes cancellation once publishing and holds terminal state and shutdown until commit', async () => {
   const storage = storageMock()

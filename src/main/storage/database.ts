@@ -113,6 +113,10 @@ export class ScanDatabase {
   private readonly selectOtherBuildingStatement: StatementSync
   private readonly completeScanStatement: StatementSync
   private readonly deleteScanStatement: StatementSync
+  private readonly selectRootIdStatement: StatementSync
+  private readonly selectUnexpectedStatusStatement: StatementSync
+  private readonly checkForeignKeysStatement: StatementSync
+  private readonly deleteInterruptedScansStatement: StatementSync
   private readonly validateSnapshot: (scan: CompletedScan) => void
   private readonly insertEntryStatement: StatementSync
   private readonly selectEntryStatement: StatementSync
@@ -155,6 +159,16 @@ export class ScanDatabase {
       `)
       this.deleteScanStatement = this.connection.prepare(
         'DELETE FROM scans WHERE id = ? AND status = ?'
+      )
+      this.selectRootIdStatement = this.connection.prepare(
+        'SELECT id FROM entries WHERE scan_id = ? AND parent_id IS NULL'
+      )
+      this.selectUnexpectedStatusStatement = this.connection.prepare(
+        "SELECT status FROM scans WHERE status NOT IN ('running', 'completed') LIMIT 1"
+      )
+      this.checkForeignKeysStatement = this.connection.prepare('PRAGMA foreign_key_check')
+      this.deleteInterruptedScansStatement = this.connection.prepare(
+        "DELETE FROM scans WHERE status = 'running'"
       )
       this.validateSnapshot = prepareSnapshotValidation(this.connection)
 
@@ -219,6 +233,29 @@ export class ScanDatabase {
     return row ? readScan(row) : null
   }
 
+  /** Startup only. SQLite has already resolved any interrupted journal on open. */
+  recoverStorage(): void {
+    this.transaction(() => {
+      const published = this.getPublishedScan()
+      if (this.selectUnexpectedStatusStatement.get()) {
+        throw new Error('The database contains an unexpected persisted scan status.')
+      }
+      if (this.checkForeignKeysStatement.get()) {
+        throw new Error('The database contains invalid scan or entry references.')
+      }
+      if (published) {
+        const publication = {
+          scan: published,
+          rootEntryId: this.selectRootIdStatement.get(published.id)?.id
+        }
+        validateScanPublication(publication)
+        this.validatePublishedTree(publication.scan, publication.rootEntryId)
+      }
+      // No legitimate scanner can be running under the profile lock during startup recovery.
+      this.deleteInterruptedScansStatement.run()
+    })
+  }
+
   beginScan(scan: BuildingScan): void {
     validateBuildingScan(scan)
     this.transaction(() => {
@@ -241,19 +278,7 @@ export class ScanDatabase {
         throw new Error('Completed scan metadata does not match the building scan.')
       }
 
-      const root = this.getEntry(scan.id, rootEntryId)
-      if (
-        !root ||
-        root.type !== 'directory' ||
-        root.parentId !== null ||
-        root.path !== scan.rootPath
-      ) {
-        throw new Error('The expected scan root directory is missing or invalid.')
-      }
-      if (root.aggregatedSizeBytes !== scan.summary.totalBytes) {
-        throw new Error('The scan root is unfinished or its total differs from the scan summary.')
-      }
-      this.validateSnapshot(scan)
+      this.validatePublishedTree(scan, rootEntryId)
 
       const previous = this.getPublishedScan()
       const { totalBytes, fileCount, directoryCount, errorCount } = scan.summary
@@ -289,6 +314,22 @@ export class ScanDatabase {
     const scan = readScan(rows[0])
     if (scan.status !== 'completed') throw new Error('Invalid persisted publication status.')
     return { ...scan, status: scan.status }
+  }
+
+  private validatePublishedTree(scan: CompletedScan, rootEntryId: string): void {
+    const root = this.getEntry(scan.id, rootEntryId)
+    if (
+      !root ||
+      root.type !== 'directory' ||
+      root.parentId !== null ||
+      root.path !== scan.rootPath
+    ) {
+      throw new Error('The expected scan root directory is missing or invalid.')
+    }
+    if (root.aggregatedSizeBytes !== scan.summary.totalBytes) {
+      throw new Error('The scan root is unfinished or its total differs from the scan summary.')
+    }
+    this.validateSnapshot(scan)
   }
 
   private requireOnlyBuildingScan(scanId: string): void {

@@ -348,6 +348,97 @@ async function preparePublication(
   return readyMetadata(pending)
 }
 
+test('allows startup recovery before any writes and rejects recovery during a legitimate scan', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.recoverStorage()
+  const building = await preparePublication(client, lifecycleScan('active'))
+  await expect(client.recoverStorage()).rejects.toThrow(/recovery/i)
+  expect((await client.getScan(building.id))?.status).toBe('running')
+  await client.publishScan(building, root.id)
+  await expect(client.getPublishedScan()).resolves.toEqual(building)
+})
+
+test('makes a failed startup recovery terminal without removing persisted rows', async () => {
+  const seed = bundled()
+  await seed.initialize(databasePath)
+  const previous = await preparePublication(seed, lifecycleScan('previous'))
+  await seed.publishScan(previous, root.id)
+  await preparePublication(seed, lifecycleScan('interrupted'))
+  await seed.insertScan({ ...previous, id: 'ambiguous' })
+  await seed.dispose()
+
+  const client = bundled()
+  await client.initialize(databasePath)
+  await expect(client.recoverStorage()).rejects.toThrow('more than one completed scan')
+  await expect(client.beginScan(lifecycleScan('new'))).rejects.toThrow(
+    'more than one completed scan'
+  )
+  await expect(client.dispose()).rejects.toThrow('more than one completed scan')
+  using observer = new DatabaseSync(databasePath, { readOnly: true })
+  expect(observer.prepare('SELECT id, status FROM scans ORDER BY id').all()).toEqual([
+    { id: 'ambiguous', status: 'completed' },
+    { id: 'interrupted', status: 'running' },
+    { id: 'previous', status: 'completed' }
+  ])
+  expect(observer.prepare('SELECT COUNT(*) AS count FROM entries').get()?.count).toBe(4)
+})
+
+test.each(['before commit', 'before acknowledgment'])(
+  'recovers after worker exit %s',
+  async (point) => {
+    const worker = start(`
+    const { parentPort } = require('node:worker_threads')
+    const { DatabaseSync } = require('node:sqlite')
+    let publishing = false
+    parentPort.on('message', request => {
+      publishing = request.operation === 'publishScan' && request.payload.scan.id === 'next'
+    })
+    if (${JSON.stringify(point)} === 'before commit') {
+      const exec = DatabaseSync.prototype.exec
+      DatabaseSync.prototype.exec = function (sql) {
+        if (publishing && sql === 'COMMIT') process.exit(1)
+        return exec.call(this, sql)
+      }
+    } else {
+      const send = parentPort.postMessage.bind(parentPort)
+      parentPort.postMessage = response => {
+        if (publishing && response.ok) process.exit(1)
+        return send(response)
+      }
+    }
+    require(${JSON.stringify(workerPath)})
+  `)
+    const sent = vi.spyOn(worker, 'postMessage')
+    const client = wrap(worker)
+    await client.initialize(databasePath)
+    await client.recoverStorage()
+    const previous = await preparePublication(client, lifecycleScan('previous'))
+    await client.publishScan(previous, root.id)
+    const next = await preparePublication(client, lifecycleScan('next'))
+    sent.mockClear()
+    await expect(client.publishScan(next, root.id)).rejects.toThrow('exited unexpectedly')
+    await expect(client.beginScan(lifecycleScan('new'))).rejects.toThrow('exited unexpectedly')
+    await expect(client.dispose()).rejects.toThrow('exited unexpectedly')
+    expect(sent).toHaveBeenCalledOnce()
+    expectReleased(worker)
+
+    const reopened = bundled()
+    await reopened.initialize(databasePath)
+    await reopened.recoverStorage()
+    const [retained, removed] = point === 'before commit' ? [previous, next] : [next, previous]
+    await expect(reopened.getPublishedScan()).resolves.toEqual(retained)
+    await expect(reopened.getEntry(retained.id, file.id)).resolves.toEqual({
+      ...file,
+      scanId: retained.id
+    })
+    await expect(reopened.getScan(removed.id)).resolves.toBeNull()
+    await expect(reopened.getEntry(removed.id, file.id)).resolves.toBeNull()
+    await expect(reopened.discardBuildingScan(removed.id)).rejects.toThrow('not a building scan')
+    await expect(reopened.getPublishedScan()).resolves.toEqual(retained)
+  }
+)
+
 test('publishes over the worker boundary after commit and reopens the replacement', async () => {
   const client = bundled()
   await client.initialize(databasePath)
@@ -622,6 +713,31 @@ test('terminates a worker that never acknowledges initialization', async () => {
   await vi.advanceTimersByTimeAsync(STORAGE_REQUEST_TIMEOUT_MS)
   await rejected
   await expect(client.dispose()).rejects.toThrow('initialize request timed out')
+  expectReleased(worker)
+})
+
+test('times out an unacknowledged batch and never sends another write', async () => {
+  vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+  const worker = start(`
+    const { parentPort } = require('node:worker_threads')
+    parentPort.on('message', ({ requestId, operation }) => {
+      if (operation === 'initialize') parentPort.postMessage({ requestId, ok: true, result: null })
+    })
+  `)
+  const client = wrap(worker)
+  await client.initialize(databasePath)
+  const send = vi.spyOn(worker, 'postMessage')
+  const pending = expect(client.applyBatch(scan.id, [])).rejects.toThrow(
+    'applyBatch request timed out'
+  )
+  await vi.advanceTimersByTimeAsync(STORAGE_REQUEST_TIMEOUT_MS)
+  await pending
+  await expect(client.discardBuildingScan(scan.id)).rejects.toThrow('applyBatch request timed out')
+  await expect(client.beginScan(lifecycleScan('new'))).rejects.toThrow(
+    'applyBatch request timed out'
+  )
+  await expect(client.dispose()).rejects.toThrow('applyBatch request timed out')
+  expect(send).toHaveBeenCalledOnce()
   expectReleased(worker)
 })
 

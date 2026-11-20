@@ -2,6 +2,7 @@ import { parentPort } from 'node:worker_threads'
 import { ScanDatabase } from './database'
 import {
   parseStorageRequest,
+  RECOVERY_CLOSED_CODE,
   serializeStorageFailure,
   storageRequestId,
   type StorageRequest,
@@ -13,6 +14,7 @@ import {
 if (parentPort === null) throw new Error('Storage entry must execute inside a Worker Thread.')
 const port = parentPort
 let database: ScanDatabase | undefined
+let recoveryAvailable = true
 
 function closeDatabase(): void {
   database?.close()
@@ -24,33 +26,50 @@ function requireDatabase(): ScanDatabase {
   return database
 }
 
+function writableDatabase(): ScanDatabase {
+  const db = requireDatabase()
+  recoveryAvailable = false
+  return db
+}
+
 function execute(request: StorageRequest): StorageResult<StorageOperation> {
   switch (request.operation) {
     case 'initialize':
       if (database) throw new Error('Storage worker already initialized the database.')
       database = new ScanDatabase(request.payload.databasePath)
       return null
+    case 'recoverStorage':
+      if (!recoveryAvailable) {
+        throw Object.assign(
+          new Error('Scan storage recovery is only available before scan writes.'),
+          {
+            code: RECOVERY_CLOSED_CODE
+          }
+        )
+      }
+      requireDatabase().recoverStorage()
+      return null
     case 'insertScan':
-      requireDatabase().insertScan(request.payload)
+      writableDatabase().insertScan(request.payload)
       return null
     case 'beginScan':
-      requireDatabase().beginScan(request.payload)
+      writableDatabase().beginScan(request.payload)
       return null
     case 'publishScan':
-      requireDatabase().publishScan(request.payload.scan, request.payload.rootEntryId)
+      writableDatabase().publishScan(request.payload.scan, request.payload.rootEntryId)
       return null
     case 'discardBuildingScan':
-      requireDatabase().discardBuildingScan(request.payload.scanId)
+      writableDatabase().discardBuildingScan(request.payload.scanId)
       return null
     case 'getPublishedScan':
       return requireDatabase().getPublishedScan()
     case 'getScan':
       return requireDatabase().getScan(request.payload.id)
     case 'insertEntry':
-      requireDatabase().insertEntry(request.payload)
+      writableDatabase().insertEntry(request.payload)
       return null
     case 'applyBatch':
-      requireDatabase().applyBatch(request.payload.scanId, request.payload.operations)
+      writableDatabase().applyBatch(request.payload.scanId, request.payload.operations)
       return null
     case 'getEntry':
       return requireDatabase().getEntry(request.payload.scanId, request.payload.id)

@@ -3,6 +3,7 @@ import type { FileEntry, ScanSession } from '../../shared/scan'
 import type { BuildingScan, CompletedScan, StorageBatchOperation } from './payloads'
 import {
   parseStorageResponse,
+  RECOVERY_CLOSED_CODE,
   type StorageFailure,
   type StorageOperation,
   type StoragePayload,
@@ -62,6 +63,10 @@ export class StorageWorkerClient {
 
   async insertScan(scan: ScanSession): Promise<void> {
     await this.run('insertScan', scan)
+  }
+
+  async recoverStorage(): Promise<void> {
+    await this.run('recoverStorage', null)
   }
 
   async beginScan(scan: BuildingScan): Promise<void> {
@@ -149,7 +154,13 @@ export class StorageWorkerClient {
         if (!response.ok) {
           const error = new StorageWorkerError(response.error)
           reject(error)
-          if (operation === 'initialize' || operation === 'close') this.fail(error)
+          if (
+            operation === 'initialize' ||
+            operation === 'close' ||
+            error.name === 'AggregateError' ||
+            (operation === 'recoverStorage' && error.code !== RECOVERY_CLOSED_CODE)
+          )
+            this.fail(error)
           return
         }
         if (operation === 'initialize' && this.state === 'initializing') this.state = 'ready'

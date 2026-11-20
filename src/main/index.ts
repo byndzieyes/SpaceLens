@@ -6,6 +6,7 @@ import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { registerAppInfoHandler } from './ipc'
 import { ScanSessionManager } from './scanner/sessionManager'
+import { writeScan } from './scanner/persistence'
 import { registerScannerIpc, registerScannerShutdown } from './scannerIpc'
 import { createStorageWorkerClient } from './storage/workerRunner'
 import type { StorageWorkerClient } from './storage/workerClient'
@@ -13,6 +14,7 @@ import type { StorageWorkerClient } from './storage/workerClient'
 let scanManager: ScanSessionManager | undefined
 let scannerIpc: ReturnType<typeof registerScannerIpc> | undefined
 let storage: StorageWorkerClient | undefined
+let storageReady: Promise<StorageWorkerClient> | undefined
 let quitting = false
 registerScannerShutdown(async () => {
   quitting = true
@@ -20,7 +22,11 @@ registerScannerShutdown(async () => {
     if (scannerIpc) await scannerIpc.dispose()
     else await scanManager?.dispose()
   } finally {
-    await storage?.dispose()
+    if (storage) {
+      // Recovery owns a transaction even when no scanner session has been admitted yet.
+      await storageReady?.catch(() => {})
+      await storage.dispose()
+    }
   }
 })
 
@@ -64,6 +70,16 @@ function createWindow(): void {
 // Some APIs can only be used after this event occurs.
 app.whenReady().then(async () => {
   if (quitting) return
+  if (!app.requestSingleInstanceLock()) {
+    app.quit()
+    return
+  }
+  app.on('second-instance', () => {
+    if (quitting) return
+    const window = BrowserWindow.getAllWindows()[0]
+    if (window?.isMinimized()) window.restore()
+    window?.focus()
+  })
   // Set app user model id for windows
   electronApp.setAppUserModelId('com.spacelens.app')
 
@@ -75,16 +91,19 @@ app.whenReady().then(async () => {
   })
 
   registerAppInfoHandler(rendererUrl)
-  const storageReady = (async () => {
+  storageReady = (async () => {
     const directory = app.getPath('userData')
     await mkdir(directory, { recursive: true })
     if (quitting) throw new Error('The application is shutting down.')
-    storage = createStorageWorkerClient()
-    await storage.initialize(join(directory, 'scans.sqlite'))
-    return storage
+    const client = createStorageWorkerClient()
+    storage = client
+    await client.initialize(join(directory, 'scans.sqlite'))
+    if (quitting) throw new Error('The application is shutting down.')
+    await writeScan('recovering scan storage', () => client.recoverStorage())
+    return client
   })()
   void storageReady.catch((error: unknown) => {
-    if (!quitting) console.error('Scan storage initialization failed.', error)
+    if (!quitting) console.error('Scan storage startup failed.', error)
   })
   scanManager = new ScanSessionManager(undefined, storageReady)
   // Only native directory selection can grant this renderer permission to scan a root.
