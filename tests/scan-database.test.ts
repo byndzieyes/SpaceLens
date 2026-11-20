@@ -1,0 +1,385 @@
+// @vitest-environment node
+
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join, resolve } from 'node:path'
+import { DatabaseSync } from 'node:sqlite'
+import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { ScanDatabase } from '../src/main/storage/database'
+import type { FileEntry, ScanSession, ScanStatus } from '../src/shared/scan'
+
+const rootPath = resolve('fixture')
+const startedAt = '2026-11-20T15:00:00.000+02:00'
+const finishedAt = '2026-11-20T13:01:00.000Z'
+
+function scan(id = 'scan-a', status: ScanStatus = 'completed'): ScanSession {
+  const metadata = {
+    id,
+    rootPath,
+    startedAt,
+    summary: { totalBytes: 20, fileCount: 2, directoryCount: 1, errorCount: 1 }
+  }
+  return status === 'running'
+    ? { ...metadata, status, finishedAt: null }
+    : { ...metadata, status, finishedAt }
+}
+
+function root(scanId = 'scan-a'): FileEntry {
+  return {
+    id: 'root',
+    scanId,
+    parentId: null,
+    name: 'fixture',
+    path: rootPath,
+    type: 'directory',
+    sizeBytes: null,
+    aggregatedSizeBytes: 20,
+    createdAt: null,
+    modifiedAt: finishedAt
+  }
+}
+
+function file(scanId = 'scan-a', id = 'file'): FileEntry {
+  return {
+    id,
+    scanId,
+    parentId: 'root',
+    name: 'fixture.txt',
+    path: join(rootPath, 'fixture.txt'),
+    type: 'file',
+    sizeBytes: 20,
+    aggregatedSizeBytes: null,
+    createdAt: startedAt,
+    modifiedAt: null
+  }
+}
+
+let tempDirectory: string
+let databasePath: string
+let database: ScanDatabase | undefined
+
+beforeEach(() => {
+  tempDirectory = mkdtempSync(join(tmpdir(), 'spacelens-scan-database-'))
+  databasePath = join(tempDirectory, 'scans.sqlite')
+})
+
+afterEach(() => {
+  try {
+    database?.close()
+  } finally {
+    database = undefined
+    rmSync(tempDirectory, { recursive: true, force: true })
+  }
+})
+
+function open(): ScanDatabase {
+  database = new ScanDatabase(databasePath)
+  return database
+}
+
+function inspectDatabase(inspect: (connection: DatabaseSync) => void): void {
+  const connection = new DatabaseSync(databasePath)
+  try {
+    inspect(connection)
+  } finally {
+    connection.close()
+  }
+}
+
+test('creates a version 1 database with two strict tables and the default rollback journal', () => {
+  const db = open()
+  expect(db.getScan('missing')).toBeNull()
+  expect(db.getEntry('missing', 'root')).toBeNull()
+  db.close()
+
+  inspectDatabase((sql) => {
+    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(1)
+    expect(sql.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('delete')
+    expect(
+      sql
+        .prepare(
+          "SELECT name, strict FROM pragma_table_list WHERE schema = 'main' AND name IN ('entries', 'scans') ORDER BY name"
+        )
+        .all()
+    ).toEqual([
+      { name: 'entries', strict: 1 },
+      { name: 'scans', strict: 1 }
+    ])
+  })
+})
+
+test('repeated initialization and idempotent close preserve all stored metadata', () => {
+  const db = open()
+  db.transaction(() => {
+    db.insertScan(scan())
+    db.insertEntry(root())
+    db.insertEntry(file())
+  })
+  db.close()
+  db.close()
+  expect(() => db.getScan('scan-a')).toThrow('The scan database is closed.')
+  expect(() => db.insertEntry(file())).toThrow('The scan database is closed.')
+
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const reopened = open()
+    expect(reopened.getScan('scan-a')).toEqual(scan())
+    expect(reopened.getEntry('scan-a', 'root')).toEqual(root())
+    expect(reopened.getEntry('scan-a', 'file')).toEqual(file())
+    reopened.close()
+  }
+  inspectDatabase((sql) => expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(1))
+})
+
+test('refuses a future version and leaves the database intact', () => {
+  const db = open()
+  db.insertScan(scan())
+  db.close()
+  inspectDatabase((sql) => sql.exec('PRAGMA user_version = 2'))
+
+  expect(() => open()).toThrow('Unsupported SQLite schema version 2.')
+  inspectDatabase((sql) => {
+    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(2)
+    expect(sql.prepare('SELECT id FROM scans').get()?.id).toBe('scan-a')
+  })
+})
+
+test('rejects a modified version 1 schema', () => {
+  open().close()
+  inspectDatabase((sql) => {
+    sql.exec('DROP INDEX entries_by_parent; CREATE INDEX entries_by_parent ON entries(id)')
+  })
+
+  expect(() => open()).toThrow('Unexpected definition for entries_by_parent.')
+  inspectDatabase((sql) => expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(1))
+})
+
+test('leaves a non-empty unversioned database alone', () => {
+  inspectDatabase((sql) => sql.exec('CREATE TABLE other_data (value TEXT)'))
+
+  expect(() => open()).toThrow('Cannot initialize a non-empty unversioned database.')
+  inspectDatabase((sql) => {
+    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(0)
+    expect(sql.prepare('SELECT name FROM sqlite_schema WHERE type = ?').all('table')).toEqual([
+      { name: 'other_data' }
+    ])
+  })
+})
+
+test('rolls back both the version marker and the DDL when initialization fails', () => {
+  const exec = DatabaseSync.prototype.exec
+  const failure = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (
+    this: DatabaseSync,
+    sql: string
+  ) {
+    exec.call(this, sql)
+    if (sql === 'PRAGMA user_version = 1') throw new Error('Simulated initialization failure.')
+  })
+
+  try {
+    expect(() => open()).toThrow('Simulated initialization failure.')
+  } finally {
+    failure.mockRestore()
+  }
+  inspectDatabase((sql) => {
+    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(0)
+    expect(sql.prepare('SELECT name FROM sqlite_schema').all()).toEqual([])
+  })
+  expect(open().getScan('scan-a')).toBeNull()
+})
+
+test('provides the database path and underlying failure when opening fails', () => {
+  const missingPath = join(tempDirectory, 'missing-directory', 'scans.sqlite')
+  expect(() => new ScanDatabase(missingPath)).toThrow(
+    /Could not open the scan database.*scans\.sqlite/
+  )
+})
+
+test('round-trips running and terminal scans and enforces finish-time nullability', () => {
+  const db = open()
+  const statuses = ['running', 'completed', 'cancelled', 'failed'] as const
+  for (const status of statuses) {
+    const metadata = scan(`scan-${status}`, status)
+    db.insertScan(metadata)
+    expect(db.getScan(metadata.id)).toEqual(metadata)
+  }
+
+  const invalid = { ...scan('bad'), finishedAt: null } as ScanSession
+  expect(() => db.insertScan(invalid)).toThrow('scan_finish_time')
+  expect(db.getScan('bad')).toBeNull()
+})
+
+test('round-trips every entry type, nullable metadata, and known zero values', () => {
+  const db = open()
+  db.insertScan(scan())
+  const entries: FileEntry[] = [
+    { ...root(), aggregatedSizeBytes: null },
+    {
+      ...root(),
+      id: 'empty',
+      parentId: 'root',
+      name: 'empty',
+      path: join(rootPath, 'empty'),
+      aggregatedSizeBytes: 0
+    },
+    { ...file(), sizeBytes: 0 },
+    { ...file('scan-a', 'unknown-size'), sizeBytes: null, createdAt: null },
+    ...(['symlink', 'other', 'unknown'] as const).map((type) => ({
+      ...file('scan-a', type),
+      type,
+      sizeBytes: null
+    }))
+  ]
+  for (const entry of entries) {
+    db.insertEntry(entry)
+    expect(db.getEntry(entry.scanId, entry.id)).toEqual(entry)
+  }
+})
+
+test('looks up repeated entry IDs by both scan and entry identity', () => {
+  const db = open()
+  const first = file('scan-a')
+  const second = { ...file('scan-b'), sizeBytes: 0 }
+  for (const entry of [first, second]) {
+    db.insertScan(scan(entry.scanId))
+    db.insertEntry(root(entry.scanId))
+    db.insertEntry(entry)
+  }
+  expect(db.getEntry('scan-a', 'file')).toEqual(first)
+  expect(db.getEntry('scan-b', 'file')).toEqual(second)
+  expect(db.getEntry('scan-c', 'file')).toBeNull()
+  expect(() => db.insertEntry(first)).toThrow('UNIQUE constraint failed')
+})
+
+test('rejects missing scans, missing parents, cross-scan parents, and non-directory parents', () => {
+  const db = open()
+  expect(() => db.insertEntry(root())).toThrow('FOREIGN KEY constraint failed')
+  db.insertScan(scan('scan-a'))
+  db.insertScan(scan('scan-b'))
+  expect(() => db.insertEntry(file('scan-a'))).toThrow('FOREIGN KEY constraint failed')
+  db.insertEntry(root('scan-a'))
+  expect(() => db.insertEntry(file('scan-b'))).toThrow('FOREIGN KEY constraint failed')
+  db.insertEntry(file('scan-a'))
+  expect(() => db.insertEntry({ ...file('scan-a', 'child'), parentId: 'file' })).toThrow(
+    'FOREIGN KEY constraint failed'
+  )
+  expect(db.getEntry('scan-a', 'child')).toBeNull()
+})
+
+test('enforces root uniqueness and entry size and parent semantics', () => {
+  const db = open()
+  db.insertScan(scan())
+  expect(() => db.insertEntry({ ...file(), parentId: null })).toThrow('entry_root_directory')
+  db.insertEntry(root())
+  expect(() => db.insertEntry({ ...root(), id: 'second-root' })).toThrow('UNIQUE constraint failed')
+  expect(() => db.insertEntry({ ...file(), parentId: 'file' })).toThrow('entry_parent_identity')
+  expect(() => db.insertEntry({ ...file(), type: 'symlink' })).toThrow('entry_file_size')
+  expect(() => db.insertEntry({ ...file(), aggregatedSizeBytes: 0 })).toThrow(
+    'entry_directory_size'
+  )
+})
+
+test('stores safe bounds exactly and detects exact 64-bit values outside the shared contract', () => {
+  const db = open()
+  const maxSafe = Number.MAX_SAFE_INTEGER
+  const metadata = {
+    ...scan(),
+    summary: { totalBytes: maxSafe, fileCount: 1, directoryCount: 1, errorCount: 0 }
+  }
+  const sourceFile = { ...file(), sizeBytes: maxSafe }
+  const sourceRoot = { ...root(), aggregatedSizeBytes: maxSafe }
+  db.insertScan(metadata)
+  db.insertEntry(sourceRoot)
+  db.insertEntry(sourceFile)
+  expect(db.getScan('scan-a')).toEqual(metadata)
+  expect(db.getEntry('scan-a', 'root')).toEqual(sourceRoot)
+  expect(db.getEntry('scan-a', 'file')).toEqual(sourceFile)
+  db.close()
+
+  const maxSigned = 9223372036854775807n
+  inspectDatabase((sql) => {
+    sql.prepare('UPDATE scans SET total_bytes = ? WHERE id = ?').run(maxSigned, 'scan-a')
+    sql
+      .prepare('UPDATE entries SET size_bytes = ? WHERE scan_id = ? AND id = ?')
+      .run(maxSigned, 'scan-a', 'file')
+    const read = sql.prepare('SELECT total_bytes, typeof(total_bytes) AS storage_type FROM scans')
+    read.setReadBigInts(true)
+    expect(read.get()).toEqual({ total_bytes: maxSigned, storage_type: 'integer' })
+  })
+
+  const reopened = open()
+  expect(() => reopened.getScan('scan-a')).toThrow('Stored totalBytes is outside')
+  expect(() => reopened.getEntry('scan-a', 'file')).toThrow('Stored sizeBytes is outside')
+})
+
+test.each([Number.MAX_SAFE_INTEGER + 1, -1, 1.5, NaN, Infinity])(
+  'rejects invalid numeric input (%s) before writing',
+  (value) => {
+    const db = open()
+    const metadata = scan()
+    expect(() =>
+      db.insertScan({ ...metadata, summary: { ...metadata.summary, fileCount: value } })
+    ).toThrow('fileCount must be a non-negative safe integer.')
+    expect(db.getScan('scan-a')).toBeNull()
+    db.insertScan(metadata)
+    expect(() => db.insertEntry({ ...root(), aggregatedSizeBytes: value })).toThrow(
+      'aggregatedSizeBytes must be a non-negative safe integer.'
+    )
+    db.insertEntry(root())
+    expect(() => db.insertEntry({ ...file(), sizeBytes: value })).toThrow(
+      'sizeBytes must be a non-negative safe integer.'
+    )
+    expect(db.getEntry('scan-a', 'file')).toBeNull()
+  }
+)
+
+test('binds unusual names and paths verbatim and preserves UTF-16 name ordering', () => {
+  const db = open()
+  const unusualRoot = `${rootPath} '資料' \ud800`
+  const name = "📁 '); DROP TABLE entries; -- \ud800.txt"
+  const metadata = { ...scan(), rootPath: unusualRoot }
+  const rootEntry = { ...root(), path: unusualRoot }
+  const entry = { ...file(), name, path: join(unusualRoot, name) }
+  db.insertScan(metadata)
+  db.insertEntry(rootEntry)
+  db.insertEntry(entry)
+  for (const [id, name] of [
+    ['bmp', '\ue000'],
+    ['supplementary', '\u{10000}']
+  ]) {
+    db.insertEntry({ ...file('scan-a', id), name, path: join(unusualRoot, name) })
+  }
+  expect(db.getScan('scan-a')).toEqual(metadata)
+  expect(db.getScan("scan-a' OR 1 = 1 --")).toBeNull()
+  expect(db.getEntry('scan-a', 'root')).toEqual(rootEntry)
+  expect(db.getEntry('scan-a', 'file')).toEqual(entry)
+  expect(db.getEntry('scan-a', "file' OR 1 = 1 --")).toBeNull()
+  db.close()
+
+  inspectDatabase((sql) => {
+    expect(
+      sql
+        .prepare('SELECT id FROM entries WHERE id IN (?, ?) ORDER BY name')
+        .all('bmp', 'supplementary')
+    ).toEqual([{ id: 'supplementary' }, { id: 'bmp' }])
+  })
+})
+
+test('rolls back writes to both tables on statement failure and can start a new transaction', () => {
+  const db = open()
+  expect(() =>
+    db.transaction(() => {
+      db.insertScan(scan())
+      db.insertEntry(root())
+      db.insertEntry({ ...file(), parentId: 'missing' })
+    })
+  ).toThrow('FOREIGN KEY constraint failed')
+  expect(db.getScan('scan-a')).toBeNull()
+  expect(db.getEntry('scan-a', 'root')).toBeNull()
+
+  db.transaction(() => {
+    db.insertScan(scan())
+    db.insertEntry(root())
+  })
+  expect(db.getScan('scan-a')).toEqual(scan())
+  expect(db.getEntry('scan-a', 'root')).toEqual(root())
+})
