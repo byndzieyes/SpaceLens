@@ -64,6 +64,10 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().getPublishedScan()
     case 'requirePublishedScan':
       return requireDatabase().requirePublishedScan(request.payload.scanId)
+    case 'getInsightsCategories':
+      return requireDatabase().getInsightsCategories(request.payload.scanId)
+    case 'listInsightsExtensions':
+      return requireDatabase().listInsightsExtensions(request.payload)
     case 'getScanSnapshot':
       return requireDatabase().getScanSnapshot()
     case 'getScanEntry':

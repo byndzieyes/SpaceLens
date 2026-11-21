@@ -1,3 +1,13 @@
+import {
+  INSIGHTS_FILE_CATEGORIES,
+  MAX_INSIGHTS_EXTENSION_PAGE_SIZE,
+  type InsightsCategories,
+  type InsightsCategoryRow,
+  type InsightsExtensionPage,
+  type InsightsExtensionRequest,
+  type InsightsFileBreakdown,
+  type InsightsFileTotals
+} from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
@@ -10,7 +20,12 @@ import {
   type ScanEntryRequest,
   type ScanSnapshotAvailability
 } from '../../shared/snapshot'
-import { readSnapshotId, validateSnapshotRequest, validateTreemapRequest } from './snapshotAccess'
+import {
+  readExtensionRequest,
+  readSnapshotId,
+  validateSnapshotRequest,
+  validateTreemapRequest
+} from './snapshotAccess'
 import {
   integer,
   isScanSummary,
@@ -38,6 +53,11 @@ interface StorageCommands {
   discardBuildingScan: { payload: { scanId: string }; result: null }
   getPublishedScan: { payload: null; result: CompletedScan | null }
   requirePublishedScan: { payload: { scanId: string }; result: CompletedScan }
+  getInsightsCategories: { payload: { scanId: string }; result: InsightsCategories }
+  listInsightsExtensions: {
+    payload: Required<InsightsExtensionRequest>
+    result: InsightsExtensionPage
+  }
   getScanSnapshot: { payload: null; result: ScanSnapshotAvailability }
   getScanEntry: { payload: ScanEntryRequest; result: FileEntry }
   listScanDirectory: { payload: ScanDirectoryRequest; result: ScanDirectoryPage }
@@ -113,7 +133,10 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       if (payload === null) return { requestId, operation, payload }
       break
     case 'requirePublishedScan':
+    case 'getInsightsCategories':
       return { requestId, operation, payload: { scanId: readSnapshotId(payload) } }
+    case 'listInsightsExtensions':
+      return { requestId, operation, payload: readExtensionRequest(payload) }
     case 'getScanEntry': {
       const request = payload as ScanEntryRequest
       validateSnapshotRequest(request, false)
@@ -259,6 +282,70 @@ function isDirectoryTreemap(value: unknown): value is ScanDirectoryTreemap {
   )
 }
 
+function isFileTotals(value: unknown): value is InsightsFileTotals {
+  return (
+    record(value) &&
+    integer(value.fileCount) &&
+    integer(value.knownBytes) &&
+    integer(value.unknownSizeCount) &&
+    value.unknownSizeCount <= value.fileCount
+  )
+}
+
+function isCategoryRow(value: unknown): value is InsightsCategoryRow {
+  return (
+    record(value) &&
+    INSIGHTS_FILE_CATEGORIES.some((category) => category === value.category) &&
+    isFileTotals(value) &&
+    value.fileCount > 0
+  )
+}
+
+function isFileBreakdown(value: unknown): value is InsightsFileBreakdown {
+  return (
+    record(value) &&
+    isSnapshotId(value.scanId) &&
+    typeof value.incomplete === 'boolean' &&
+    isFileTotals(value.totals) &&
+    (value.incomplete || value.totals.unknownSizeCount === 0)
+  )
+}
+
+function isInsightsCategories(value: unknown): value is InsightsCategories {
+  if (!record(value) || !isFileBreakdown(value)) return false
+  const { categories } = value
+  return (
+    Array.isArray(categories) &&
+    categories.length <= INSIGHTS_FILE_CATEGORIES.length &&
+    Array.from(categories).every(isCategoryRow) &&
+    new Set(categories.map(({ category }: InsightsCategoryRow) => category)).size ===
+      categories.length
+  )
+}
+
+function isInsightsExtensionPage(value: unknown): value is InsightsExtensionPage {
+  if (!record(value) || !isFileBreakdown(value)) return false
+  const { extensions, totalCount, nextOffset } = value
+  return (
+    integer(totalCount) &&
+    totalCount <= value.totals.fileCount &&
+    Array.isArray(extensions) &&
+    extensions.length <= Math.min(MAX_INSIGHTS_EXTENSION_PAGE_SIZE, totalCount) &&
+    (nextOffset === null ||
+      (integer(nextOffset) &&
+        nextOffset >= extensions.length &&
+        nextOffset < totalCount &&
+        extensions.length > 0)) &&
+    Array.from(extensions).every(
+      (row) =>
+        record(row) &&
+        (row.extension === null ||
+          (typeof row.extension === 'string' && row.extension.length > 0)) &&
+        isCategoryRow(row)
+    )
+  )
+}
+
 const resultValidators: { [T in StorageOperation]: (value: unknown) => value is StorageResult<T> } =
   {
     initialize: isNull,
@@ -270,6 +357,8 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     getPublishedScan: (value): value is CompletedScan | null =>
       value === null || isCompletedScan(value),
     requirePublishedScan: isCompletedScan,
+    getInsightsCategories: isInsightsCategories,
+    listInsightsExtensions: isInsightsExtensionPage,
     getScanSnapshot: isSnapshotAvailability,
     getScanEntry: isStorageEntry,
     listScanDirectory: isDirectoryPage,

@@ -1,4 +1,9 @@
 import {
+  DEFAULT_INSIGHTS_EXTENSION_PAGE_SIZE,
+  MAX_INSIGHTS_EXTENSION_PAGE_SIZE,
+  type InsightsExtensionRequest
+} from '../../shared/insights'
+import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
   MAX_SCAN_TREEMAP_ENTRIES,
   type ScanDirectoryRequest,
@@ -28,6 +33,32 @@ export function readSnapshotId(request: unknown): string {
     return request.scanId
   }
   throw new SnapshotAccessError('INVALID_REQUEST', 'A valid snapshot scan ID is required.')
+}
+
+export function readExtensionRequest(request: unknown): Required<InsightsExtensionRequest> {
+  if (
+    record(request) &&
+    Object.keys(request).every((key) => key === 'scanId' || key === 'offset' || key === 'limit') &&
+    Object.hasOwn(request, 'scanId') &&
+    isSnapshotId(request.scanId)
+  ) {
+    const offset = Object.hasOwn(request, 'offset') ? request.offset : 0
+    const limit = Object.hasOwn(request, 'limit')
+      ? request.limit
+      : DEFAULT_INSIGHTS_EXTENSION_PAGE_SIZE
+    if (
+      integer(offset) &&
+      integer(limit) &&
+      limit >= 1 &&
+      limit <= MAX_INSIGHTS_EXTENSION_PAGE_SIZE
+    ) {
+      return { scanId: request.scanId, offset, limit }
+    }
+  }
+  throw new SnapshotAccessError(
+    'INVALID_REQUEST',
+    `A scan ID and pagination with a limit from 1 to ${MAX_INSIGHTS_EXTENSION_PAGE_SIZE} are required.`
+  )
 }
 
 /** Shared by Main callers and IPC; exact keys prevent accidental path-based requests. */

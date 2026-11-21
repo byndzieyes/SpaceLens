@@ -15,3 +15,61 @@ export interface InsightsSummary {
   /** Known totals may be partial because the scan recorded filesystem errors. */
   readonly incomplete: boolean
 }
+
+export const INSIGHTS_FILE_CATEGORIES = [
+  'images',
+  'videos',
+  'audio',
+  'documents',
+  'archives',
+  'code',
+  'applications',
+  'other'
+] as const
+
+export type InsightsFileCategory = (typeof INSIGHTS_FILE_CATEGORIES)[number]
+
+export interface InsightsFileTotals {
+  readonly fileCount: number
+  /** Sum of known logical file sizes, in bytes. */
+  readonly knownBytes: number
+  /** Included in fileCount, independently of known zero-byte files. */
+  readonly unknownSizeCount: number
+}
+
+export interface InsightsCategoryRow extends InsightsFileTotals {
+  readonly category: InsightsFileCategory
+}
+
+export interface InsightsFileBreakdown {
+  readonly scanId: string
+  /** Includes filesystem errors that may not correspond to a counted file. */
+  readonly incomplete: boolean
+  /** Scan-wide regular-file totals, including groups outside the current page. */
+  readonly totals: InsightsFileTotals
+}
+
+export interface InsightsCategories extends InsightsFileBreakdown {
+  readonly categories: readonly InsightsCategoryRow[]
+}
+
+export const DEFAULT_INSIGHTS_EXTENSION_PAGE_SIZE = 50
+export const MAX_INSIGHTS_EXTENSION_PAGE_SIZE = 100
+
+export interface InsightsExtensionRequest extends InsightsRequest {
+  /** Defaults to zero. */
+  readonly offset?: number
+  /** Defaults to 50, up to 100 groups per page. */
+  readonly limit?: number
+}
+
+export interface InsightsExtensionRow extends InsightsCategoryRow {
+  /** Lowercase suffix without the dot. Null means the filename has no extension. */
+  readonly extension: string | null
+}
+
+export interface InsightsExtensionPage extends InsightsFileBreakdown {
+  readonly extensions: readonly InsightsExtensionRow[]
+  readonly totalCount: number
+  readonly nextOffset: number | null
+}

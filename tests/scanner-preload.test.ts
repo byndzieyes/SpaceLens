@@ -35,11 +35,13 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   expect(Object.keys(api).sort()).toEqual([
     'cancelScan',
     'getAppInfo',
+    'getInsightsCategories',
     'getInsightsSummary',
     'getScanDirectoryTreemap',
     'getScanEntry',
     'getScanSnapshot',
     'getScanState',
+    'listInsightsExtensions',
     'listScanDirectory',
     'onScanStateChanged',
     'selectScanDirectory',
@@ -83,6 +85,15 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   expect(await api.getInsightsSummary({ scanId: 'scan' })).toBe(response)
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(10, IPC_CHANNELS.getInsightsSummary, {
     scanId: 'scan'
+  })
+  expect(await api.getInsightsCategories({ scanId: 'scan' })).toBe(response)
+  expect(await api.listInsightsExtensions({ scanId: 'scan', offset: 50 })).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(11, IPC_CHANNELS.getInsightsCategories, {
+    scanId: 'scan'
+  })
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(12, IPC_CHANNELS.listInsightsExtensions, {
+    scanId: 'scan',
+    offset: 50
   })
 })
 

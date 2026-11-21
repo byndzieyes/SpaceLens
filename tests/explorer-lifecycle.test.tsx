@@ -167,6 +167,8 @@ function mockApp(): {
   const api: Mocked<SpaceLensAPI> = {
     getAppInfo: vi.fn<SpaceLensAPI['getAppInfo']>(),
     getInsightsSummary: vi.fn<SpaceLensAPI['getInsightsSummary']>(),
+    getInsightsCategories: vi.fn(),
+    listInsightsExtensions: vi.fn(),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: state })),
     getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
       ok: true,

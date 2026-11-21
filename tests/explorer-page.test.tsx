@@ -12,6 +12,8 @@ const api: SpaceLensAPI = {
   listScanDirectory: vi.fn(),
   getScanDirectoryTreemap: vi.fn(),
   getInsightsSummary: vi.fn(),
+  getInsightsCategories: vi.fn(),
+  listInsightsExtensions: vi.fn(),
   onScanStateChanged: vi.fn(() => () => {}),
   selectScanDirectory: vi.fn(),
   startScan: vi.fn(),

@@ -1,4 +1,10 @@
-import type { InsightsRequest, InsightsSummary } from './insights'
+import type {
+  InsightsCategories,
+  InsightsExtensionPage,
+  InsightsExtensionRequest,
+  InsightsRequest,
+  InsightsSummary
+} from './insights'
 import type { FileEntry, RecentScanSummary, ScanSessionState } from './scan'
 import type {
   ScanDirectoryPage,
@@ -28,6 +34,10 @@ export interface SpaceLensAPI {
     request: ScanDirectoryTreemapRequest
   ) => Promise<ScannerIpcResult<ScanDirectoryTreemap>>
   getInsightsSummary: (request: InsightsRequest) => Promise<ScannerIpcResult<InsightsSummary>>
+  getInsightsCategories: (request: InsightsRequest) => Promise<ScannerIpcResult<InsightsCategories>>
+  listInsightsExtensions: (
+    request: InsightsExtensionRequest
+  ) => Promise<ScannerIpcResult<InsightsExtensionPage>>
   cancelScan: (request: CancelScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
   onScanStateChanged: (callback: (snapshot: ScanStateSnapshot) => void) => () => void
 }
@@ -42,6 +52,8 @@ export const IPC_CHANNELS = {
   listScanDirectory: 'spacelens:list-scan-directory',
   getScanDirectoryTreemap: 'spacelens:get-scan-directory-treemap',
   getInsightsSummary: 'spacelens:get-insights-summary',
+  getInsightsCategories: 'spacelens:get-insights-categories',
+  listInsightsExtensions: 'spacelens:list-insights-extensions',
   cancelScan: 'spacelens:cancel-scan',
   scanStateChanged: 'spacelens:scan-state-changed',
   acknowledgeScanState: 'spacelens:acknowledge-scan-state'

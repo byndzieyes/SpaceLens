@@ -363,14 +363,16 @@ test('coordinates a real Worker after startup and prioritizes publication over E
   const { signal } = new AbortController()
   const release = Promise.withResolvers<void>()
   const received = Promise.withResolvers<void>()
-  const direct = client.getScanSnapshot.bind(client)
-  const metadata = vi.spyOn(client, 'getScanSnapshot').mockImplementationOnce(async () => {
-    const snapshot = await direct()
-    received.resolve()
-    await release.promise
-    return snapshot
-  })
-  const oldRead = storage.read(signal, (db) => db.getScanSnapshot())
+  const direct = client.getInsightsCategories.bind(client)
+  const metadata = vi
+    .spyOn(client, 'getInsightsCategories')
+    .mockImplementationOnce(async (scanId) => {
+      const snapshot = await direct(scanId)
+      received.resolve()
+      await release.promise
+      return snapshot
+    })
+  const oldRead = insights.getCategories({ scanId: 'previous' }, signal)
   try {
     await client.initialize(databasePath)
     await client.recoverStorage()
@@ -391,17 +393,28 @@ test('coordinates a real Worker after startup and prioritizes publication over E
       code: 'SNAPSHOT_EXPIRED'
     })
     const nextSummary = insights.getSummary({ scanId: next.id }, signal)
+    const expiredExtensions = expect(
+      insights.listExtensions({ scanId: old.id }, signal)
+    ).rejects.toMatchObject({
+      code: 'SNAPSHOT_EXPIRED'
+    })
+    const nextExtensions = insights.listExtensions({ scanId: next.id }, signal)
     const page = storage.read(signal, (db) =>
       db.listScanDirectory({ scanId: next.id, entryId: root.id, offset: 0, limit: 100 })
     )
     const publish = storage.publishScan(next, root.id)
     release.resolve()
-    expect((await oldRead).snapshot?.entries.scanId).toBe(old.id)
+    expect((await oldRead).scanId).toBe(old.id)
     await publish
     await oldEntry
     await expiredSummary
+    await expiredExtensions
     expect((await nextSnapshot).snapshot?.entries.scanId).toBe(next.id)
     expect(await nextSummary).toMatchObject({ scanId: next.id, summary: next.summary })
+    expect(await nextExtensions).toMatchObject({
+      scanId: next.id,
+      extensions: [{ extension: 'txt' }]
+    })
     expect(await page).toMatchObject({ scanId: next.id, totalCount: 1, nextOffset: null })
   } finally {
     storage.stopReads()
@@ -530,11 +543,19 @@ test('reads exact Insights summaries from published rows across cancellation, re
   await expect(insights.getSummary(request, signal)).rejects.toMatchObject({
     code: 'SNAPSHOT_UNAVAILABLE'
   })
+  await expect(insights.getCategories(request, signal)).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
   await storage.beginScan(previous)
   await expect(insights.getSummary(request, signal)).rejects.toMatchObject({
     code: 'SNAPSHOT_UNAVAILABLE'
   })
   await expect(client.requirePublishedScan('wrong/id')).rejects.toMatchObject({
+    code: 'INVALID_REQUEST'
+  })
+  await expect(
+    client.listInsightsExtensions({ ...request, offset: 0, limit: 101 })
+  ).rejects.toMatchObject({
     code: 'INVALID_REQUEST'
   })
 
@@ -580,12 +601,32 @@ test('reads exact Insights summaries from published rows across cancellation, re
     incomplete: true
   }
   const interrupted = lifecycleScan('interrupted')
+  const totals = { fileCount: 2, unknownSizeCount: 1, knownBytes: Number.MAX_SAFE_INTEGER }
+  const expectedCategories = {
+    scanId: previous.id,
+    incomplete: true,
+    totals,
+    categories: [{ category: 'documents', ...totals }]
+  }
+  const expectedExtensions = {
+    scanId: previous.id,
+    incomplete: true,
+    totals,
+    totalCount: 1,
+    nextOffset: null,
+    extensions: [{ extension: 'txt', category: 'documents', ...totals }]
+  }
   await storage.beginScan(interrupted)
+  await expect(insights.getCategories(request, signal)).resolves.toEqual(expectedCategories)
+  await expect(insights.listExtensions({ scanId: interrupted.id }, signal)).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
   await expect(insights.getSummary(request, signal)).resolves.toEqual(expected)
   await expect(insights.getSummary({ scanId: interrupted.id }, signal)).rejects.toMatchObject({
     code: 'SNAPSHOT_UNAVAILABLE'
   })
   await storage.discardBuildingScan(interrupted.id)
+  await expect(insights.listExtensions(request, signal)).resolves.toEqual(expectedExtensions)
   await expect(insights.getSummary(request, signal)).resolves.toEqual(expected)
   await expect(client.getScan(previous.id)).resolves.toEqual(completed)
   await expect(
@@ -609,6 +650,12 @@ test('reads exact Insights summaries from published rows across cancellation, re
     await reopened.recoverStorage()
     ready.resolve(reopened)
     await expect(duringStartup).resolves.toEqual(expected)
+    await expect(restoredInsights.getCategories(request, signal)).resolves.toEqual(
+      expectedCategories
+    )
+    await expect(restoredInsights.listExtensions(request, signal)).resolves.toEqual(
+      expectedExtensions
+    )
     await expect(reopened.getScan(interrupted.id)).resolves.toBeNull()
 
     const replacement = lifecycleScan('replacement')
@@ -623,6 +670,17 @@ test('reads exact Insights summaries from published rows across cancellation, re
       { type: 'directory-finalized', entry: { ...emptyRoot, aggregatedSizeBytes: 0 } }
     ])
     await restoredStorage.publishScan(empty, emptyRoot.id)
+    await expect(restoredInsights.getCategories(request, signal)).rejects.toMatchObject({
+      code: 'SNAPSHOT_EXPIRED'
+    })
+    await expect(
+      restoredInsights.listExtensions({ scanId: replacement.id }, signal)
+    ).resolves.toMatchObject({
+      scanId: replacement.id,
+      totalCount: 0,
+      nextOffset: null,
+      extensions: []
+    })
     await expect(restoredInsights.getSummary(request, signal)).rejects.toMatchObject({
       code: 'SNAPSHOT_EXPIRED'
     })
@@ -727,7 +785,7 @@ test('queries published Explorer snapshots through the Worker and returns struct
   })
 })
 
-test('returns bounded pages and Treemap data for a directory with more than 100,000 children', async () => {
+test('bounds Explorer and Insights results for a directory with more than 100,000 children', async () => {
   const pending = lifecycleScan('wide')
   const count = 100_017
   const totalBytes = (count * (count - 1)) / 2
@@ -795,6 +853,19 @@ test('returns bounded pages and Treemap data for a directory with more than 100,
       zeroCount: 1,
       unknownCount: 0
     }
+  })
+  const totals = { fileCount: count, knownBytes: totalBytes, unknownSizeCount: 0 }
+  await expect(client.getInsightsCategories(pending.id)).resolves.toMatchObject({
+    totals,
+    categories: [{ category: 'other', ...totals }]
+  })
+  await expect(
+    client.listInsightsExtensions({ scanId: pending.id, offset: 0, limit: 1 })
+  ).resolves.toMatchObject({
+    totals,
+    totalCount: 1,
+    nextOffset: null,
+    extensions: [{ extension: null, ...totals }]
   })
 }, 15_000)
 

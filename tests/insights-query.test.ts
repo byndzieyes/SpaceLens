@@ -14,6 +14,8 @@ import type { ScannerIpcResult, SpaceLensAPI } from '../src/shared/ipc'
 
 const queries = {
   requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
+  getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
+  listInsightsExtensions: vi.fn<StorageWorkerClient['listInsightsExtensions']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
@@ -41,6 +43,8 @@ const completed: CompletedScan = {
 beforeEach(() => {
   read.mockClear()
   queries.requirePublishedScan.mockReset()
+  queries.getInsightsCategories.mockReset()
+  queries.listInsightsExtensions.mockReset()
 })
 
 test('the public Insights method uses the shared request and structured result', () => {
@@ -122,6 +126,92 @@ test('scoped Worker replies require a completed scan and exact numeric metadata'
     { ...completed, summary: { ...completed.summary, fileCount: null } }
   ]) {
     expect(() => parseStorageResponse({ ...reply, result }, 1, 'requirePublishedScan')).toThrow(
+      'Invalid response'
+    )
+  }
+})
+
+test('dispatches categories and normalizes extension page defaults within the shared read lane', async () => {
+  const result = {
+    scanId: request.scanId,
+    incomplete: false,
+    totals: { fileCount: 0, knownBytes: 0, unknownSizeCount: 0 }
+  }
+  const categories = { ...result, categories: [] }
+  const extensions = { ...result, extensions: [], totalCount: 0, nextOffset: null }
+  queries.getInsightsCategories.mockResolvedValueOnce(categories)
+  queries.listInsightsExtensions.mockResolvedValueOnce(extensions)
+  queries.listInsightsExtensions.mockResolvedValueOnce(extensions)
+  await expect(insights.getCategories(request, signal)).resolves.toBe(categories)
+  await expect(insights.listExtensions(request, signal)).resolves.toBe(extensions)
+  await expect(insights.listExtensions({ ...request, limit: 100 }, signal)).resolves.toBe(
+    extensions
+  )
+  expect(queries.getInsightsCategories).toHaveBeenCalledExactlyOnceWith(request.scanId)
+  expect(queries.listInsightsExtensions).toHaveBeenNthCalledWith(1, {
+    ...request,
+    offset: 0,
+    limit: 50
+  })
+  expect(queries.listInsightsExtensions).toHaveBeenNthCalledWith(2, {
+    ...request,
+    offset: 0,
+    limit: 100
+  })
+  expect(read.mock.calls).toEqual([[signal], [signal], [signal]])
+})
+
+test('rejects invalid pagination before enqueuing and refuses a different publication', async () => {
+  for (const invalid of [
+    { ...request, offset: -1 },
+    { ...request, offset: 1.5 },
+    { ...request, offset: Number.MAX_SAFE_INTEGER + 1 },
+    { ...request, limit: 0 },
+    { ...request, limit: 101 },
+    { ...request, limit: undefined },
+    { ...request, limit: '10' },
+    { ...request, offset: Infinity },
+    { ...request, entryId: 'directory' }
+  ]) {
+    await expect(insights.listExtensions(invalid, signal)).rejects.toMatchObject({
+      code: 'INVALID_REQUEST'
+    })
+  }
+  expect(read).not.toHaveBeenCalled()
+  queries.getInsightsCategories.mockResolvedValueOnce({
+    scanId: 'replacement',
+    incomplete: false,
+    totals: { fileCount: 0, knownBytes: 0, unknownSizeCount: 0 },
+    categories: []
+  })
+  await expect(insights.getCategories(request, signal)).rejects.toThrow('different publication')
+})
+
+test('Worker replies reject unsafe counts and oversized extension pages', () => {
+  const totals = { fileCount: 1, knownBytes: Number.MAX_SAFE_INTEGER, unknownSizeCount: 0 }
+  const group = { ...totals, extension: null, category: 'other' }
+  const page = {
+    scanId: request.scanId,
+    incomplete: false,
+    totals,
+    extensions: [group],
+    totalCount: 1,
+    nextOffset: null
+  }
+  const reply = { requestId: 1, ok: true, result: page }
+  expect(parseStorageResponse(reply, 1, 'listInsightsExtensions')).toEqual(reply)
+  for (const result of [
+    { ...page, totals: { ...totals, knownBytes: Number.MAX_SAFE_INTEGER + 1 } },
+    { ...page, extensions: [{ ...group, unknownSizeCount: 2 }] },
+    {
+      ...page,
+      totals: { ...totals, fileCount: 101 },
+      totalCount: 101,
+      extensions: Array(101).fill(group)
+    },
+    { ...page, extensions: [{ ...group, category: 'unsupported' }] }
+  ]) {
+    expect(() => parseStorageResponse({ ...reply, result }, 1, 'listInsightsExtensions')).toThrow(
       'Invalid response'
     )
   }

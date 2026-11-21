@@ -53,6 +53,8 @@ let dispose: ReturnType<typeof vi.fn>
 let unsubscribe: ReturnType<typeof vi.fn>
 const queries = {
   requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
+  getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
+  listInsightsExtensions: vi.fn<StorageWorkerClient['listInsightsExtensions']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
@@ -281,7 +283,9 @@ test.each([
   IPC_CHANNELS.getScanEntry,
   IPC_CHANNELS.listScanDirectory,
   IPC_CHANNELS.getScanDirectoryTreemap,
-  IPC_CHANNELS.getInsightsSummary
+  IPC_CHANNELS.getInsightsSummary,
+  IPC_CHANNELS.getInsightsCategories,
+  IPC_CHANNELS.listInsightsExtensions
 ])(
   'rejects foreign senders, subframes, navigated documents, and shutdown on %s',
   async (channel) => {
@@ -302,6 +306,8 @@ test.each([
     expect(queries.listScanDirectory).not.toHaveBeenCalled()
     expect(queries.getScanDirectoryTreemap).not.toHaveBeenCalled()
     expect(queries.requirePublishedScan).not.toHaveBeenCalled()
+    expect(queries.getInsightsCategories).not.toHaveBeenCalled()
+    expect(queries.listInsightsExtensions).not.toHaveBeenCalled()
   }
 )
 
@@ -469,6 +475,56 @@ test('preserves Insights storage errors and hides other database diagnostics', a
   expect(await query()).toEqual({
     ok: false,
     error: { code: 'INTERNAL_ERROR', message: 'The snapshot request could not be processed.' }
+  })
+})
+
+test('validates file analytics requests, bounds extension pages and preserves overflow errors', async () => {
+  const categoryArgs = { scanId: id }
+  const extensionArgs = { scanId: id, offset: 10, limit: 100 }
+  const categoryChannel = IPC_CHANNELS.getInsightsCategories
+  const extensionChannel = IPC_CHANNELS.listInsightsExtensions
+  expect(await invoke(categoryChannel, [{ ...categoryArgs, limit: 10 }])).toMatchObject({
+    ok: false,
+    error: { code: 'INVALID_REQUEST' }
+  })
+  for (const args of [
+    [{ ...extensionArgs, offset: -1 }],
+    [{ ...extensionArgs, limit: 101 }],
+    [{ ...extensionArgs, path: rootPath }],
+    [extensionArgs, 'extra']
+  ]) {
+    expect(await invoke(extensionChannel, args)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+  }
+  expect(queries.getInsightsCategories).not.toHaveBeenCalled()
+  expect(queries.listInsightsExtensions).not.toHaveBeenCalled()
+  const common = {
+    scanId: id,
+    incomplete: false,
+    totals: { fileCount: 0, knownBytes: 0, unknownSizeCount: 0 }
+  }
+  const categories = { ...common, categories: [] }
+  const page = { ...common, extensions: [], totalCount: 0, nextOffset: null }
+  queries.getInsightsCategories.mockResolvedValueOnce(categories)
+  queries.listInsightsExtensions.mockResolvedValueOnce(page)
+  expect(await invoke(categoryChannel, [categoryArgs])).toEqual({ ok: true, value: categories })
+  expect(await invoke(extensionChannel, [extensionArgs])).toEqual({ ok: true, value: page })
+  expect(queries.getInsightsCategories).toHaveBeenCalledExactlyOnceWith(id)
+  expect(queries.listInsightsExtensions).toHaveBeenCalledExactlyOnceWith(extensionArgs)
+
+  queries.listInsightsExtensions.mockRejectedValueOnce(
+    new StorageWorkerError({
+      name: 'SnapshotAccessError',
+      code: 'SIZE_OVERFLOW',
+      message: 'Size is out of range',
+      sqliteCode: null
+    })
+  )
+  expect(await invoke(extensionChannel, [categoryArgs])).toEqual({
+    ok: false,
+    error: { code: 'SIZE_OVERFLOW', message: 'Size is out of range' }
   })
 })
 
@@ -821,7 +877,9 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.listenerCount(IPC_CHANNELS.acknowledgeScanState)).toBe(0)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getScanDirectoryTreemap)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsSummary)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(9)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsCategories)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsExtensions)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(11)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

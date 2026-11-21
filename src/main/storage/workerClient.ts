@@ -1,4 +1,9 @@
 import type { Worker } from 'node:worker_threads'
+import type {
+  InsightsCategories,
+  InsightsExtensionPage,
+  InsightsExtensionRequest
+} from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import type {
   ScanDirectoryPage,
@@ -99,6 +104,16 @@ export class StorageWorkerClient {
 
   requirePublishedScan(scanId: string): Promise<CompletedScan> {
     return this.run('requirePublishedScan', { scanId })
+  }
+
+  getInsightsCategories(scanId: string): Promise<InsightsCategories> {
+    return this.run('getInsightsCategories', { scanId })
+  }
+
+  listInsightsExtensions(
+    request: Required<InsightsExtensionRequest>
+  ): Promise<InsightsExtensionPage> {
+    return this.run('listInsightsExtensions', request)
   }
 
   getScanSnapshot(): Promise<ScanSnapshotAvailability> {

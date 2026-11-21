@@ -15,6 +15,8 @@ type SnapshotQueries = Pick<
   | 'listScanDirectory'
   | 'getScanDirectoryTreemap'
   | 'requirePublishedScan'
+  | 'getInsightsCategories'
+  | 'listInsightsExtensions'
 >
 
 /** A request that could not be sent, or a read whose reply can no longer be used. */

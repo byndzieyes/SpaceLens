@@ -1,5 +1,9 @@
 import { DatabaseSync, type SQLOutputValue, type StatementSync } from 'node:sqlite'
-import { types } from 'node:util'
+import type {
+  InsightsCategories,
+  InsightsExtensionPage,
+  InsightsExtensionRequest
+} from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
   MAX_SCAN_TREEMAP_ENTRIES,
@@ -11,6 +15,7 @@ import {
   type ScanSnapshotAvailability
 } from '../../shared/snapshot'
 import {
+  readExtensionRequest,
   SnapshotAccessError,
   validateSnapshotRequest,
   validateTreemapRequest
@@ -27,6 +32,8 @@ import {
 } from './payloads'
 import { prepareSnapshotValidation } from './publication'
 import { initializeSchema } from './schema'
+import { FileTypeAnalytics } from './fileTypeAnalytics'
+import { bindFilesystemText, readFilesystemText } from './filesystemText'
 
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
 const SELECT_SCAN = `
@@ -65,19 +72,6 @@ function readInteger(value: SQLOutputValue, column: string): number {
 function readText(value: SQLOutputValue, column: string): string {
   if (typeof value !== 'string') throw new TypeError(`Stored ${column} must be text.`)
   return value
-}
-
-// Big-endian UTF-16 BLOBs preserve every filesystem code unit, including lone surrogates.
-// SQLite's byte ordering for these names also matches the existing UTF-16 ordering contract.
-function bindFilesystemText(value: string): Buffer {
-  return Buffer.from(value, 'utf16le').swap16()
-}
-
-function readFilesystemText(value: SQLOutputValue, column: string): string {
-  if (!types.isUint8Array(value) || value.byteLength % 2 !== 0) {
-    throw new TypeError(`Stored ${column} must be a UTF-16 BLOB.`)
-  }
-  return Buffer.from(value).swap16().toString('utf16le')
 }
 
 function readScan(row: Record<string, SQLOutputValue>): ScanSession {
@@ -171,6 +165,7 @@ function inTransaction(connection: DatabaseSync, operation: () => undefined): vo
 /** Owns one synchronous connection. Construct and close it on the same thread. */
 export class ScanDatabase {
   private readonly connection: DatabaseSync
+  private readonly fileTypes: FileTypeAnalytics
   private readonly insertScanStatement: StatementSync
   private readonly selectScanStatement: StatementSync
   private readonly selectPublishedStatement: StatementSync
@@ -205,6 +200,7 @@ export class ScanDatabase {
         throw new Error('SQLite foreign-key enforcement is unavailable.')
       }
       inTransaction(this.connection, () => initializeSchema(this.connection))
+      this.fileTypes = new FileTypeAnalytics(this.connection)
 
       this.insertScanStatement = this.connection.prepare(`
         INSERT INTO scans (
@@ -556,6 +552,15 @@ export class ScanDatabase {
               zeroCount: readInteger(counts.other_zero_count, 'other.zeroCount')
             }
     }
+  }
+
+  getInsightsCategories(scanId: string): InsightsCategories {
+    return this.fileTypes.getCategories(this.requirePublishedScan(scanId))
+  }
+
+  listInsightsExtensions(request: InsightsExtensionRequest): InsightsExtensionPage {
+    const page = readExtensionRequest(request)
+    return this.fileTypes.listExtensions(this.requirePublishedScan(page.scanId), page)
   }
 
   requirePublishedScan(scanId: string): CompletedScan {

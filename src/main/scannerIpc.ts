@@ -314,7 +314,9 @@ export function registerScannerIpc(
     IPC_CHANNELS.getScanEntry,
     IPC_CHANNELS.listScanDirectory,
     IPC_CHANNELS.getScanDirectoryTreemap,
-    IPC_CHANNELS.getInsightsSummary
+    IPC_CHANNELS.getInsightsSummary,
+    IPC_CHANNELS.getInsightsCategories,
+    IPC_CHANNELS.listInsightsExtensions
   ] as const
   for (const channel of readChannels) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
@@ -325,7 +327,9 @@ export function registerScannerIpc(
         signal.aborted || !authorized(event)
           ? failure(
               'UNAVAILABLE',
-              channel === IPC_CHANNELS.getInsightsSummary
+              channel === IPC_CHANNELS.getInsightsSummary ||
+                channel === IPC_CHANNELS.getInsightsCategories ||
+                channel === IPC_CHANNELS.listInsightsExtensions
                 ? 'The Insights context is no longer available.'
                 : 'The Explorer context is no longer available.'
             )
@@ -341,6 +345,14 @@ export function registerScannerIpc(
           return failure('INVALID_REQUEST', 'One snapshot request is required.')
         if (channel === IPC_CHANNELS.getInsightsSummary) {
           const value = await insights.getSummary(args[0], signal)
+          return reply({ ok: true, value })
+        }
+        if (channel === IPC_CHANNELS.getInsightsCategories) {
+          const value = await insights.getCategories(args[0], signal)
+          return reply({ ok: true, value })
+        }
+        if (channel === IPC_CHANNELS.listInsightsExtensions) {
+          const value = await insights.listExtensions(args[0], signal)
           return reply({ ok: true, value })
         }
         if (channel === IPC_CHANNELS.getScanDirectoryTreemap) {

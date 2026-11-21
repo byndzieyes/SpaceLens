@@ -78,6 +78,8 @@ beforeEach(() => {
     listScanDirectory: vi.fn(),
     getScanDirectoryTreemap: vi.fn(),
     getInsightsSummary: vi.fn(),
+    getInsightsCategories: vi.fn(),
+    listInsightsExtensions: vi.fn(),
     onScanStateChanged: vi.fn((listener) => {
       listeners.add(listener)
       return () => {
