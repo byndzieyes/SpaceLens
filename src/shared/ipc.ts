@@ -2,6 +2,7 @@ import type {
   InsightsCategories,
   InsightsExtensionPage,
   InsightsExtensionRequest,
+  InsightsObservations,
   InsightsRankingPage,
   InsightsRankingRequest,
   InsightsRequest,
@@ -41,6 +42,9 @@ export interface SpaceLensAPI {
   getInsightsSizeDistribution: (
     request: InsightsRequest
   ) => Promise<ScannerIpcResult<InsightsSizeDistribution>>
+  getInsightsObservations: (
+    request: InsightsRequest
+  ) => Promise<ScannerIpcResult<InsightsObservations>>
   listInsightsExtensions: (
     request: InsightsExtensionRequest
   ) => Promise<ScannerIpcResult<InsightsExtensionPage>>
@@ -66,6 +70,7 @@ export const IPC_CHANNELS = {
   getInsightsSummary: 'spacelens:get-insights-summary',
   getInsightsCategories: 'spacelens:get-insights-categories',
   getInsightsSizeDistribution: 'spacelens:get-insights-size-distribution',
+  getInsightsObservations: 'spacelens:get-insights-observations',
   listInsightsExtensions: 'spacelens:list-insights-extensions',
   listInsightsLargestFiles: 'spacelens:list-insights-largest-files',
   listInsightsLargestDirectories: 'spacelens:list-insights-largest-directories',

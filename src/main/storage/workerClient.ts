@@ -3,6 +3,7 @@ import type {
   InsightsCategories,
   InsightsExtensionPage,
   InsightsExtensionRequest,
+  InsightsObservations,
   InsightsRankingPage,
   InsightsRankingRequest,
   InsightsSizeDistribution
@@ -115,6 +116,10 @@ export class StorageWorkerClient {
 
   getInsightsSizeDistribution(scanId: string): Promise<InsightsSizeDistribution> {
     return this.run('getInsightsSizeDistribution', { scanId })
+  }
+
+  getInsightsObservations(scanId: string): Promise<InsightsObservations> {
+    return this.run('getInsightsObservations', { scanId })
   }
 
   listInsightsExtensions(

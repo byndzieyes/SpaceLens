@@ -1,5 +1,6 @@
 import {
   INSIGHTS_FILE_CATEGORIES,
+  INSIGHTS_OBSERVATION_TYPES,
   INSIGHTS_RANKING_LIMIT,
   INSIGHTS_SIZE_BUCKETS,
   MAX_INSIGHTS_EXTENSION_PAGE_SIZE,
@@ -9,6 +10,7 @@ import {
   type InsightsExtensionRequest,
   type InsightsFileBreakdown,
   type InsightsFileTotals,
+  type InsightsObservations,
   type InsightsRankedEntry,
   type InsightsRankingPage,
   type InsightsRankingRequest,
@@ -62,6 +64,7 @@ interface StorageCommands {
   requirePublishedScan: { payload: { scanId: string }; result: CompletedScan }
   getInsightsCategories: { payload: { scanId: string }; result: InsightsCategories }
   getInsightsSizeDistribution: { payload: { scanId: string }; result: InsightsSizeDistribution }
+  getInsightsObservations: { payload: { scanId: string }; result: InsightsObservations }
   listInsightsExtensions: {
     payload: Required<InsightsExtensionRequest>
     result: InsightsExtensionPage
@@ -151,6 +154,7 @@ export function parseStorageRequest(value: unknown): StorageRequest {
     case 'requirePublishedScan':
     case 'getInsightsCategories':
     case 'getInsightsSizeDistribution':
+    case 'getInsightsObservations':
       return { requestId, operation, payload: { scanId: readSnapshotId(payload) } }
     case 'listInsightsExtensions':
       return { requestId, operation, payload: readExtensionRequest(payload) }
@@ -395,6 +399,79 @@ function isSizeDistribution(value: unknown): value is InsightsSizeDistribution {
   return count === BigInt(knownSizeCount) && bytes === BigInt(totals.knownBytes)
 }
 
+function isByteShare(evidence: Record<string, unknown>): boolean {
+  return (
+    integer(evidence.knownBytes) &&
+    integer(evidence.totalKnownBytes) &&
+    evidence.knownBytes > 0 &&
+    evidence.knownBytes <= evidence.totalKnownBytes
+  )
+}
+
+function isObservationEvidence(type: unknown, evidence: Record<string, unknown>): boolean {
+  switch (type) {
+    case 'incompleteScan':
+      return (
+        integer(evidence.errorCount) &&
+        integer(evidence.unknownSizeCount) &&
+        (evidence.errorCount > 0 || evidence.unknownSizeCount > 0)
+      )
+    case 'largeFileConcentration':
+      return (
+        integer(evidence.fileCount) &&
+        evidence.fileCount > 0 &&
+        evidence.fileCount <= INSIGHTS_RANKING_LIMIT &&
+        isByteShare(evidence)
+      )
+    case 'dominantCategory':
+      return (
+        INSIGHTS_FILE_CATEGORIES.some((category) => category === evidence.category) &&
+        isByteShare(evidence)
+      )
+    case 'directoryConcentration':
+      return isSnapshotId(evidence.entryId) && isByteShare(evidence)
+    case 'smallFilesPrevalence':
+      return (
+        integer(evidence.smallFileCount) &&
+        integer(evidence.knownSizeCount) &&
+        evidence.smallFileCount > 0 &&
+        evidence.smallFileCount <= evidence.knownSizeCount
+      )
+    default:
+      return false
+  }
+}
+
+function isObservations(value: unknown): value is InsightsObservations {
+  if (!record(value)) return false
+  const { scanId, incomplete, observations } = value
+  if (
+    !isSnapshotId(scanId) ||
+    typeof incomplete !== 'boolean' ||
+    !Array.isArray(observations) ||
+    observations.length > INSIGHTS_OBSERVATION_TYPES.length
+  )
+    return false
+
+  let previous = -1
+  for (const observation of Array.from(observations)) {
+    if (
+      !record(observation) ||
+      observation.id !== observation.type ||
+      !nonempty(observation.title) ||
+      !nonempty(observation.message) ||
+      observation.severity !== (observation.type === 'incompleteScan' ? 'warning' : 'info') ||
+      !record(observation.evidence) ||
+      !isObservationEvidence(observation.type, observation.evidence)
+    )
+      return false
+    const position = INSIGHTS_OBSERVATION_TYPES.findIndex((type) => type === observation.type)
+    if (position <= previous) return false
+    previous = position
+  }
+  return incomplete === (observations[0]?.type === 'incompleteScan')
+}
+
 function isRankingPage(
   value: unknown,
   type: InsightsRankedEntry['type']
@@ -445,6 +522,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     requirePublishedScan: isCompletedScan,
     getInsightsCategories: isInsightsCategories,
     getInsightsSizeDistribution: isSizeDistribution,
+    getInsightsObservations: isObservations,
     listInsightsExtensions: isInsightsExtensionPage,
     listInsightsLargestFiles: (value): value is InsightsRankingPage => isRankingPage(value, 'file'),
     listInsightsLargestDirectories: (value): value is InsightsRankingPage =>

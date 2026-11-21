@@ -21,6 +21,7 @@ const queries = {
   requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
   getInsightsSizeDistribution: vi.fn<StorageWorkerClient['getInsightsSizeDistribution']>(),
+  getInsightsObservations: vi.fn<StorageWorkerClient['getInsightsObservations']>(),
   listInsightsExtensions: vi.fn<StorageWorkerClient['listInsightsExtensions']>(),
   listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
   listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
@@ -53,6 +54,7 @@ beforeEach(() => {
   queries.requirePublishedScan.mockReset()
   queries.getInsightsCategories.mockReset()
   queries.getInsightsSizeDistribution.mockReset()
+  queries.getInsightsObservations.mockReset()
   queries.listInsightsExtensions.mockReset()
   queries.listInsightsLargestFiles.mockReset()
   queries.listInsightsLargestDirectories.mockReset()
@@ -155,6 +157,70 @@ function sizeDistribution(): InsightsSizeDistribution {
     }))
   }
 }
+
+test('validates observation scope and returns the ordered exact Worker response', async () => {
+  const query = queries.getInsightsObservations
+  await expect(insights.getObservations({ ...request, offset: 0 }, signal)).rejects.toMatchObject({
+    code: 'INVALID_REQUEST'
+  })
+  expect(query).not.toHaveBeenCalled()
+  const result = { ...request, incomplete: false, observations: [] }
+  query.mockResolvedValueOnce(result)
+  await expect(insights.getObservations(request, signal)).resolves.toBe(result)
+  expect(query).toHaveBeenCalledExactlyOnceWith(request.scanId)
+  expect(read).toHaveBeenCalledExactlyOnceWith(signal)
+  query.mockResolvedValueOnce({ ...result, scanId: 'another' })
+  await expect(insights.getObservations(request, signal)).rejects.toThrow('different publication')
+})
+
+test('rejects observations with incorrect priority, unsafe numbers or inconsistent coverage', () => {
+  const warning = {
+    type: 'incompleteScan',
+    id: 'incompleteScan',
+    severity: 'warning',
+    title: 'Incomplete',
+    message: 'Measured files only.',
+    evidence: { errorCount: 1, unknownSizeCount: 1 }
+  }
+  const directory = {
+    type: 'directoryConcentration',
+    id: 'directoryConcentration',
+    severity: 'info',
+    title: 'Largest non-root',
+    message: 'Recorded logical size.',
+    evidence: { entryId: 'folder', knownBytes: 70, totalKnownBytes: 100 }
+  }
+  const result = { ...request, incomplete: true, observations: [warning, directory] }
+  const reply = { requestId: 1, ok: true, result }
+  expect(parseStorageResponse(reply, 1, 'getInsightsObservations')).toEqual(reply)
+  for (const invalid of [
+    { ...result, incomplete: false },
+    { ...result, observations: [directory, warning] },
+    { ...result, observations: [warning, warning] },
+    { ...result, observations: [warning, { ...directory, id: 'fake' }] },
+    {
+      ...result,
+      observations: [
+        warning,
+        {
+          ...directory,
+          evidence: { ...directory.evidence, totalKnownBytes: Number.MAX_SAFE_INTEGER + 1 }
+        }
+      ]
+    },
+    {
+      ...result,
+      observations: [
+        warning,
+        { ...directory, evidence: { ...directory.evidence, entryId: '../folder' } }
+      ]
+    }
+  ]) {
+    expect(() =>
+      parseStorageResponse({ ...reply, result: invalid }, 1, 'getInsightsObservations')
+    ).toThrow('Invalid response')
+  }
+})
 
 test('validates size distribution requests before dispatch and rejects cross-scan replies', async () => {
   const query = queries.getInsightsSizeDistribution

@@ -4,10 +4,17 @@ import {
   type InsightsCategories,
   type InsightsExtensionPage,
   type InsightsExtensionRequest,
+  type InsightsExtensionRow,
   type InsightsFileBreakdown,
   type InsightsFileTotals
 } from '../../shared/insights'
 import { classifyExtension, normalizedExtension } from '../insights/fileClassification'
+import {
+  ANALYTICS_CACHE_BYTES,
+  CACHED_EXTENSION_BASE_BYTES,
+  CACHED_EXTENSION_ROW_BYTES,
+  MAX_CACHED_EXTENSION_GROUPS
+} from './analyticsCache'
 import { aggregateInteger, readFileAggregateRows } from './fileAggregation'
 import { bindFilesystemText, readFilesystemText } from './filesystemText'
 import type { CompletedScan } from './payloads'
@@ -34,14 +41,21 @@ const INSIGHTS_EXTENSION_SQL = `
   WITH grouped AS MATERIALIZED (
     SELECT spacelens_file_extension(name) AS extension, ${FILE_TOTALS}
     ${FILES_IN_SCAN} GROUP BY extension
-  ), totals AS (
+  ), counts AS (
     SELECT COUNT(*) AS group_count,
            COALESCE(SUM(file_count), 0) AS total_files,
            COALESCE(SUM(known_bytes), 0) AS total_bytes,
-           COALESCE(SUM(unknown_count), 0) AS total_unknown
+           COALESCE(SUM(unknown_count), 0) AS total_unknown,
+           COALESCE(SUM(MIN(COALESCE(length(extension), 0), $cacheBytes + 1)), 0) AS text_bytes
     FROM grouped
+  ), totals AS MATERIALIZED (
+    SELECT *, group_count <= $maxGroups AND
+             $baseBytes + group_count * $rowBytes + text_bytes <= $cacheBytes AS cacheable
+    FROM counts
   ), page AS (
-    SELECT * FROM grouped ORDER BY ${EXTENSION_ORDER} LIMIT $limit OFFSET $offset
+    SELECT * FROM grouped ORDER BY ${EXTENSION_ORDER}
+    LIMIT CASE WHEN (SELECT cacheable FROM totals) THEN $maxGroups ELSE $limit END
+    OFFSET CASE WHEN (SELECT cacheable FROM totals) THEN 0 ELSE $offset END
   )
   SELECT totals.*, page.* FROM totals LEFT JOIN page ON TRUE
   ORDER BY ${EXTENSION_ORDER}
@@ -75,6 +89,23 @@ function breakdown(
   return { scanId: scan.id, incomplete: scan.summary.errorCount > 0, totals }
 }
 
+export interface ExtensionAggregate extends InsightsFileBreakdown {
+  readonly extensions: readonly InsightsExtensionRow[]
+  readonly totalCount: number
+}
+
+export function extensionPage(
+  aggregate: ExtensionAggregate,
+  { offset, limit }: Required<InsightsExtensionRequest>,
+  complete: boolean
+): InsightsExtensionPage {
+  const extensions = complete
+    ? aggregate.extensions.slice(offset, offset + limit)
+    : aggregate.extensions
+  const next = offset + extensions.length
+  return { ...aggregate, extensions, nextOffset: next < aggregate.totalCount ? next : null }
+}
+
 export class FileTypeAnalytics {
   private readonly categories: StatementSync
   private readonly extensions: StatementSync
@@ -105,14 +136,18 @@ export class FileTypeAnalytics {
     }
   }
 
-  listExtensions(
+  readExtensions(
     scan: CompletedScan,
     { offset, limit }: Required<InsightsExtensionRequest>
-  ): InsightsExtensionPage {
+  ): { data: ExtensionAggregate; complete: boolean } {
     const rows = readFileAggregateRows(this.extensions, {
       $scanId: scan.id,
       $limit: BigInt(limit),
-      $offset: BigInt(offset)
+      $offset: BigInt(offset),
+      $maxGroups: BigInt(MAX_CACHED_EXTENSION_GROUPS),
+      $baseBytes: BigInt(CACHED_EXTENSION_BASE_BYTES),
+      $rowBytes: BigInt(CACHED_EXTENSION_ROW_BYTES),
+      $cacheBytes: BigInt(ANALYTICS_CACHE_BYTES)
     })
     const totals = rows[0]
     const totalCount = aggregateInteger(totals.group_count)
@@ -125,12 +160,9 @@ export class FileTypeAnalytics {
               row.extension === null ? null : readFilesystemText(row.extension, 'extension')
             return { extension, category: classifyExtension(extension), ...readGroup(row) }
           })
-    const next = offset + extensions.length
     return {
-      ...breakdown(scan, totals),
-      extensions,
-      totalCount,
-      nextOffset: next < totalCount ? next : null
+      data: { ...breakdown(scan, totals), extensions, totalCount },
+      complete: totals.cacheable === 1n
     }
   }
 }

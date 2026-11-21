@@ -68,6 +68,8 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().getInsightsCategories(request.payload.scanId)
     case 'getInsightsSizeDistribution':
       return requireDatabase().getInsightsSizeDistribution(request.payload.scanId)
+    case 'getInsightsObservations':
+      return requireDatabase().getInsightsObservations(request.payload.scanId)
     case 'listInsightsExtensions':
       return requireDatabase().listInsightsExtensions(request.payload)
     case 'listInsightsLargestFiles':

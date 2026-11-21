@@ -317,6 +317,7 @@ export function registerScannerIpc(
     IPC_CHANNELS.getInsightsSummary,
     IPC_CHANNELS.getInsightsCategories,
     IPC_CHANNELS.getInsightsSizeDistribution,
+    IPC_CHANNELS.getInsightsObservations,
     IPC_CHANNELS.listInsightsExtensions,
     IPC_CHANNELS.listInsightsLargestFiles,
     IPC_CHANNELS.listInsightsLargestDirectories
@@ -333,6 +334,7 @@ export function registerScannerIpc(
               channel === IPC_CHANNELS.getInsightsSummary ||
                 channel === IPC_CHANNELS.getInsightsCategories ||
                 channel === IPC_CHANNELS.getInsightsSizeDistribution ||
+                channel === IPC_CHANNELS.getInsightsObservations ||
                 channel === IPC_CHANNELS.listInsightsExtensions ||
                 channel === IPC_CHANNELS.listInsightsLargestFiles ||
                 channel === IPC_CHANNELS.listInsightsLargestDirectories
@@ -359,6 +361,10 @@ export function registerScannerIpc(
         }
         if (channel === IPC_CHANNELS.getInsightsSizeDistribution) {
           const value = await insights.getSizeDistribution(args[0], signal)
+          return reply({ ok: true, value })
+        }
+        if (channel === IPC_CHANNELS.getInsightsObservations) {
+          const value = await insights.getObservations(args[0], signal)
           return reply({ ok: true, value })
         }
         if (channel === IPC_CHANNELS.listInsightsExtensions) {

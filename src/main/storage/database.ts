@@ -6,7 +6,8 @@ import type {
   InsightsRankedEntry,
   InsightsRankingPage,
   InsightsRankingRequest,
-  InsightsSizeDistribution
+  InsightsSizeDistribution,
+  InsightsObservations
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
@@ -37,10 +38,8 @@ import {
 } from './payloads'
 import { prepareSnapshotValidation } from './publication'
 import { initializeSchema } from './schema'
-import { FileTypeAnalytics } from './fileTypeAnalytics'
-import { prepareFileSizeDistribution } from './fileSizeDistribution'
 import { bindFilesystemText, readFilesystemText } from './filesystemText'
-import { LargestEntries } from './largestEntries'
+import { PublishedAnalytics } from './publishedAnalytics'
 
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
 const SELECT_SCAN = `
@@ -172,9 +171,7 @@ function inTransaction(connection: DatabaseSync, operation: () => undefined): vo
 /** Owns one synchronous connection. Construct and close it on the same thread. */
 export class ScanDatabase {
   private readonly connection: DatabaseSync
-  private readonly fileTypes: FileTypeAnalytics
-  private readonly fileSizeDistribution: (scan: CompletedScan) => InsightsSizeDistribution
-  private readonly largestEntries: LargestEntries
+  private readonly analytics: PublishedAnalytics
   private readonly insertScanStatement: StatementSync
   private readonly selectScanStatement: StatementSync
   private readonly selectPublishedStatement: StatementSync
@@ -209,9 +206,7 @@ export class ScanDatabase {
         throw new Error('SQLite foreign-key enforcement is unavailable.')
       }
       inTransaction(this.connection, () => initializeSchema(this.connection))
-      this.fileTypes = new FileTypeAnalytics(this.connection)
-      this.fileSizeDistribution = prepareFileSizeDistribution(this.connection)
-      this.largestEntries = new LargestEntries(this.connection)
+      this.analytics = new PublishedAnalytics(this.connection)
 
       this.insertScanStatement = this.connection.prepare(`
         INSERT INTO scans (
@@ -391,6 +386,7 @@ export class ScanDatabase {
       // No legitimate scanner can be running under the profile lock during startup recovery.
       this.deleteInterruptedScansStatement.run()
     })
+    this.analytics.clear()
   }
 
   beginScan(scan: BuildingScan): void {
@@ -436,6 +432,7 @@ export class ScanDatabase {
       if (!stored || stored.id !== scan.id) throw new Error('Could not read the promoted scan.')
       published = stored
     })
+    this.analytics.usePublication(published.id)
     return published
   }
 
@@ -566,16 +563,20 @@ export class ScanDatabase {
   }
 
   getInsightsCategories(scanId: string): InsightsCategories {
-    return this.fileTypes.getCategories(this.requirePublishedScan(scanId))
+    return this.analytics.getCategories(this.requirePublishedScan(scanId))
   }
 
   getInsightsSizeDistribution(scanId: string): InsightsSizeDistribution {
-    return this.fileSizeDistribution(this.requirePublishedScan(scanId))
+    return this.analytics.getSizeDistribution(this.requirePublishedScan(scanId))
+  }
+
+  getInsightsObservations(scanId: string): InsightsObservations {
+    return this.analytics.getObservations(this.requirePublishedScan(scanId))
   }
 
   listInsightsExtensions(request: InsightsExtensionRequest): InsightsExtensionPage {
     const page = readExtensionRequest(request)
-    return this.fileTypes.listExtensions(this.requirePublishedScan(page.scanId), page)
+    return this.analytics.listExtensions(this.requirePublishedScan(page.scanId), page)
   }
 
   listInsightsLargest(
@@ -583,7 +584,7 @@ export class ScanDatabase {
     type: InsightsRankedEntry['type']
   ): InsightsRankingPage {
     const page = readRankingRequest(request)
-    return this.largestEntries.list(this.requirePublishedScan(page.scanId), type, page)
+    return this.analytics.listLargest(this.requirePublishedScan(page.scanId), type, page)
   }
 
   requirePublishedScan(scanId: string): CompletedScan {
@@ -725,6 +726,7 @@ export class ScanDatabase {
   }
 
   close(): void {
+    this.analytics.clear()
     if (!this.connection.isOpen) return
     if (this.connection.isTransaction) throw new Error('Cannot close during a SQLite transaction.')
     this.connection.close()

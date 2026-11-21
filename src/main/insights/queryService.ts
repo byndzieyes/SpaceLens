@@ -1,6 +1,7 @@
 import type {
   InsightsCategories,
   InsightsExtensionPage,
+  InsightsObservations,
   InsightsRankedEntry,
   InsightsRankingPage,
   InsightsSummary,
@@ -43,6 +44,15 @@ export class InsightsQueryService {
     const scanId = readSnapshotId(request)
     const result = await this.storage.read(signal, (client) =>
       client.getInsightsSizeDistribution(scanId)
+    )
+    assertPublication(result.scanId, scanId)
+    return result
+  }
+
+  async getObservations(request: unknown, signal: AbortSignal): Promise<InsightsObservations> {
+    const scanId = readSnapshotId(request)
+    const result = await this.storage.read(signal, (client) =>
+      client.getInsightsObservations(scanId)
     )
     assertPublication(result.scanId, scanId)
     return result

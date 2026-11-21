@@ -14,6 +14,7 @@ const api: SpaceLensAPI = {
   getInsightsSummary: vi.fn(),
   getInsightsCategories: vi.fn(),
   getInsightsSizeDistribution: vi.fn(),
+  getInsightsObservations: vi.fn(),
   listInsightsExtensions: vi.fn(),
   listInsightsLargestFiles: vi.fn(),
   listInsightsLargestDirectories: vi.fn(),

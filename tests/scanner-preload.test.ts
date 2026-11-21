@@ -36,6 +36,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'cancelScan',
     'getAppInfo',
     'getInsightsCategories',
+    'getInsightsObservations',
     'getInsightsSizeDistribution',
     'getInsightsSummary',
     'getScanDirectoryTreemap',
@@ -116,6 +117,10 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   )
   expect(await api.getInsightsSizeDistribution({ scanId: 'scan' })).toBe(response)
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(15, IPC_CHANNELS.getInsightsSizeDistribution, {
+    scanId: 'scan'
+  })
+  expect(await api.getInsightsObservations({ scanId: 'scan' })).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(16, IPC_CHANNELS.getInsightsObservations, {
     scanId: 'scan'
   })
 })

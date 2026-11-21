@@ -123,3 +123,44 @@ export interface InsightsSizeDistribution extends InsightsFileBreakdown {
   readonly buckets: readonly InsightsSizeBucket[]
   readonly knownSizeCount: number
 }
+
+/** Fixed priority order for observations, shared by the generator and protocol. */
+export const INSIGHTS_OBSERVATION_TYPES = [
+  'incompleteScan',
+  'largeFileConcentration',
+  'dominantCategory',
+  'directoryConcentration',
+  'smallFilesPrevalence'
+] as const
+
+export type InsightsObservationType = (typeof INSIGHTS_OBSERVATION_TYPES)[number]
+
+interface ByteShare {
+  readonly knownBytes: number
+  readonly totalKnownBytes: number
+}
+
+interface ObservationEvidence {
+  incompleteScan: { readonly errorCount: number; readonly unknownSizeCount: number }
+  largeFileConcentration: ByteShare & { readonly fileCount: number }
+  dominantCategory: ByteShare & { readonly category: InsightsFileCategory }
+  directoryConcentration: ByteShare & { readonly entryId: string }
+  smallFilesPrevalence: { readonly smallFileCount: number; readonly knownSizeCount: number }
+}
+
+export type InsightsObservation = {
+  [Type in InsightsObservationType]: {
+    readonly id: Type
+    readonly type: Type
+    readonly title: string
+    readonly message: string
+    readonly severity: 'info' | 'warning'
+    readonly evidence: ObservationEvidence[Type]
+  }
+}[InsightsObservationType]
+
+export interface InsightsObservations {
+  readonly scanId: string
+  readonly incomplete: boolean
+  readonly observations: readonly InsightsObservation[]
+}

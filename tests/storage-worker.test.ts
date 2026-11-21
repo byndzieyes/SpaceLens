@@ -393,6 +393,7 @@ test('coordinates a real Worker after startup and prioritizes publication over E
       code: 'SNAPSHOT_EXPIRED'
     })
     const nextSummary = insights.getSummary({ scanId: next.id }, signal)
+    const observations = insights.getObservations({ scanId: next.id }, signal)
     const nextCategories = insights.getCategories({ scanId: next.id }, signal)
     const distribution = insights.getSizeDistribution({ scanId: next.id }, signal)
     const expiredExtensions = expect(
@@ -420,6 +421,7 @@ test('coordinates a real Worker after startup and prioritizes publication over E
     await oldRanking
     expect((await nextSnapshot).snapshot?.entries.scanId).toBe(next.id)
     expect(await nextSummary).toMatchObject({ scanId: next.id, summary: next.summary })
+    expect(await observations).toEqual({ scanId: next.id, incomplete: false, observations: [] })
     expect(await nextCategories).toMatchObject({ scanId: next.id })
     expect(await distribution).toMatchObject({
       scanId: next.id,
@@ -556,8 +558,11 @@ test('rejects active and queued Explorer callers on shutdown and lets scanner cl
   const queuedDistribution = expect(
     insights.getSizeDistribution({ scanId: 'interrupted' }, signal)
   ).rejects.toThrow('shutting down')
+  const queuedObservations = expect(
+    insights.getObservations({ scanId: 'interrupted' }, signal)
+  ).rejects.toThrow('shutting down')
   storage.stopReads()
-  await Promise.all([active, queued, queuedSummary, queuedDistribution])
+  await Promise.all([active, queued, queuedSummary, queuedDistribution, queuedObservations])
   const cleanup = storage.discardBuildingScan('interrupted')
   release.resolve({ snapshot: null, unavailable: null })
   await cleanup
@@ -717,6 +722,21 @@ test('reads exact Insights summaries from published rows across cancellation, re
   }
   await storage.beginScan(interrupted)
   const previousDistribution = await insights.getSizeDistribution(request, signal)
+  const previousObservations = await insights.getObservations(request, signal)
+  expect(previousObservations).toMatchObject({
+    scanId: previous.id,
+    incomplete: true,
+    observations: [
+      {
+        id: 'incompleteScan',
+        type: 'incompleteScan',
+        evidence: { errorCount: 2, unknownSizeCount: 1 }
+      }
+    ]
+  })
+  await expect(insights.getObservations({ scanId: interrupted.id }, signal)).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
   expect(previousDistribution).toMatchObject({
     scanId: previous.id,
     incomplete: true,
@@ -762,6 +782,7 @@ test('reads exact Insights summaries from published rows across cancellation, re
     code: 'SNAPSHOT_UNAVAILABLE'
   })
   await storage.discardBuildingScan(interrupted.id)
+  await expect(insights.getObservations(request, signal)).resolves.toEqual(previousObservations)
   await expect(insights.getSizeDistribution(request, signal)).resolves.toEqual(previousDistribution)
   await expect(insights.listLargest(request, 'file', signal)).resolves.toEqual(previousFiles)
   await expect(insights.listExtensions(request, signal)).resolves.toEqual(expectedExtensions)
@@ -789,6 +810,9 @@ test('reads exact Insights summaries from published rows across cancellation, re
     await reopened.recoverStorage()
     ready.resolve(reopened)
     await expect(duringStartup).resolves.toEqual(expected)
+    await expect(restoredInsights.getObservations(request, signal)).resolves.toEqual(
+      previousObservations
+    )
     await expect(restoredInsights.getSizeDistribution(request, signal)).resolves.toEqual(
       previousDistribution
     )
@@ -818,6 +842,16 @@ test('reads exact Insights summaries from published rows across cancellation, re
       { type: 'directory-finalized', entry: { ...emptyRoot, aggregatedSizeBytes: 0 } }
     ])
     await restoredStorage.publishScan(empty, emptyRoot.id)
+    await expect(restoredInsights.getObservations(request, signal)).rejects.toMatchObject({
+      code: 'SNAPSHOT_EXPIRED'
+    })
+    await expect(
+      restoredInsights.getObservations({ scanId: replacement.id }, signal)
+    ).resolves.toEqual({
+      scanId: replacement.id,
+      incomplete: false,
+      observations: []
+    })
     await expect(restoredInsights.getSizeDistribution(request, signal)).rejects.toMatchObject({
       code: 'SNAPSHOT_EXPIRED'
     })

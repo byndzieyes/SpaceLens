@@ -17,6 +17,7 @@ type SnapshotQueries = Pick<
   | 'requirePublishedScan'
   | 'getInsightsCategories'
   | 'getInsightsSizeDistribution'
+  | 'getInsightsObservations'
   | 'listInsightsExtensions'
   | 'listInsightsLargestFiles'
   | 'listInsightsLargestDirectories'

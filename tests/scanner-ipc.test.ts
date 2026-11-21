@@ -56,6 +56,7 @@ const queries = {
   requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
   getInsightsSizeDistribution: vi.fn<StorageWorkerClient['getInsightsSizeDistribution']>(),
+  getInsightsObservations: vi.fn<StorageWorkerClient['getInsightsObservations']>(),
   listInsightsExtensions: vi.fn<StorageWorkerClient['listInsightsExtensions']>(),
   listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
   listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
@@ -292,7 +293,8 @@ test.each([
   IPC_CHANNELS.listInsightsExtensions,
   IPC_CHANNELS.listInsightsLargestFiles,
   IPC_CHANNELS.listInsightsLargestDirectories,
-  IPC_CHANNELS.getInsightsSizeDistribution
+  IPC_CHANNELS.getInsightsSizeDistribution,
+  IPC_CHANNELS.getInsightsObservations
 ])(
   'rejects foreign senders, subframes, navigated documents, and shutdown on %s',
   async (channel) => {
@@ -318,6 +320,7 @@ test.each([
     expect(queries.listInsightsLargestFiles).not.toHaveBeenCalled()
     expect(queries.listInsightsLargestDirectories).not.toHaveBeenCalled()
     expect(queries.getInsightsSizeDistribution).not.toHaveBeenCalled()
+    expect(queries.getInsightsObservations).not.toHaveBeenCalled()
   }
 )
 
@@ -545,6 +548,47 @@ test('discards a pending Insights response after the attached document navigates
   renderer.emit('did-start-navigation', { isMainFrame: true })
   pending.resolve(completed())
   expect(await response).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+})
+
+test('serves observations on the authorized scan channel and aborts stale document replies', async () => {
+  const channel = IPC_CHANNELS.getInsightsObservations
+  const request = { scanId: id }
+  const query = queries.getInsightsObservations
+  for (const args of [
+    [],
+    [null],
+    [{ scanId: '../scan' }],
+    [{ ...request, path: rootPath }],
+    [request, 'extra']
+  ]) {
+    expect(await invoke(channel, args)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+  }
+  expect(query).not.toHaveBeenCalled()
+  const result = { scanId: id, incomplete: false, observations: [] }
+  query.mockResolvedValueOnce(result)
+  expect(await invoke(channel, [request])).toEqual({ ok: true, value: result })
+  expect(query).toHaveBeenCalledExactlyOnceWith(id)
+  query.mockRejectedValueOnce(
+    new StorageWorkerError({
+      name: 'SnapshotAccessError',
+      code: 'SNAPSHOT_EXPIRED',
+      message: 'Observation expired',
+      sqliteCode: null
+    })
+  )
+  expect(await invoke(channel, [request])).toMatchObject({
+    ok: false,
+    error: { code: 'SNAPSHOT_EXPIRED' }
+  })
+  const pending = Promise.withResolvers<typeof result>()
+  query.mockReturnValueOnce(pending.promise)
+  const reply = invoke(channel, [request])
+  renderer.emit('did-start-navigation', { isMainFrame: true })
+  pending.resolve(result)
+  expect(await reply).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
 })
 
 test('serves the size distribution over authorized IPC with structured failures and document cancellation', async () => {
@@ -1008,7 +1052,8 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsLargestFiles)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsLargestDirectories)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsSizeDistribution)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(14)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsObservations)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(15)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

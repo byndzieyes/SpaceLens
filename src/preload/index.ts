@@ -54,6 +54,8 @@ const api: SpaceLensAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.getInsightsCategories, request),
   getInsightsSizeDistribution: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.getInsightsSizeDistribution, request),
+  getInsightsObservations: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getInsightsObservations, request),
   listInsightsExtensions: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.listInsightsExtensions, request),
   listInsightsLargestFiles: (request) =>
