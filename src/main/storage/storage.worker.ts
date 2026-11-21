@@ -62,6 +62,8 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return null
     case 'getPublishedScan':
       return requireDatabase().getPublishedScan()
+    case 'requirePublishedScan':
+      return requireDatabase().requirePublishedScan(request.payload.scanId)
     case 'getScanSnapshot':
       return requireDatabase().getScanSnapshot()
     case 'getScanEntry':

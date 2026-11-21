@@ -558,7 +558,7 @@ export class ScanDatabase {
     }
   }
 
-  private requirePublishedEntry({ scanId, entryId }: ScanEntryRequest): FileEntry {
+  requirePublishedScan(scanId: string): CompletedScan {
     const published = this.getPublishedScan()
     if (!published || (published.id !== scanId && this.getScan(scanId))) {
       throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'This scan has no available snapshot.')
@@ -569,6 +569,11 @@ export class ScanDatabase {
         'This snapshot reference is no longer available.'
       )
     }
+    return published
+  }
+
+  private requirePublishedEntry({ scanId, entryId }: ScanEntryRequest): FileEntry {
+    this.requirePublishedScan(scanId)
     const entry = this.getEntry(scanId, entryId)
     if (!entry) {
       throw new SnapshotAccessError('ENTRY_NOT_FOUND', 'Entry does not exist in this snapshot.')

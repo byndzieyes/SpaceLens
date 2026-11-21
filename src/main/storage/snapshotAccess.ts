@@ -6,7 +6,7 @@ import {
   type ScanEntryRequest,
   type SnapshotAccessErrorCode
 } from '../../shared/snapshot'
-import { integer, isSnapshotId } from './payloads'
+import { integer, isSnapshotId, record } from './payloads'
 
 export class SnapshotAccessError extends Error {
   constructor(
@@ -16,6 +16,18 @@ export class SnapshotAccessError extends Error {
     super(message)
     this.name = 'SnapshotAccessError'
   }
+}
+
+export function readSnapshotId(request: unknown): string {
+  if (
+    record(request) &&
+    Object.keys(request).length === 1 &&
+    Object.hasOwn(request, 'scanId') &&
+    isSnapshotId(request.scanId)
+  ) {
+    return request.scanId
+  }
+  throw new SnapshotAccessError('INVALID_REQUEST', 'A valid snapshot scan ID is required.')
 }
 
 /** Shared by Main callers and IPC; exact keys prevent accidental path-based requests. */

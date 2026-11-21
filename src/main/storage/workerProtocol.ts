@@ -10,7 +10,7 @@ import {
   type ScanEntryRequest,
   type ScanSnapshotAvailability
 } from '../../shared/snapshot'
-import { validateSnapshotRequest, validateTreemapRequest } from './snapshotAccess'
+import { readSnapshotId, validateSnapshotRequest, validateTreemapRequest } from './snapshotAccess'
 import {
   integer,
   isScanSummary,
@@ -37,6 +37,7 @@ interface StorageCommands {
   publishScan: { payload: ScanPublication; result: CompletedScan }
   discardBuildingScan: { payload: { scanId: string }; result: null }
   getPublishedScan: { payload: null; result: CompletedScan | null }
+  requirePublishedScan: { payload: { scanId: string }; result: CompletedScan }
   getScanSnapshot: { payload: null; result: ScanSnapshotAvailability }
   getScanEntry: { payload: ScanEntryRequest; result: FileEntry }
   listScanDirectory: { payload: ScanDirectoryRequest; result: ScanDirectoryPage }
@@ -111,6 +112,8 @@ export function parseStorageRequest(value: unknown): StorageRequest {
     case 'getScanSnapshot':
       if (payload === null) return { requestId, operation, payload }
       break
+    case 'requirePublishedScan':
+      return { requestId, operation, payload: { scanId: readSnapshotId(payload) } }
     case 'getScanEntry': {
       const request = payload as ScanEntryRequest
       validateSnapshotRequest(request, false)
@@ -266,6 +269,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     discardBuildingScan: isNull,
     getPublishedScan: (value): value is CompletedScan | null =>
       value === null || isCompletedScan(value),
+    requirePublishedScan: isCompletedScan,
     getScanSnapshot: isSnapshotAvailability,
     getScanEntry: isStorageEntry,
     listScanDirectory: isDirectoryPage,

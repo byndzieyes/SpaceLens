@@ -18,6 +18,7 @@ import {
 } from '../shared/ipc'
 import type { RecentScanSummary, ScanSessionState } from '../shared/scan'
 import type { ScanDirectoryRequest, ScanEntryRequest } from '../shared/snapshot'
+import { InsightsQueryService } from './insights/queryService'
 import {
   SnapshotAccessError,
   validateSnapshotRequest,
@@ -165,13 +166,14 @@ export function registerScannerIpc(
   let contextVersion = 0
   let pickerBusy = false
   let starting = false
-  let explorerContext = new AbortController()
+  let readContext = new AbortController()
+  const insights = new InsightsQueryService(storage)
 
   const clearApproval = (): void => {
     approval = null
     contextVersion++
-    explorerContext.abort()
-    explorerContext = new AbortController()
+    readContext.abort()
+    readContext = new AbortController()
   }
   const onNavigation = (
     details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>
@@ -307,20 +309,26 @@ export function registerScannerIpc(
     }
   )
 
-  const snapshotChannels = [
+  const readChannels = [
     IPC_CHANNELS.getScanSnapshot,
     IPC_CHANNELS.getScanEntry,
     IPC_CHANNELS.listScanDirectory,
-    IPC_CHANNELS.getScanDirectoryTreemap
+    IPC_CHANNELS.getScanDirectoryTreemap,
+    IPC_CHANNELS.getInsightsSummary
   ] as const
-  for (const channel of snapshotChannels) {
+  for (const channel of readChannels) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
       if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
       if (!authorized(event)) return failure('UNAUTHORIZED', 'Scanner access is not authorized.')
-      const { signal } = explorerContext
+      const { signal } = readContext
       const reply = <T>(result: ScannerIpcResult<T>): ScannerIpcResult<T> =>
         signal.aborted || !authorized(event)
-          ? failure('UNAVAILABLE', 'The Explorer context is no longer available.')
+          ? failure(
+              'UNAVAILABLE',
+              channel === IPC_CHANNELS.getInsightsSummary
+                ? 'The Insights context is no longer available.'
+                : 'The Explorer context is no longer available.'
+            )
           : result
       try {
         if (channel === IPC_CHANNELS.getScanSnapshot) {
@@ -331,6 +339,10 @@ export function registerScannerIpc(
         }
         if (args.length !== 1)
           return failure('INVALID_REQUEST', 'One snapshot request is required.')
+        if (channel === IPC_CHANNELS.getInsightsSummary) {
+          const value = await insights.getSummary(args[0], signal)
+          return reply({ ok: true, value })
+        }
         if (channel === IPC_CHANNELS.getScanDirectoryTreemap) {
           const request = args[0]
           validateTreemapRequest(request)
@@ -488,7 +500,7 @@ export function registerScannerIpc(
       unsubscribe()
       detachRenderer()
       for (const channel of channels) ipcMain.removeHandler(channel)
-      for (const channel of snapshotChannels) ipcMain.removeHandler(channel)
+      for (const channel of readChannels) ipcMain.removeHandler(channel)
       ipcMain.removeHandler(IPC_CHANNELS.selectScanDirectory)
       ipcMain.removeListener(IPC_CHANNELS.acknowledgeScanState, onAck)
       disposal = manager.dispose()

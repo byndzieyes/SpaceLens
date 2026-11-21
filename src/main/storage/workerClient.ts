@@ -97,6 +97,10 @@ export class StorageWorkerClient {
     return this.run('getPublishedScan', null)
   }
 
+  requirePublishedScan(scanId: string): Promise<CompletedScan> {
+    return this.run('requirePublishedScan', { scanId })
+  }
+
   getScanSnapshot(): Promise<ScanSnapshotAvailability> {
     return this.run('getScanSnapshot', null)
   }

@@ -8,9 +8,13 @@ import {
 
 export const MAX_QUEUED_EXPLORER_READS = 16
 
-type ExplorerQueries = Pick<
+type SnapshotQueries = Pick<
   StorageWorkerClient,
-  'getScanSnapshot' | 'getScanEntry' | 'listScanDirectory' | 'getScanDirectoryTreemap'
+  | 'getScanSnapshot'
+  | 'getScanEntry'
+  | 'listScanDirectory'
+  | 'getScanDirectoryTreemap'
+  | 'requirePublishedScan'
 >
 
 /** A request that could not be sent, or a read whose reply can no longer be used. */
@@ -45,7 +49,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
     )
   }
 
-  read<T>(signal: AbortSignal, query: (client: ExplorerQueries) => Promise<T>): Promise<T> {
+  read<T>(signal: AbortSignal, query: (client: SnapshotQueries) => Promise<T>): Promise<T> {
     return this.enqueue(query, signal)
   }
 
@@ -65,10 +69,10 @@ export class ScanStorageCoordinator implements ScanPersistence {
     return this.enqueue((client) => client.discardBuildingScan(scanId))
   }
 
-  /** Drop Explorer work before scanner shutdown, which may still need a final write. */
+  /** Drop read requests before scanner shutdown, which may still need a final write. */
   stopReads(): void {
     this.readsStopped = true
-    const error = new StorageUnavailableError('Explorer storage is shutting down.')
+    const error = new StorageUnavailableError('Saved scan storage is shutting down.')
     for (const job of this.reads.splice(0)) job.reject(error)
     if (this.active?.read) this.active.reject(error)
   }
@@ -81,9 +85,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
     if (this.failure) return Promise.reject(this.failure)
     const read = signal !== undefined
     if (read && (signal.aborted || this.readsStopped)) {
-      return Promise.reject(
-        new StorageUnavailableError('The Explorer request is no longer active.')
-      )
+      return Promise.reject(new StorageUnavailableError('The storage request is no longer active.'))
     }
     if (read ? this.reads.length >= MAX_QUEUED_EXPLORER_READS : this.write !== undefined) {
       return Promise.reject(
@@ -102,7 +104,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
       if (index >= 0) this.reads.splice(index, 1)
       job.reject(new StorageUnavailableError(message))
     }
-    const abort = (): void => cancelRead('The Explorer request is no longer active.')
+    const abort = (): void => cancelRead('The storage request is no longer active.')
     const job: Job = {
       read,
       run: async (client) => {
@@ -124,7 +126,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
     if (signal) {
       signal.addEventListener('abort', abort, { once: true })
       timer = setTimeout(
-        () => cancelRead('Waiting for Explorer storage timed out. Retry the request.'),
+        () => cancelRead('Waiting for saved scan storage timed out. Retry the request.'),
         STORAGE_REQUEST_TIMEOUT_MS
       )
       this.reads.push(job)

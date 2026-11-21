@@ -52,6 +52,7 @@ let cancel: ReturnType<typeof vi.fn>
 let dispose: ReturnType<typeof vi.fn>
 let unsubscribe: ReturnType<typeof vi.fn>
 const queries = {
+  requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
@@ -279,7 +280,8 @@ test.each([
   IPC_CHANNELS.getScanSnapshot,
   IPC_CHANNELS.getScanEntry,
   IPC_CHANNELS.listScanDirectory,
-  IPC_CHANNELS.getScanDirectoryTreemap
+  IPC_CHANNELS.getScanDirectoryTreemap,
+  IPC_CHANNELS.getInsightsSummary
 ])(
   'rejects foreign senders, subframes, navigated documents, and shutdown on %s',
   async (channel) => {
@@ -299,6 +301,7 @@ test.each([
     expect(queries.getScanEntry).not.toHaveBeenCalled()
     expect(queries.listScanDirectory).not.toHaveBeenCalled()
     expect(queries.getScanDirectoryTreemap).not.toHaveBeenCalled()
+    expect(queries.requirePublishedScan).not.toHaveBeenCalled()
   }
 )
 
@@ -409,6 +412,73 @@ test('reports storage failure and discards a pending reply after renderer naviga
   renderer.emit('did-start-navigation', { isMainFrame: true })
   pending.resolve({ snapshot: null, unavailable: null })
   expect(await received).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+})
+
+test('serves Insights through one authorized ID-only call on the existing read boundary', async () => {
+  const request = { scanId: id }
+  for (const args of [
+    [],
+    [null],
+    [request, 'extra'],
+    [{ scanId: '../scan' }],
+    [{ ...request, path: rootPath }]
+  ]) {
+    expect(await invoke(IPC_CHANNELS.getInsightsSummary, args)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+  }
+  expect(queries.requirePublishedScan).not.toHaveBeenCalled()
+
+  const scan = {
+    ...completed(),
+    summary: { fileCount: 4, directoryCount: 2, totalBytes: 128, errorCount: 1 }
+  }
+  queries.requirePublishedScan.mockResolvedValueOnce(scan)
+  expect(await invoke(IPC_CHANNELS.getInsightsSummary, [request])).toEqual({
+    ok: true,
+    value: {
+      scanId: id,
+      rootPath,
+      completedAt: scan.finishedAt,
+      summary: scan.summary,
+      incomplete: true
+    }
+  })
+  expect(queries.requirePublishedScan).toHaveBeenCalledExactlyOnceWith(id)
+  expect(queries.getScanSnapshot).not.toHaveBeenCalled()
+})
+
+test('preserves Insights storage errors and hides other database diagnostics', async () => {
+  const query = (): Promise<ScannerIpcResult<unknown>> =>
+    Promise.resolve(invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: id }]))
+  for (const code of ['SNAPSHOT_UNAVAILABLE', 'SNAPSHOT_EXPIRED'] as const) {
+    queries.requirePublishedScan.mockRejectedValueOnce(
+      new StorageWorkerError({
+        name: 'SnapshotAccessError',
+        code,
+        message: 'Publication missing',
+        sqliteCode: null
+      })
+    )
+    expect(await query()).toEqual({ ok: false, error: { code, message: 'Publication missing' } })
+  }
+  queries.requirePublishedScan.mockRejectedValueOnce(new StorageUnavailableError())
+  expect(await query()).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+  queries.requirePublishedScan.mockRejectedValueOnce(new Error('private SQLite diagnostics'))
+  expect(await query()).toEqual({
+    ok: false,
+    error: { code: 'INTERNAL_ERROR', message: 'The snapshot request could not be processed.' }
+  })
+})
+
+test('discards a pending Insights response after the attached document navigates', async () => {
+  const pending = Promise.withResolvers<CompletedScan>()
+  queries.requirePublishedScan.mockReturnValueOnce(pending.promise)
+  const response = invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: id }])
+  renderer.emit('did-start-navigation', { isMainFrame: true })
+  pending.resolve(completed())
+  expect(await response).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
 })
 
 test.each([
@@ -750,7 +820,8 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(replacement.listenerCount('destroyed')).toBe(0)
   expect(ipcMain.listenerCount(IPC_CHANNELS.acknowledgeScanState)).toBe(0)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getScanDirectoryTreemap)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(8)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsSummary)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(9)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

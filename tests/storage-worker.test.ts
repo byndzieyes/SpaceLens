@@ -10,6 +10,7 @@ import { Worker } from 'node:worker_threads'
 import { resolveConfig } from 'electron-vite'
 import { build } from 'vite'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
+import { InsightsQueryService } from '../src/main/insights/queryService'
 import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
 import {
   MAX_QUEUED_EXPLORER_READS,
@@ -354,10 +355,11 @@ async function preparePublication(
   return readyMetadata(pending)
 }
 
-test('coordinates a real Worker after startup and dispatches publication before queued Explorer reads', async () => {
+test('coordinates a real Worker after startup and prioritizes publication over Explorer and Insights reads', async () => {
   const client = bundled()
   const ready = Promise.withResolvers<StorageWorkerClient>()
   const storage = new ScanStorageCoordinator(ready.promise)
+  const insights = new InsightsQueryService(storage)
   const { signal } = new AbortController()
   const release = Promise.withResolvers<void>()
   const received = Promise.withResolvers<void>()
@@ -383,6 +385,12 @@ test('coordinates a real Worker after startup and dispatches publication before 
       storage.read(signal, (db) => db.getScanEntry({ scanId: old.id, entryId: file.id }))
     ).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
     const nextSnapshot = storage.read(signal, (db) => db.getScanSnapshot())
+    const expiredSummary = expect(
+      insights.getSummary({ scanId: old.id }, signal)
+    ).rejects.toMatchObject({
+      code: 'SNAPSHOT_EXPIRED'
+    })
+    const nextSummary = insights.getSummary({ scanId: next.id }, signal)
     const page = storage.read(signal, (db) =>
       db.listScanDirectory({ scanId: next.id, entryId: root.id, offset: 0, limit: 100 })
     )
@@ -391,7 +399,9 @@ test('coordinates a real Worker after startup and dispatches publication before 
     expect((await oldRead).snapshot?.entries.scanId).toBe(old.id)
     await publish
     await oldEntry
+    await expiredSummary
     expect((await nextSnapshot).snapshot?.entries.scanId).toBe(next.id)
+    expect(await nextSummary).toMatchObject({ scanId: next.id, summary: next.summary })
     expect(await page).toMatchObject({ scanId: next.id, totalCount: 1, nextOffset: null })
   } finally {
     storage.stopReads()
@@ -404,6 +414,7 @@ test('bounds waits during startup, drops abandoned renderer work and allows a ne
   vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
   const ready = Promise.withResolvers<StorageWorkerClient>()
   const storage = new ScanStorageCoordinator(ready.promise)
+  const insights = new InsightsQueryService(storage)
   const abandoned = new AbortController()
   const live = new AbortController()
   const query = vi.fn((db: Pick<StorageWorkerClient, 'getScanSnapshot'>) => db.getScanSnapshot())
@@ -412,8 +423,10 @@ test('bounds waits during startup, drops abandoned renderer work and allows a ne
   )
   const results = Promise.allSettled(waiting)
   await expect(storage.read(live.signal, query)).rejects.toThrow('busy')
+  const request = { scanId: 'previous' }
+  await expect(insights.getSummary(request, live.signal)).rejects.toThrow('busy')
   abandoned.abort()
-  const replacement = expect(storage.read(live.signal, query)).rejects.toThrow('timed out')
+  const replacement = expect(insights.getSummary(request, live.signal)).rejects.toThrow('timed out')
   await vi.advanceTimersByTimeAsync(STORAGE_REQUEST_TIMEOUT_MS)
   await replacement
   const [first, ...others] = await results
@@ -450,8 +463,12 @@ test('rejects active and queued Explorer callers on shutdown and lets scanner cl
       db.getScanDirectoryTreemap({ scanId: 'interrupted', entryId: root.id })
     )
   ).rejects.toThrow('shutting down')
+  const insights = new InsightsQueryService(storage)
+  const queuedSummary = expect(
+    insights.getSummary({ scanId: 'interrupted' }, signal)
+  ).rejects.toThrow('shutting down')
   storage.stopReads()
-  await Promise.all([active, queued])
+  await Promise.all([active, queued, queuedSummary])
   const cleanup = storage.discardBuildingScan('interrupted')
   release.resolve({ snapshot: null, unavailable: null })
   await cleanup
@@ -484,10 +501,14 @@ test('fails all queued work on Worker exit and does not dispatch a waiting write
   const second = expect(storage.read(signal, (db) => db.getScanSnapshot())).rejects.toBeInstanceOf(
     StorageUnavailableError
   )
+  const insights = new InsightsQueryService(storage)
+  const summary = expect(
+    insights.getSummary({ scanId: 'previous' }, signal)
+  ).rejects.toBeInstanceOf(StorageUnavailableError)
   const write = expect(storage.beginScan(lifecycleScan('unsent'))).rejects.toBeInstanceOf(
     StorageUnavailableError
   )
-  await Promise.all([first, second, write])
+  await Promise.all([first, second, write, summary])
   expect(sent.mock.calls.map(([request]) => (request as StorageRequest).operation)).toEqual([
     'initialize',
     'getScanDirectoryTreemap'
@@ -495,6 +516,128 @@ test('fails all queued work on Worker exit and does not dispatch a waiting write
   await expect(client.dispose()).rejects.toThrow('exited unexpectedly')
   expectReleased(worker)
 })
+
+test('reads exact Insights summaries from published rows across cancellation, recovery and replacement', async () => {
+  const client = bundled()
+  const { signal } = new AbortController()
+  await client.initialize(databasePath)
+  await client.recoverStorage()
+  const storage = new ScanStorageCoordinator(Promise.resolve(client))
+  const insights = new InsightsQueryService(storage)
+
+  const previous = { ...lifecycleScan('previous'), rootPath: join(rootPath, "диск '📁'") }
+  const request = { scanId: previous.id }
+  await expect(insights.getSummary(request, signal)).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
+  await storage.beginScan(previous)
+  await expect(insights.getSummary(request, signal)).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
+  await expect(client.requirePublishedScan('wrong/id')).rejects.toMatchObject({
+    code: 'INVALID_REQUEST'
+  })
+
+  const directory = {
+    ...root,
+    scanId: previous.id,
+    path: previous.rootPath,
+    type: 'directory' as const
+  }
+  const known = {
+    ...file,
+    scanId: previous.id,
+    path: join(previous.rootPath, fileName),
+    sizeBytes: Number.MAX_SAFE_INTEGER
+  }
+  const unknown = {
+    ...known,
+    id: 'unknown-size',
+    path: join(previous.rootPath, 'unknown-size.txt'),
+    name: 'unknown-size.txt',
+    sizeBytes: null,
+    createdAt: null
+  }
+  const completed: CompletedScan = {
+    ...readyMetadata(previous),
+    summary: { totalBytes: Number.MAX_SAFE_INTEGER, fileCount: 2, directoryCount: 1, errorCount: 2 }
+  }
+  await storage.applyBatch(previous.id, [
+    { type: 'entry', entry: directory },
+    { type: 'entry', entry: known },
+    { type: 'entry', entry: unknown },
+    {
+      type: 'directory-finalized',
+      entry: { ...directory, aggregatedSizeBytes: completed.summary.totalBytes }
+    }
+  ])
+  await storage.publishScan(completed, directory.id)
+  const expected = {
+    scanId: previous.id,
+    rootPath: previous.rootPath,
+    completedAt: completed.finishedAt,
+    summary: completed.summary,
+    incomplete: true
+  }
+  const interrupted = lifecycleScan('interrupted')
+  await storage.beginScan(interrupted)
+  await expect(insights.getSummary(request, signal)).resolves.toEqual(expected)
+  await expect(insights.getSummary({ scanId: interrupted.id }, signal)).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
+  await storage.discardBuildingScan(interrupted.id)
+  await expect(insights.getSummary(request, signal)).resolves.toEqual(expected)
+  await expect(client.getScan(previous.id)).resolves.toEqual(completed)
+  await expect(
+    storage.read(signal, (db) => db.getScanEntry({ scanId: previous.id, entryId: unknown.id }))
+  ).resolves.toEqual(unknown)
+  await storage.beginScan(interrupted)
+  await expect(storage.publishScan(readyMetadata(interrupted), root.id)).rejects.toThrow(
+    'root directory'
+  )
+  await expect(insights.getSummary(request, signal)).resolves.toEqual(expected)
+  storage.stopReads()
+  await client.dispose()
+
+  const reopened = bundled()
+  const ready = Promise.withResolvers<StorageWorkerClient>()
+  const restoredStorage = new ScanStorageCoordinator(ready.promise)
+  const restoredInsights = new InsightsQueryService(restoredStorage)
+  const duringStartup = restoredInsights.getSummary(request, signal)
+  try {
+    await reopened.initialize(databasePath)
+    await reopened.recoverStorage()
+    ready.resolve(reopened)
+    await expect(duringStartup).resolves.toEqual(expected)
+    await expect(reopened.getScan(interrupted.id)).resolves.toBeNull()
+
+    const replacement = lifecycleScan('replacement')
+    const emptyRoot = { ...root, scanId: replacement.id, type: 'directory' as const }
+    const empty = {
+      ...readyMetadata(replacement),
+      summary: { fileCount: 0, directoryCount: 1, totalBytes: 0, errorCount: 0 }
+    }
+    await restoredStorage.beginScan(replacement)
+    await restoredStorage.applyBatch(replacement.id, [
+      { type: 'entry', entry: emptyRoot },
+      { type: 'directory-finalized', entry: { ...emptyRoot, aggregatedSizeBytes: 0 } }
+    ])
+    await restoredStorage.publishScan(empty, emptyRoot.id)
+    await expect(restoredInsights.getSummary(request, signal)).rejects.toMatchObject({
+      code: 'SNAPSHOT_EXPIRED'
+    })
+    await expect(restoredInsights.getSummary({ scanId: replacement.id }, signal)).resolves.toEqual({
+      scanId: replacement.id,
+      rootPath: replacement.rootPath,
+      completedAt: empty.finishedAt,
+      summary: empty.summary,
+      incomplete: false
+    })
+  } finally {
+    restoredStorage.stopReads()
+    await duringStartup.catch(() => {})
+  }
+}, 15_000)
 
 test('queries published Explorer snapshots through the Worker and returns structured errors', async () => {
   const client = bundled()

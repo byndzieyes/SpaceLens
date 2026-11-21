@@ -166,6 +166,7 @@ function mockApp(): {
   let nextId = 'scan-a'
   const api: Mocked<SpaceLensAPI> = {
     getAppInfo: vi.fn<SpaceLensAPI['getAppInfo']>(),
+    getInsightsSummary: vi.fn<SpaceLensAPI['getInsightsSummary']>(),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: state })),
     getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
       ok: true,
