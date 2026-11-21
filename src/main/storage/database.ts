@@ -5,7 +5,8 @@ import type {
   InsightsExtensionRequest,
   InsightsRankedEntry,
   InsightsRankingPage,
-  InsightsRankingRequest
+  InsightsRankingRequest,
+  InsightsSizeDistribution
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
@@ -37,6 +38,7 @@ import {
 import { prepareSnapshotValidation } from './publication'
 import { initializeSchema } from './schema'
 import { FileTypeAnalytics } from './fileTypeAnalytics'
+import { prepareFileSizeDistribution } from './fileSizeDistribution'
 import { bindFilesystemText, readFilesystemText } from './filesystemText'
 import { LargestEntries } from './largestEntries'
 
@@ -171,6 +173,7 @@ function inTransaction(connection: DatabaseSync, operation: () => undefined): vo
 export class ScanDatabase {
   private readonly connection: DatabaseSync
   private readonly fileTypes: FileTypeAnalytics
+  private readonly fileSizeDistribution: (scan: CompletedScan) => InsightsSizeDistribution
   private readonly largestEntries: LargestEntries
   private readonly insertScanStatement: StatementSync
   private readonly selectScanStatement: StatementSync
@@ -207,6 +210,7 @@ export class ScanDatabase {
       }
       inTransaction(this.connection, () => initializeSchema(this.connection))
       this.fileTypes = new FileTypeAnalytics(this.connection)
+      this.fileSizeDistribution = prepareFileSizeDistribution(this.connection)
       this.largestEntries = new LargestEntries(this.connection)
 
       this.insertScanStatement = this.connection.prepare(`
@@ -563,6 +567,10 @@ export class ScanDatabase {
 
   getInsightsCategories(scanId: string): InsightsCategories {
     return this.fileTypes.getCategories(this.requirePublishedScan(scanId))
+  }
+
+  getInsightsSizeDistribution(scanId: string): InsightsSizeDistribution {
+    return this.fileSizeDistribution(this.requirePublishedScan(scanId))
   }
 
   listInsightsExtensions(request: InsightsExtensionRequest): InsightsExtensionPage {

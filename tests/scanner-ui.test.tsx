@@ -79,6 +79,7 @@ beforeEach(() => {
     getScanDirectoryTreemap: vi.fn(),
     getInsightsSummary: vi.fn(),
     getInsightsCategories: vi.fn(),
+    getInsightsSizeDistribution: vi.fn(),
     listInsightsExtensions: vi.fn(),
     listInsightsLargestFiles: vi.fn(),
     listInsightsLargestDirectories: vi.fn(),

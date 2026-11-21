@@ -3,7 +3,8 @@ import type {
   InsightsExtensionPage,
   InsightsRankedEntry,
   InsightsRankingPage,
-  InsightsSummary
+  InsightsSummary,
+  InsightsSizeDistribution
 } from '../../shared/insights'
 import type { ScanStorageCoordinator } from '../storage/coordinator'
 import { readExtensionRequest, readRankingRequest, readSnapshotId } from '../storage/snapshotAccess'
@@ -31,6 +32,18 @@ export class InsightsQueryService {
   async getCategories(request: unknown, signal: AbortSignal): Promise<InsightsCategories> {
     const scanId = readSnapshotId(request)
     const result = await this.storage.read(signal, (client) => client.getInsightsCategories(scanId))
+    assertPublication(result.scanId, scanId)
+    return result
+  }
+
+  async getSizeDistribution(
+    request: unknown,
+    signal: AbortSignal
+  ): Promise<InsightsSizeDistribution> {
+    const scanId = readSnapshotId(request)
+    const result = await this.storage.read(signal, (client) =>
+      client.getInsightsSizeDistribution(scanId)
+    )
     assertPublication(result.scanId, scanId)
     return result
   }

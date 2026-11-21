@@ -4,7 +4,8 @@ import type {
   InsightsExtensionPage,
   InsightsExtensionRequest,
   InsightsRankingPage,
-  InsightsRankingRequest
+  InsightsRankingRequest,
+  InsightsSizeDistribution
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import type {
@@ -110,6 +111,10 @@ export class StorageWorkerClient {
 
   getInsightsCategories(scanId: string): Promise<InsightsCategories> {
     return this.run('getInsightsCategories', { scanId })
+  }
+
+  getInsightsSizeDistribution(scanId: string): Promise<InsightsSizeDistribution> {
+    return this.run('getInsightsSizeDistribution', { scanId })
   }
 
   listInsightsExtensions(

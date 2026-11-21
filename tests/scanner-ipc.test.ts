@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { resolve } from 'node:path'
 import { app, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { IPC_CHANNELS, type ScannerIpcResult, type ScanStateSnapshot } from '../src/shared/ipc'
+import { INSIGHTS_SIZE_BUCKETS } from '../src/shared/insights'
 import type { CompletedScan } from '../src/main/storage/payloads'
 import type { ScanSessionState } from '../src/shared/scan'
 import type { ScanSessionManager, ScanSessionSubscriber } from '../src/main/scanner/sessionManager'
@@ -54,6 +55,7 @@ let unsubscribe: ReturnType<typeof vi.fn>
 const queries = {
   requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
+  getInsightsSizeDistribution: vi.fn<StorageWorkerClient['getInsightsSizeDistribution']>(),
   listInsightsExtensions: vi.fn<StorageWorkerClient['listInsightsExtensions']>(),
   listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
   listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
@@ -289,7 +291,8 @@ test.each([
   IPC_CHANNELS.getInsightsCategories,
   IPC_CHANNELS.listInsightsExtensions,
   IPC_CHANNELS.listInsightsLargestFiles,
-  IPC_CHANNELS.listInsightsLargestDirectories
+  IPC_CHANNELS.listInsightsLargestDirectories,
+  IPC_CHANNELS.getInsightsSizeDistribution
 ])(
   'rejects foreign senders, subframes, navigated documents, and shutdown on %s',
   async (channel) => {
@@ -314,6 +317,7 @@ test.each([
     expect(queries.listInsightsExtensions).not.toHaveBeenCalled()
     expect(queries.listInsightsLargestFiles).not.toHaveBeenCalled()
     expect(queries.listInsightsLargestDirectories).not.toHaveBeenCalled()
+    expect(queries.getInsightsSizeDistribution).not.toHaveBeenCalled()
   }
 )
 
@@ -540,6 +544,66 @@ test('discards a pending Insights response after the attached document navigates
   const response = invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: id }])
   renderer.emit('did-start-navigation', { isMainFrame: true })
   pending.resolve(completed())
+  expect(await response).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+})
+
+test('serves the size distribution over authorized IPC with structured failures and document cancellation', async () => {
+  const channel = IPC_CHANNELS.getInsightsSizeDistribution
+  const request = { scanId: id }
+  const query = queries.getInsightsSizeDistribution
+  for (const args of [
+    [],
+    [null],
+    [{ scanId: '../scan' }],
+    [{ ...request, limit: 10 }],
+    [request, 'extra']
+  ]) {
+    expect(await invoke(channel, args)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+  }
+  expect(query).not.toHaveBeenCalled()
+  const distribution = {
+    scanId: id,
+    incomplete: false,
+    knownSizeCount: 0,
+    totals: { fileCount: 0, knownBytes: 0, unknownSizeCount: 0 },
+    buckets: INSIGHTS_SIZE_BUCKETS.map(({ id }) => ({ id, fileCount: 0, knownBytes: 0 }))
+  }
+  query.mockResolvedValueOnce(distribution)
+  expect(await invoke(channel, [request])).toEqual({ ok: true, value: distribution })
+  expect(query).toHaveBeenCalledExactlyOnceWith(id)
+
+  for (const code of ['SNAPSHOT_UNAVAILABLE', 'SNAPSHOT_EXPIRED', 'SIZE_OVERFLOW'] as const) {
+    query.mockRejectedValueOnce(
+      new StorageWorkerError({
+        name: 'SnapshotAccessError',
+        code,
+        message: 'Distribution unavailable',
+        sqliteCode: null
+      })
+    )
+    expect(await invoke(channel, [request])).toMatchObject({ ok: false, error: { code } })
+  }
+  query.mockRejectedValueOnce(
+    new StorageWorkerError({
+      name: 'Error',
+      code: null,
+      message: 'Persisted totals differ from the published scan summary.',
+      sqliteCode: null
+    })
+  )
+  expect(await invoke(channel, [request])).toEqual({
+    ok: false,
+    error: { code: 'INTERNAL_ERROR', message: 'The snapshot request could not be processed.' }
+  })
+
+  const pending = Promise.withResolvers<typeof distribution>()
+  query.mockReturnValueOnce(pending.promise)
+  const response = invoke(channel, [request])
+  renderer.emit('did-start-navigation', { isMainFrame: true })
+  pending.resolve(distribution)
   expect(await response).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
 })
 
@@ -943,7 +1007,8 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsExtensions)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsLargestFiles)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsLargestDirectories)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(13)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsSizeDistribution)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(14)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

@@ -1,6 +1,7 @@
 import {
   INSIGHTS_FILE_CATEGORIES,
   INSIGHTS_RANKING_LIMIT,
+  INSIGHTS_SIZE_BUCKETS,
   MAX_INSIGHTS_EXTENSION_PAGE_SIZE,
   type InsightsCategories,
   type InsightsCategoryRow,
@@ -10,7 +11,8 @@ import {
   type InsightsFileTotals,
   type InsightsRankedEntry,
   type InsightsRankingPage,
-  type InsightsRankingRequest
+  type InsightsRankingRequest,
+  type InsightsSizeDistribution
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
@@ -59,6 +61,7 @@ interface StorageCommands {
   getPublishedScan: { payload: null; result: CompletedScan | null }
   requirePublishedScan: { payload: { scanId: string }; result: CompletedScan }
   getInsightsCategories: { payload: { scanId: string }; result: InsightsCategories }
+  getInsightsSizeDistribution: { payload: { scanId: string }; result: InsightsSizeDistribution }
   listInsightsExtensions: {
     payload: Required<InsightsExtensionRequest>
     result: InsightsExtensionPage
@@ -147,6 +150,7 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       break
     case 'requirePublishedScan':
     case 'getInsightsCategories':
+    case 'getInsightsSizeDistribution':
       return { requestId, operation, payload: { scanId: readSnapshotId(payload) } }
     case 'listInsightsExtensions':
       return { requestId, operation, payload: readExtensionRequest(payload) }
@@ -362,6 +366,35 @@ function isInsightsExtensionPage(value: unknown): value is InsightsExtensionPage
   )
 }
 
+function isSizeDistribution(value: unknown): value is InsightsSizeDistribution {
+  if (!record(value) || !isFileBreakdown(value)) return false
+  const { buckets, knownSizeCount, totals } = value
+  if (
+    !integer(knownSizeCount) ||
+    knownSizeCount !== totals.fileCount - totals.unknownSizeCount ||
+    !Array.isArray(buckets) ||
+    buckets.length !== INSIGHTS_SIZE_BUCKETS.length
+  )
+    return false
+
+  let count = 0n
+  let bytes = 0n
+  for (const [index, bucket] of Array.from(buckets).entries()) {
+    const { id } = INSIGHTS_SIZE_BUCKETS[index]
+    if (
+      !record(bucket) ||
+      bucket.id !== id ||
+      !integer(bucket.fileCount) ||
+      !integer(bucket.knownBytes) ||
+      ((id === 'empty' || bucket.fileCount === 0) && bucket.knownBytes !== 0)
+    )
+      return false
+    count += BigInt(bucket.fileCount)
+    bytes += BigInt(bucket.knownBytes)
+  }
+  return count === BigInt(knownSizeCount) && bytes === BigInt(totals.knownBytes)
+}
+
 function isRankingPage(
   value: unknown,
   type: InsightsRankedEntry['type']
@@ -411,6 +444,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
       value === null || isCompletedScan(value),
     requirePublishedScan: isCompletedScan,
     getInsightsCategories: isInsightsCategories,
+    getInsightsSizeDistribution: isSizeDistribution,
     listInsightsExtensions: isInsightsExtensionPage,
     listInsightsLargestFiles: (value): value is InsightsRankingPage => isRankingPage(value, 'file'),
     listInsightsLargestDirectories: (value): value is InsightsRankingPage =>

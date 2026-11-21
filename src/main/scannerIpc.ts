@@ -316,6 +316,7 @@ export function registerScannerIpc(
     IPC_CHANNELS.getScanDirectoryTreemap,
     IPC_CHANNELS.getInsightsSummary,
     IPC_CHANNELS.getInsightsCategories,
+    IPC_CHANNELS.getInsightsSizeDistribution,
     IPC_CHANNELS.listInsightsExtensions,
     IPC_CHANNELS.listInsightsLargestFiles,
     IPC_CHANNELS.listInsightsLargestDirectories
@@ -331,6 +332,7 @@ export function registerScannerIpc(
               'UNAVAILABLE',
               channel === IPC_CHANNELS.getInsightsSummary ||
                 channel === IPC_CHANNELS.getInsightsCategories ||
+                channel === IPC_CHANNELS.getInsightsSizeDistribution ||
                 channel === IPC_CHANNELS.listInsightsExtensions ||
                 channel === IPC_CHANNELS.listInsightsLargestFiles ||
                 channel === IPC_CHANNELS.listInsightsLargestDirectories
@@ -353,6 +355,10 @@ export function registerScannerIpc(
         }
         if (channel === IPC_CHANNELS.getInsightsCategories) {
           const value = await insights.getCategories(args[0], signal)
+          return reply({ ok: true, value })
+        }
+        if (channel === IPC_CHANNELS.getInsightsSizeDistribution) {
+          const value = await insights.getSizeDistribution(args[0], signal)
           return reply({ ok: true, value })
         }
         if (channel === IPC_CHANNELS.listInsightsExtensions) {

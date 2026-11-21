@@ -36,6 +36,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'cancelScan',
     'getAppInfo',
     'getInsightsCategories',
+    'getInsightsSizeDistribution',
     'getInsightsSummary',
     'getScanDirectoryTreemap',
     'getScanEntry',
@@ -113,6 +114,10 @@ test('exposes only the typed application API and uses fixed invoke channels', as
       limit: 10
     }
   )
+  expect(await api.getInsightsSizeDistribution({ scanId: 'scan' })).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(15, IPC_CHANNELS.getInsightsSizeDistribution, {
+    scanId: 'scan'
+  })
 })
 
 test('deduplicates subscribers, strips Electron events, and supports idempotent unsubscription', () => {

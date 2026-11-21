@@ -168,6 +168,7 @@ function mockApp(): {
     getAppInfo: vi.fn<SpaceLensAPI['getAppInfo']>(),
     getInsightsSummary: vi.fn<SpaceLensAPI['getInsightsSummary']>(),
     getInsightsCategories: vi.fn(),
+    getInsightsSizeDistribution: vi.fn(),
     listInsightsExtensions: vi.fn(),
     listInsightsLargestFiles: vi.fn(),
     listInsightsLargestDirectories: vi.fn(),

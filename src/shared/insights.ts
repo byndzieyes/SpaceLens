@@ -101,3 +101,25 @@ export interface InsightsRankingPage {
   readonly totalCount: number
   readonly nextOffset: number | null
 }
+
+/** Each range starts at minBytes and ends before the next range. The final range is open-ended. */
+export const INSIGHTS_SIZE_BUCKETS = [
+  { id: 'empty', minBytes: 0 },
+  { id: 'tiny', minBytes: 1 },
+  { id: 'small', minBytes: 1_048_576 },
+  { id: 'medium', minBytes: 10_485_760 },
+  { id: 'large', minBytes: 104_857_600 },
+  { id: 'veryLarge', minBytes: 1_073_741_824 }
+] as const
+
+export type InsightsSizeBucketId = (typeof INSIGHTS_SIZE_BUCKETS)[number]['id']
+
+export interface InsightsSizeBucket extends Pick<InsightsFileTotals, 'fileCount' | 'knownBytes'> {
+  readonly id: InsightsSizeBucketId
+}
+
+export interface InsightsSizeDistribution extends InsightsFileBreakdown {
+  /** All six buckets in range order. Unknown sizes appear only in totals.unknownSizeCount. */
+  readonly buckets: readonly InsightsSizeBucket[]
+  readonly knownSizeCount: number
+}

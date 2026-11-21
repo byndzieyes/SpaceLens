@@ -363,16 +363,16 @@ test('coordinates a real Worker after startup and prioritizes publication over E
   const { signal } = new AbortController()
   const release = Promise.withResolvers<void>()
   const received = Promise.withResolvers<void>()
-  const direct = client.getInsightsCategories.bind(client)
+  const direct = client.getInsightsSizeDistribution.bind(client)
   const metadata = vi
-    .spyOn(client, 'getInsightsCategories')
+    .spyOn(client, 'getInsightsSizeDistribution')
     .mockImplementationOnce(async (scanId) => {
       const snapshot = await direct(scanId)
       received.resolve()
       await release.promise
       return snapshot
     })
-  const oldRead = insights.getCategories({ scanId: 'previous' }, signal)
+  const oldRead = insights.getSizeDistribution({ scanId: 'previous' }, signal)
   try {
     await client.initialize(databasePath)
     await client.recoverStorage()
@@ -393,6 +393,8 @@ test('coordinates a real Worker after startup and prioritizes publication over E
       code: 'SNAPSHOT_EXPIRED'
     })
     const nextSummary = insights.getSummary({ scanId: next.id }, signal)
+    const nextCategories = insights.getCategories({ scanId: next.id }, signal)
+    const distribution = insights.getSizeDistribution({ scanId: next.id }, signal)
     const expiredExtensions = expect(
       insights.listExtensions({ scanId: old.id }, signal)
     ).rejects.toMatchObject({
@@ -418,6 +420,12 @@ test('coordinates a real Worker after startup and prioritizes publication over E
     await oldRanking
     expect((await nextSnapshot).snapshot?.entries.scanId).toBe(next.id)
     expect(await nextSummary).toMatchObject({ scanId: next.id, summary: next.summary })
+    expect(await nextCategories).toMatchObject({ scanId: next.id })
+    expect(await distribution).toMatchObject({
+      scanId: next.id,
+      knownSizeCount: 1,
+      totals: { fileCount: 1, knownBytes: 0 }
+    })
     expect(await nextExtensions).toMatchObject({
       scanId: next.id,
       extensions: [{ extension: 'txt' }]
@@ -460,6 +468,7 @@ test('queues rankings and Explorer reads alongside a real Scanner batch for a re
     await received.promise
     const sent = vi.spyOn(client, 'listInsightsLargestFiles')
     const ranking = insights.listLargest({ scanId: old.id }, 'file', signal)
+    const distribution = insights.getSizeDistribution({ scanId: old.id }, signal)
     const current = storage.read(signal, (db) =>
       db.getScanEntry({ scanId: old.id, entryId: file.id })
     )
@@ -472,6 +481,9 @@ test('queues rankings and Explorer reads alongside a real Scanner batch for a re
     release.resolve()
     await write
     expect(await ranking).toMatchObject({ scanId: old.id, entries: [{ id: file.id, bytes: 0 }] })
+    const observed = await distribution
+    expect(observed).toMatchObject({ scanId: old.id, knownSizeCount: 1, totals: { knownBytes: 0 } })
+    expect(observed.buckets[0]).toEqual({ id: 'empty', fileCount: 1, knownBytes: 0 })
     expect(await current).toMatchObject({ scanId: old.id, id: file.id })
     await building
     await storage.discardBuildingScan(next.id)
@@ -498,6 +510,7 @@ test('bounds waits during startup, drops abandoned renderer work and allows a ne
   await expect(storage.read(live.signal, query)).rejects.toThrow('busy')
   const request = { scanId: 'previous' }
   await expect(insights.getSummary(request, live.signal)).rejects.toThrow('busy')
+  await expect(insights.getSizeDistribution(request, live.signal)).rejects.toThrow('busy')
   abandoned.abort()
   const replacement = expect(insights.getSummary(request, live.signal)).rejects.toThrow('timed out')
   await vi.advanceTimersByTimeAsync(STORAGE_REQUEST_TIMEOUT_MS)
@@ -540,8 +553,11 @@ test('rejects active and queued Explorer callers on shutdown and lets scanner cl
   const queuedSummary = expect(
     insights.getSummary({ scanId: 'interrupted' }, signal)
   ).rejects.toThrow('shutting down')
+  const queuedDistribution = expect(
+    insights.getSizeDistribution({ scanId: 'interrupted' }, signal)
+  ).rejects.toThrow('shutting down')
   storage.stopReads()
-  await Promise.all([active, queued, queuedSummary])
+  await Promise.all([active, queued, queuedSummary, queuedDistribution])
   const cleanup = storage.discardBuildingScan('interrupted')
   release.resolve({ snapshot: null, unavailable: null })
   await cleanup
@@ -578,10 +594,13 @@ test('fails all queued work on Worker exit and does not dispatch a waiting write
   const summary = expect(
     insights.getSummary({ scanId: 'previous' }, signal)
   ).rejects.toBeInstanceOf(StorageUnavailableError)
+  const distribution = expect(
+    insights.getSizeDistribution({ scanId: 'previous' }, signal)
+  ).rejects.toBeInstanceOf(StorageUnavailableError)
   const write = expect(storage.beginScan(lifecycleScan('unsent'))).rejects.toBeInstanceOf(
     StorageUnavailableError
   )
-  await Promise.all([first, second, write, summary])
+  await Promise.all([first, second, write, summary, distribution])
   expect(sent.mock.calls.map(([request]) => (request as StorageRequest).operation)).toEqual([
     'initialize',
     'getScanDirectoryTreemap'
@@ -600,6 +619,9 @@ test('reads exact Insights summaries from published rows across cancellation, re
 
   const previous = { ...lifecycleScan('previous'), rootPath: join(rootPath, "диск '📁'") }
   const request = { scanId: previous.id }
+  await expect(insights.getSizeDistribution(request, signal)).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
   await expect(insights.getSummary(request, signal)).rejects.toMatchObject({
     code: 'SNAPSHOT_UNAVAILABLE'
   })
@@ -694,6 +716,24 @@ test('reads exact Insights summaries from published rows across cancellation, re
     extensions: [{ extension: 'txt', category: 'documents', ...totals }]
   }
   await storage.beginScan(interrupted)
+  const previousDistribution = await insights.getSizeDistribution(request, signal)
+  expect(previousDistribution).toMatchObject({
+    scanId: previous.id,
+    incomplete: true,
+    knownSizeCount: 1,
+    totals
+  })
+  expect(previousDistribution.buckets).toHaveLength(6)
+  expect(previousDistribution.buckets.at(-1)).toEqual({
+    id: 'veryLarge',
+    fileCount: 1,
+    knownBytes: Number.MAX_SAFE_INTEGER
+  })
+  await expect(
+    insights.getSizeDistribution({ scanId: interrupted.id }, signal)
+  ).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
   const previousFiles = await insights.listLargest(request, 'file', signal)
   const previousDirectories = await insights.listLargest(request, 'directory', signal)
   expect(previousFiles).toMatchObject({
@@ -722,6 +762,7 @@ test('reads exact Insights summaries from published rows across cancellation, re
     code: 'SNAPSHOT_UNAVAILABLE'
   })
   await storage.discardBuildingScan(interrupted.id)
+  await expect(insights.getSizeDistribution(request, signal)).resolves.toEqual(previousDistribution)
   await expect(insights.listLargest(request, 'file', signal)).resolves.toEqual(previousFiles)
   await expect(insights.listExtensions(request, signal)).resolves.toEqual(expectedExtensions)
   await expect(insights.getSummary(request, signal)).resolves.toEqual(expected)
@@ -733,6 +774,7 @@ test('reads exact Insights summaries from published rows across cancellation, re
   await expect(storage.publishScan(readyMetadata(interrupted), root.id)).rejects.toThrow(
     'root directory'
   )
+  await expect(insights.getSizeDistribution(request, signal)).resolves.toEqual(previousDistribution)
   await expect(insights.getSummary(request, signal)).resolves.toEqual(expected)
   storage.stopReads()
   await client.dispose()
@@ -747,6 +789,9 @@ test('reads exact Insights summaries from published rows across cancellation, re
     await reopened.recoverStorage()
     ready.resolve(reopened)
     await expect(duringStartup).resolves.toEqual(expected)
+    await expect(restoredInsights.getSizeDistribution(request, signal)).resolves.toEqual(
+      previousDistribution
+    )
     await expect(restoredInsights.listLargest(request, 'file', signal)).resolves.toEqual(
       previousFiles
     )
@@ -773,6 +818,16 @@ test('reads exact Insights summaries from published rows across cancellation, re
       { type: 'directory-finalized', entry: { ...emptyRoot, aggregatedSizeBytes: 0 } }
     ])
     await restoredStorage.publishScan(empty, emptyRoot.id)
+    await expect(restoredInsights.getSizeDistribution(request, signal)).rejects.toMatchObject({
+      code: 'SNAPSHOT_EXPIRED'
+    })
+    await expect(
+      restoredInsights.getSizeDistribution({ scanId: replacement.id }, signal)
+    ).resolves.toMatchObject({
+      scanId: replacement.id,
+      knownSizeCount: 0,
+      totals: { fileCount: 0, knownBytes: 0, unknownSizeCount: 0 }
+    })
     await expect(restoredInsights.listLargest(request, 'directory', signal)).rejects.toMatchObject({
       code: 'SNAPSHOT_EXPIRED'
     })
@@ -802,6 +857,35 @@ test('reads exact Insights summaries from published rows across cancellation, re
     await duringStartup.catch(() => {})
   }
 }, 15_000)
+
+test.each([
+  { bytes: 1n, code: null, message: /published scan summary/ },
+  { bytes: 9_007_199_254_740_992n, code: 'SIZE_OVERFLOW', message: /supported size/ }
+])(
+  'returns a Worker error for inconsistent or overflowing distribution metadata ($code)',
+  async ({ bytes, code, message }) => {
+    const seed = bundled()
+    await seed.initialize(databasePath)
+    const saved = await preparePublication(seed, lifecycleScan('saved'))
+    await seed.publishScan(saved, root.id)
+    await seed.dispose()
+    const fixture = new DatabaseSync(databasePath)
+    try {
+      fixture
+        .prepare('UPDATE entries SET size_bytes = ? WHERE scan_id = ? AND id = ?')
+        .run(bytes, saved.id, file.id)
+    } finally {
+      fixture.close()
+    }
+    // Reopen without recovery so the test reaches the distribution's own checks.
+    const client = bundled()
+    await client.initialize(databasePath)
+    await expect(client.getInsightsSizeDistribution(saved.id)).rejects.toMatchObject({
+      code,
+      message: expect.stringMatching(message)
+    })
+  }
+)
 
 test('queries published Explorer snapshots through the Worker and returns structured errors', async () => {
   const client = bundled()
@@ -961,6 +1045,15 @@ test('bounds Explorer and Insights results for a directory with more than 100,00
     }
   })
   const totals = { fileCount: count, knownBytes: totalBytes, unknownSizeCount: 0 }
+  const distribution = await client.getInsightsSizeDistribution(pending.id)
+  expect(distribution).toMatchObject({ knownSizeCount: count, totals })
+  expect(distribution.buckets).toHaveLength(6)
+  expect(distribution.buckets[0]).toEqual({ id: 'empty', fileCount: 1, knownBytes: 0 })
+  expect(distribution.buckets[1]).toEqual({
+    id: 'tiny',
+    fileCount: count - 1,
+    knownBytes: totalBytes
+  })
   const first = await client.listInsightsLargestFiles({ scanId: pending.id, offset: 0, limit: 10 })
   const second = await client.listInsightsLargestFiles({
     scanId: pending.id,

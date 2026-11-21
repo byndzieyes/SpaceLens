@@ -16,6 +16,7 @@ type SnapshotQueries = Pick<
   | 'getScanDirectoryTreemap'
   | 'requirePublishedScan'
   | 'getInsightsCategories'
+  | 'getInsightsSizeDistribution'
   | 'listInsightsExtensions'
   | 'listInsightsLargestFiles'
   | 'listInsightsLargestDirectories'

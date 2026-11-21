@@ -9,12 +9,18 @@ import type { CompletedScan } from '../src/main/storage/payloads'
 import { SnapshotAccessError } from '../src/main/storage/snapshotAccess'
 import type { StorageWorkerClient } from '../src/main/storage/workerClient'
 import { parseStorageResponse } from '../src/main/storage/workerProtocol'
-import type { InsightsRequest, InsightsSummary } from '../src/shared/insights'
+import {
+  INSIGHTS_SIZE_BUCKETS,
+  type InsightsRequest,
+  type InsightsSizeDistribution,
+  type InsightsSummary
+} from '../src/shared/insights'
 import type { ScannerIpcResult, SpaceLensAPI } from '../src/shared/ipc'
 
 const queries = {
   requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
+  getInsightsSizeDistribution: vi.fn<StorageWorkerClient['getInsightsSizeDistribution']>(),
   listInsightsExtensions: vi.fn<StorageWorkerClient['listInsightsExtensions']>(),
   listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
   listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
@@ -46,6 +52,7 @@ beforeEach(() => {
   read.mockClear()
   queries.requirePublishedScan.mockReset()
   queries.getInsightsCategories.mockReset()
+  queries.getInsightsSizeDistribution.mockReset()
   queries.listInsightsExtensions.mockReset()
   queries.listInsightsLargestFiles.mockReset()
   queries.listInsightsLargestDirectories.mockReset()
@@ -132,6 +139,61 @@ test('scoped Worker replies require a completed scan and exact numeric metadata'
     expect(() => parseStorageResponse({ ...reply, result }, 1, 'requirePublishedScan')).toThrow(
       'Invalid response'
     )
+  }
+})
+
+function sizeDistribution(): InsightsSizeDistribution {
+  return {
+    ...request,
+    incomplete: true,
+    knownSizeCount: 2,
+    totals: { fileCount: 3, knownBytes: Number.MAX_SAFE_INTEGER, unknownSizeCount: 1 },
+    buckets: INSIGHTS_SIZE_BUCKETS.map(({ id }) => ({
+      id,
+      fileCount: id === 'empty' || id === 'veryLarge' ? 1 : 0,
+      knownBytes: id === 'veryLarge' ? Number.MAX_SAFE_INTEGER : 0
+    }))
+  }
+}
+
+test('validates size distribution requests before dispatch and rejects cross-scan replies', async () => {
+  const query = queries.getInsightsSizeDistribution
+  for (const invalid of [null, {}, { scanId: '../scan' }, { ...request, offset: 0 }]) {
+    await expect(insights.getSizeDistribution(invalid, signal)).rejects.toMatchObject({
+      code: 'INVALID_REQUEST'
+    })
+  }
+  expect(read).not.toHaveBeenCalled()
+  const distribution = sizeDistribution()
+  query.mockResolvedValueOnce(distribution)
+  await expect(insights.getSizeDistribution(request, signal)).resolves.toBe(distribution)
+  expect(query).toHaveBeenCalledExactlyOnceWith(request.scanId)
+  expect(read).toHaveBeenCalledExactlyOnceWith(signal)
+  query.mockResolvedValueOnce({ ...distribution, scanId: 'replaced' })
+  await expect(insights.getSizeDistribution(request, signal)).rejects.toThrow(
+    'different publication'
+  )
+})
+
+test('Worker validates ordered fixed buckets and exact distribution totals', () => {
+  const result = sizeDistribution()
+  const reply = { requestId: 1, ok: true, result }
+  expect(parseStorageResponse(reply, 1, 'getInsightsSizeDistribution')).toEqual(reply)
+  for (const invalid of [
+    { ...result, buckets: [] },
+    { ...result, buckets: result.buckets.toReversed() },
+    { ...result, knownSizeCount: 1 },
+    { ...result, incomplete: false },
+    {
+      ...result,
+      buckets: [{ id: 'empty', fileCount: 1, knownBytes: 1 }, ...result.buckets.slice(1)]
+    },
+    { ...result, buckets: result.buckets.map((bucket) => ({ ...bucket, fileCount: 0 })) },
+    { ...result, totals: { ...result.totals, knownBytes: Number.MAX_SAFE_INTEGER + 1 } }
+  ]) {
+    expect(() =>
+      parseStorageResponse({ ...reply, result: invalid }, 1, 'getInsightsSizeDistribution')
+    ).toThrow('Invalid response')
   }
 })
 

@@ -8,9 +8,9 @@ import {
   type InsightsFileTotals
 } from '../../shared/insights'
 import { classifyExtension, normalizedExtension } from '../insights/fileClassification'
+import { aggregateInteger, readFileAggregateRows } from './fileAggregation'
 import { bindFilesystemText, readFilesystemText } from './filesystemText'
 import type { CompletedScan } from './payloads'
-import { SnapshotAccessError } from './snapshotAccess'
 
 const FILE_TOTALS = `COUNT(*) AS file_count,
   COALESCE(SUM(size_bytes), 0) AS known_bytes,
@@ -46,28 +46,6 @@ const INSIGHTS_EXTENSION_SQL = `
   SELECT totals.*, page.* FROM totals LEFT JOIN page ON TRUE
   ORDER BY ${EXTENSION_ORDER}
 `
-
-function sizeOverflow(): SnapshotAccessError {
-  return new SnapshotAccessError('SIZE_OVERFLOW', 'The file breakdown exceeds the supported size.')
-}
-
-function aggregateInteger(value: SQLOutputValue): number {
-  if (typeof value !== 'bigint' || value < 0n) throw new Error('Invalid file aggregation result.')
-  if (value > BigInt(Number.MAX_SAFE_INTEGER)) throw sizeOverflow()
-  return Number(value)
-}
-
-function readGroups(
-  statement: StatementSync,
-  request: Record<string, string | bigint>
-): Record<string, SQLOutputValue>[] {
-  try {
-    return statement.all(request)
-  } catch (error) {
-    if (error instanceof Error && error.message === 'integer overflow') throw sizeOverflow()
-    throw error
-  }
-}
 
 function readGroup(row: Record<string, SQLOutputValue>): InsightsFileTotals {
   return {
@@ -117,7 +95,7 @@ export class FileTypeAnalytics {
   }
 
   getCategories(scan: CompletedScan): InsightsCategories {
-    const rows = readGroups(this.categories, { $scanId: scan.id })
+    const rows = readFileAggregateRows(this.categories, { $scanId: scan.id })
     return {
       ...breakdown(scan, rows[0]),
       categories: INSIGHTS_FILE_CATEGORIES.flatMap((category) => {
@@ -131,7 +109,7 @@ export class FileTypeAnalytics {
     scan: CompletedScan,
     { offset, limit }: Required<InsightsExtensionRequest>
   ): InsightsExtensionPage {
-    const rows = readGroups(this.extensions, {
+    const rows = readFileAggregateRows(this.extensions, {
       $scanId: scan.id,
       $limit: BigInt(limit),
       $offset: BigInt(offset)

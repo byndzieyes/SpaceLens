@@ -5,6 +5,7 @@ import type {
   InsightsRankingPage,
   InsightsRankingRequest,
   InsightsRequest,
+  InsightsSizeDistribution,
   InsightsSummary
 } from './insights'
 import type { FileEntry, RecentScanSummary, ScanSessionState } from './scan'
@@ -37,6 +38,9 @@ export interface SpaceLensAPI {
   ) => Promise<ScannerIpcResult<ScanDirectoryTreemap>>
   getInsightsSummary: (request: InsightsRequest) => Promise<ScannerIpcResult<InsightsSummary>>
   getInsightsCategories: (request: InsightsRequest) => Promise<ScannerIpcResult<InsightsCategories>>
+  getInsightsSizeDistribution: (
+    request: InsightsRequest
+  ) => Promise<ScannerIpcResult<InsightsSizeDistribution>>
   listInsightsExtensions: (
     request: InsightsExtensionRequest
   ) => Promise<ScannerIpcResult<InsightsExtensionPage>>
@@ -61,6 +65,7 @@ export const IPC_CHANNELS = {
   getScanDirectoryTreemap: 'spacelens:get-scan-directory-treemap',
   getInsightsSummary: 'spacelens:get-insights-summary',
   getInsightsCategories: 'spacelens:get-insights-categories',
+  getInsightsSizeDistribution: 'spacelens:get-insights-size-distribution',
   listInsightsExtensions: 'spacelens:list-insights-extensions',
   listInsightsLargestFiles: 'spacelens:list-insights-largest-files',
   listInsightsLargestDirectories: 'spacelens:list-insights-largest-directories',
