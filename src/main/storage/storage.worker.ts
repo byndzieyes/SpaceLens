@@ -68,6 +68,10 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().getInsightsCategories(request.payload.scanId)
     case 'listInsightsExtensions':
       return requireDatabase().listInsightsExtensions(request.payload)
+    case 'listInsightsLargestFiles':
+      return requireDatabase().listInsightsLargest(request.payload, 'file')
+    case 'listInsightsLargestDirectories':
+      return requireDatabase().listInsightsLargest(request.payload, 'directory')
     case 'getScanSnapshot':
       return requireDatabase().getScanSnapshot()
     case 'getScanEntry':

@@ -55,6 +55,8 @@ const queries = {
   requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
   listInsightsExtensions: vi.fn<StorageWorkerClient['listInsightsExtensions']>(),
+  listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
+  listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
@@ -285,7 +287,9 @@ test.each([
   IPC_CHANNELS.getScanDirectoryTreemap,
   IPC_CHANNELS.getInsightsSummary,
   IPC_CHANNELS.getInsightsCategories,
-  IPC_CHANNELS.listInsightsExtensions
+  IPC_CHANNELS.listInsightsExtensions,
+  IPC_CHANNELS.listInsightsLargestFiles,
+  IPC_CHANNELS.listInsightsLargestDirectories
 ])(
   'rejects foreign senders, subframes, navigated documents, and shutdown on %s',
   async (channel) => {
@@ -308,6 +312,8 @@ test.each([
     expect(queries.requirePublishedScan).not.toHaveBeenCalled()
     expect(queries.getInsightsCategories).not.toHaveBeenCalled()
     expect(queries.listInsightsExtensions).not.toHaveBeenCalled()
+    expect(queries.listInsightsLargestFiles).not.toHaveBeenCalled()
+    expect(queries.listInsightsLargestDirectories).not.toHaveBeenCalled()
   }
 )
 
@@ -536,6 +542,62 @@ test('discards a pending Insights response after the attached document navigates
   pending.resolve(completed())
   expect(await response).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
 })
+
+test.each([
+  ['listInsightsLargestFiles', 'file'],
+  ['listInsightsLargestDirectories', 'directory']
+] as const)(
+  'validates, authorizes and routes %s through the Insights read context',
+  async (operation, type) => {
+    const channel = IPC_CHANNELS[operation]
+    const query = queries[operation]
+    for (const args of [
+      [],
+      [{ scanId: id, offset: -1 }],
+      [{ scanId: id, limit: 21 }],
+      [{ scanId: id, path: rootPath }],
+      [{ scanId: id }, 'extra']
+    ]) {
+      expect(await invoke(channel, args)).toMatchObject({
+        ok: false,
+        error: { code: 'INVALID_REQUEST' }
+      })
+    }
+    expect(query).not.toHaveBeenCalled()
+    const page = {
+      scanId: id,
+      incomplete: true,
+      offset: 0,
+      limit: 10,
+      totalCount: 1,
+      nextOffset: null,
+      entries: [
+        { id: otherId, parentId: 'root', scanId: id, type, name: 'entry', path: rootPath, bytes: 0 }
+      ]
+    }
+    query.mockResolvedValueOnce(page)
+    expect(await invoke(channel, [{ scanId: id }])).toEqual({ ok: true, value: page })
+    expect(query).toHaveBeenCalledExactlyOnceWith({ scanId: id, offset: 0, limit: 10 })
+    query.mockRejectedValueOnce(
+      new StorageWorkerError({
+        name: 'SnapshotAccessError',
+        code: 'SIZE_OVERFLOW',
+        message: 'Unsupported ranked size',
+        sqliteCode: null
+      })
+    )
+    expect(await invoke(channel, [{ scanId: id }])).toMatchObject({
+      ok: false,
+      error: { code: 'SIZE_OVERFLOW', message: 'Unsupported ranked size' }
+    })
+    const pending = Promise.withResolvers<typeof page>()
+    query.mockReturnValueOnce(pending.promise)
+    const response = invoke(channel, [{ scanId: id }])
+    renderer.emit('did-start-navigation', { isMainFrame: true })
+    pending.resolve(page)
+    expect(await response).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+  }
+)
 
 test.each([
   'SNAPSHOT_UNAVAILABLE',
@@ -879,7 +941,9 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsSummary)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsCategories)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsExtensions)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(11)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsLargestFiles)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsLargestDirectories)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(13)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

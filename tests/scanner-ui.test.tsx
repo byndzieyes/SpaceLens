@@ -80,6 +80,8 @@ beforeEach(() => {
     getInsightsSummary: vi.fn(),
     getInsightsCategories: vi.fn(),
     listInsightsExtensions: vi.fn(),
+    listInsightsLargestFiles: vi.fn(),
+    listInsightsLargestDirectories: vi.fn(),
     onScanStateChanged: vi.fn((listener) => {
       listeners.add(listener)
       return () => {

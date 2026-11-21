@@ -399,6 +399,12 @@ test('coordinates a real Worker after startup and prioritizes publication over E
       code: 'SNAPSHOT_EXPIRED'
     })
     const nextExtensions = insights.listExtensions({ scanId: next.id }, signal)
+    const oldRanking = expect(
+      insights.listLargest({ scanId: old.id }, 'file', signal)
+    ).rejects.toMatchObject({
+      code: 'SNAPSHOT_EXPIRED'
+    })
+    const nextRanking = insights.listLargest({ scanId: next.id }, 'file', signal)
     const page = storage.read(signal, (db) =>
       db.listScanDirectory({ scanId: next.id, entryId: root.id, offset: 0, limit: 100 })
     )
@@ -409,17 +415,71 @@ test('coordinates a real Worker after startup and prioritizes publication over E
     await oldEntry
     await expiredSummary
     await expiredExtensions
+    await oldRanking
     expect((await nextSnapshot).snapshot?.entries.scanId).toBe(next.id)
     expect(await nextSummary).toMatchObject({ scanId: next.id, summary: next.summary })
     expect(await nextExtensions).toMatchObject({
       scanId: next.id,
       extensions: [{ extension: 'txt' }]
     })
+    expect(await nextRanking).toMatchObject({
+      scanId: next.id,
+      entries: [{ id: file.id, parentId: root.id }]
+    })
     expect(await page).toMatchObject({ scanId: next.id, totalCount: 1, nextOffset: null })
   } finally {
     storage.stopReads()
     release.resolve()
     await oldRead.catch(() => {})
+  }
+})
+
+test('queues rankings and Explorer reads alongside a real Scanner batch for a replacement scan', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.recoverStorage()
+  const old = await preparePublication(client, lifecycleScan('previous'))
+  await client.publishScan(old, root.id)
+  const next = lifecycleScan('replacement')
+  await client.beginScan(next)
+  const storage = new ScanStorageCoordinator(Promise.resolve(client))
+  const insights = new InsightsQueryService(storage)
+  const { signal } = new AbortController()
+  const received = Promise.withResolvers<void>()
+  const release = Promise.withResolvers<void>()
+  const apply = client.applyBatch.bind(client)
+  vi.spyOn(client, 'applyBatch').mockImplementationOnce(async (scanId, operations) => {
+    await apply(scanId, operations)
+    received.resolve()
+    await release.promise
+  })
+  const write = storage.applyBatch(next.id, [
+    { type: 'entry', entry: { ...root, scanId: next.id } }
+  ])
+  try {
+    await received.promise
+    const sent = vi.spyOn(client, 'listInsightsLargestFiles')
+    const ranking = insights.listLargest({ scanId: old.id }, 'file', signal)
+    const current = storage.read(signal, (db) =>
+      db.getScanEntry({ scanId: old.id, entryId: file.id })
+    )
+    const building = expect(
+      insights.listLargest({ scanId: next.id }, 'directory', signal)
+    ).rejects.toMatchObject({
+      code: 'SNAPSHOT_UNAVAILABLE'
+    })
+    expect(sent).not.toHaveBeenCalled()
+    release.resolve()
+    await write
+    expect(await ranking).toMatchObject({ scanId: old.id, entries: [{ id: file.id, bytes: 0 }] })
+    expect(await current).toMatchObject({ scanId: old.id, id: file.id })
+    await building
+    await storage.discardBuildingScan(next.id)
+    expect(await insights.listLargest({ scanId: old.id }, 'file', signal)).toEqual(await ranking)
+  } finally {
+    release.resolve()
+    storage.stopReads()
+    await write.catch(() => {})
   }
 })
 
@@ -546,6 +606,9 @@ test('reads exact Insights summaries from published rows across cancellation, re
   await expect(insights.getCategories(request, signal)).rejects.toMatchObject({
     code: 'SNAPSHOT_UNAVAILABLE'
   })
+  await expect(insights.listLargest(request, 'file', signal)).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
   await storage.beginScan(previous)
   await expect(insights.getSummary(request, signal)).rejects.toMatchObject({
     code: 'SNAPSHOT_UNAVAILABLE'
@@ -565,15 +628,24 @@ test('reads exact Insights summaries from published rows across cancellation, re
     path: previous.rootPath,
     type: 'directory' as const
   }
+  const nested = {
+    ...directory,
+    id: 'nested',
+    parentId: directory.id,
+    name: 'nested',
+    path: join(directory.path, 'nested')
+  }
   const known = {
     ...file,
     scanId: previous.id,
-    path: join(previous.rootPath, fileName),
+    parentId: nested.id,
+    path: join(nested.path, fileName),
     sizeBytes: Number.MAX_SAFE_INTEGER
   }
   const unknown = {
     ...known,
     id: 'unknown-size',
+    parentId: directory.id,
     path: join(previous.rootPath, 'unknown-size.txt'),
     name: 'unknown-size.txt',
     sizeBytes: null,
@@ -581,12 +653,17 @@ test('reads exact Insights summaries from published rows across cancellation, re
   }
   const completed: CompletedScan = {
     ...readyMetadata(previous),
-    summary: { totalBytes: Number.MAX_SAFE_INTEGER, fileCount: 2, directoryCount: 1, errorCount: 2 }
+    summary: { totalBytes: Number.MAX_SAFE_INTEGER, fileCount: 2, directoryCount: 2, errorCount: 2 }
   }
   await storage.applyBatch(previous.id, [
     { type: 'entry', entry: directory },
+    { type: 'entry', entry: nested },
     { type: 'entry', entry: known },
     { type: 'entry', entry: unknown },
+    {
+      type: 'directory-finalized',
+      entry: { ...nested, aggregatedSizeBytes: Number.MAX_SAFE_INTEGER }
+    },
     {
       type: 'directory-finalized',
       entry: { ...directory, aggregatedSizeBytes: completed.summary.totalBytes }
@@ -617,6 +694,25 @@ test('reads exact Insights summaries from published rows across cancellation, re
     extensions: [{ extension: 'txt', category: 'documents', ...totals }]
   }
   await storage.beginScan(interrupted)
+  const previousFiles = await insights.listLargest(request, 'file', signal)
+  const previousDirectories = await insights.listLargest(request, 'directory', signal)
+  expect(previousFiles).toMatchObject({
+    incomplete: true,
+    totalCount: 2,
+    entries: [
+      { id: known.id, parentId: nested.id, path: known.path, bytes: Number.MAX_SAFE_INTEGER },
+      { id: unknown.id, bytes: null }
+    ]
+  })
+  expect(previousDirectories).toMatchObject({
+    totalCount: 1,
+    entries: [{ id: nested.id, parentId: directory.id, bytes: Number.MAX_SAFE_INTEGER }]
+  })
+  await expect(
+    insights.listLargest({ scanId: interrupted.id }, 'directory', signal)
+  ).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
   await expect(insights.getCategories(request, signal)).resolves.toEqual(expectedCategories)
   await expect(insights.listExtensions({ scanId: interrupted.id }, signal)).rejects.toMatchObject({
     code: 'SNAPSHOT_UNAVAILABLE'
@@ -626,6 +722,7 @@ test('reads exact Insights summaries from published rows across cancellation, re
     code: 'SNAPSHOT_UNAVAILABLE'
   })
   await storage.discardBuildingScan(interrupted.id)
+  await expect(insights.listLargest(request, 'file', signal)).resolves.toEqual(previousFiles)
   await expect(insights.listExtensions(request, signal)).resolves.toEqual(expectedExtensions)
   await expect(insights.getSummary(request, signal)).resolves.toEqual(expected)
   await expect(client.getScan(previous.id)).resolves.toEqual(completed)
@@ -650,6 +747,12 @@ test('reads exact Insights summaries from published rows across cancellation, re
     await reopened.recoverStorage()
     ready.resolve(reopened)
     await expect(duringStartup).resolves.toEqual(expected)
+    await expect(restoredInsights.listLargest(request, 'file', signal)).resolves.toEqual(
+      previousFiles
+    )
+    await expect(restoredInsights.listLargest(request, 'directory', signal)).resolves.toEqual(
+      previousDirectories
+    )
     await expect(restoredInsights.getCategories(request, signal)).resolves.toEqual(
       expectedCategories
     )
@@ -670,6 +773,9 @@ test('reads exact Insights summaries from published rows across cancellation, re
       { type: 'directory-finalized', entry: { ...emptyRoot, aggregatedSizeBytes: 0 } }
     ])
     await restoredStorage.publishScan(empty, emptyRoot.id)
+    await expect(restoredInsights.listLargest(request, 'directory', signal)).rejects.toMatchObject({
+      code: 'SNAPSHOT_EXPIRED'
+    })
     await expect(restoredInsights.getCategories(request, signal)).rejects.toMatchObject({
       code: 'SNAPSHOT_EXPIRED'
     })
@@ -855,6 +961,17 @@ test('bounds Explorer and Insights results for a directory with more than 100,00
     }
   })
   const totals = { fileCount: count, knownBytes: totalBytes, unknownSizeCount: 0 }
+  const first = await client.listInsightsLargestFiles({ scanId: pending.id, offset: 0, limit: 10 })
+  const second = await client.listInsightsLargestFiles({
+    scanId: pending.id,
+    offset: 10,
+    limit: 10
+  })
+  expect(first).toMatchObject({ totalCount: 20, nextOffset: 10 })
+  expect(second).toMatchObject({ totalCount: 20, nextOffset: null })
+  expect([...first.entries, ...second.entries].map(({ id }) => id)).toEqual(
+    Array.from({ length: 20 }, (_, i) => label(count - 1 - i))
+  )
   await expect(client.getInsightsCategories(pending.id)).resolves.toMatchObject({
     totals,
     categories: [{ category: 'other', ...totals }]

@@ -2,7 +2,10 @@ import { DatabaseSync, type SQLOutputValue, type StatementSync } from 'node:sqli
 import type {
   InsightsCategories,
   InsightsExtensionPage,
-  InsightsExtensionRequest
+  InsightsExtensionRequest,
+  InsightsRankedEntry,
+  InsightsRankingPage,
+  InsightsRankingRequest
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
@@ -16,6 +19,7 @@ import {
 } from '../../shared/snapshot'
 import {
   readExtensionRequest,
+  readRankingRequest,
   SnapshotAccessError,
   validateSnapshotRequest,
   validateTreemapRequest
@@ -34,6 +38,7 @@ import { prepareSnapshotValidation } from './publication'
 import { initializeSchema } from './schema'
 import { FileTypeAnalytics } from './fileTypeAnalytics'
 import { bindFilesystemText, readFilesystemText } from './filesystemText'
+import { LargestEntries } from './largestEntries'
 
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
 const SELECT_SCAN = `
@@ -166,6 +171,7 @@ function inTransaction(connection: DatabaseSync, operation: () => undefined): vo
 export class ScanDatabase {
   private readonly connection: DatabaseSync
   private readonly fileTypes: FileTypeAnalytics
+  private readonly largestEntries: LargestEntries
   private readonly insertScanStatement: StatementSync
   private readonly selectScanStatement: StatementSync
   private readonly selectPublishedStatement: StatementSync
@@ -201,6 +207,7 @@ export class ScanDatabase {
       }
       inTransaction(this.connection, () => initializeSchema(this.connection))
       this.fileTypes = new FileTypeAnalytics(this.connection)
+      this.largestEntries = new LargestEntries(this.connection)
 
       this.insertScanStatement = this.connection.prepare(`
         INSERT INTO scans (
@@ -561,6 +568,14 @@ export class ScanDatabase {
   listInsightsExtensions(request: InsightsExtensionRequest): InsightsExtensionPage {
     const page = readExtensionRequest(request)
     return this.fileTypes.listExtensions(this.requirePublishedScan(page.scanId), page)
+  }
+
+  listInsightsLargest(
+    request: InsightsRankingRequest,
+    type: InsightsRankedEntry['type']
+  ): InsightsRankingPage {
+    const page = readRankingRequest(request)
+    return this.largestEntries.list(this.requirePublishedScan(page.scanId), type, page)
   }
 
   requirePublishedScan(scanId: string): CompletedScan {

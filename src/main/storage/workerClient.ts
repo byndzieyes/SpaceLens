@@ -2,7 +2,9 @@ import type { Worker } from 'node:worker_threads'
 import type {
   InsightsCategories,
   InsightsExtensionPage,
-  InsightsExtensionRequest
+  InsightsExtensionRequest,
+  InsightsRankingPage,
+  InsightsRankingRequest
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import type {
@@ -114,6 +116,18 @@ export class StorageWorkerClient {
     request: Required<InsightsExtensionRequest>
   ): Promise<InsightsExtensionPage> {
     return this.run('listInsightsExtensions', request)
+  }
+
+  listInsightsLargestFiles(
+    request: Required<InsightsRankingRequest>
+  ): Promise<InsightsRankingPage> {
+    return this.run('listInsightsLargestFiles', request)
+  }
+
+  listInsightsLargestDirectories(
+    request: Required<InsightsRankingRequest>
+  ): Promise<InsightsRankingPage> {
+    return this.run('listInsightsLargestDirectories', request)
   }
 
   getScanSnapshot(): Promise<ScanSnapshotAvailability> {

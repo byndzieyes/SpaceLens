@@ -17,6 +17,8 @@ type SnapshotQueries = Pick<
   | 'requirePublishedScan'
   | 'getInsightsCategories'
   | 'listInsightsExtensions'
+  | 'listInsightsLargestFiles'
+  | 'listInsightsLargestDirectories'
 >
 
 /** A request that could not be sent, or a read whose reply can no longer be used. */

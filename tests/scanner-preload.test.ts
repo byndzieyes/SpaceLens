@@ -42,6 +42,8 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'getScanSnapshot',
     'getScanState',
     'listInsightsExtensions',
+    'listInsightsLargestDirectories',
+    'listInsightsLargestFiles',
     'listScanDirectory',
     'onScanStateChanged',
     'selectScanDirectory',
@@ -95,6 +97,22 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     scanId: 'scan',
     offset: 50
   })
+  expect(await api.listInsightsLargestFiles({ scanId: 'scan' })).toBe(response)
+  expect(await api.listInsightsLargestDirectories({ scanId: 'scan', offset: 10, limit: 10 })).toBe(
+    response
+  )
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(13, IPC_CHANNELS.listInsightsLargestFiles, {
+    scanId: 'scan'
+  })
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(
+    14,
+    IPC_CHANNELS.listInsightsLargestDirectories,
+    {
+      scanId: 'scan',
+      offset: 10,
+      limit: 10
+    }
+  )
 })
 
 test('deduplicates subscribers, strips Electron events, and supports idempotent unsubscription', () => {

@@ -2,6 +2,8 @@ import type {
   InsightsCategories,
   InsightsExtensionPage,
   InsightsExtensionRequest,
+  InsightsRankingPage,
+  InsightsRankingRequest,
   InsightsRequest,
   InsightsSummary
 } from './insights'
@@ -38,6 +40,12 @@ export interface SpaceLensAPI {
   listInsightsExtensions: (
     request: InsightsExtensionRequest
   ) => Promise<ScannerIpcResult<InsightsExtensionPage>>
+  listInsightsLargestFiles: (
+    request: InsightsRankingRequest
+  ) => Promise<ScannerIpcResult<InsightsRankingPage>>
+  listInsightsLargestDirectories: (
+    request: InsightsRankingRequest
+  ) => Promise<ScannerIpcResult<InsightsRankingPage>>
   cancelScan: (request: CancelScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
   onScanStateChanged: (callback: (snapshot: ScanStateSnapshot) => void) => () => void
 }
@@ -54,6 +62,8 @@ export const IPC_CHANNELS = {
   getInsightsSummary: 'spacelens:get-insights-summary',
   getInsightsCategories: 'spacelens:get-insights-categories',
   listInsightsExtensions: 'spacelens:list-insights-extensions',
+  listInsightsLargestFiles: 'spacelens:list-insights-largest-files',
+  listInsightsLargestDirectories: 'spacelens:list-insights-largest-directories',
   cancelScan: 'spacelens:cancel-scan',
   scanStateChanged: 'spacelens:scan-state-changed',
   acknowledgeScanState: 'spacelens:acknowledge-scan-state'

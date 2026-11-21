@@ -169,6 +169,8 @@ function mockApp(): {
     getInsightsSummary: vi.fn<SpaceLensAPI['getInsightsSummary']>(),
     getInsightsCategories: vi.fn(),
     listInsightsExtensions: vi.fn(),
+    listInsightsLargestFiles: vi.fn(),
+    listInsightsLargestDirectories: vi.fn(),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: state })),
     getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
       ok: true,

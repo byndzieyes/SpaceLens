@@ -1,10 +1,12 @@
 import type {
   InsightsCategories,
   InsightsExtensionPage,
+  InsightsRankedEntry,
+  InsightsRankingPage,
   InsightsSummary
 } from '../../shared/insights'
 import type { ScanStorageCoordinator } from '../storage/coordinator'
-import { readExtensionRequest, readSnapshotId } from '../storage/snapshotAccess'
+import { readExtensionRequest, readRankingRequest, readSnapshotId } from '../storage/snapshotAccess'
 
 function assertPublication(actual: string, requested: string): void {
   if (actual !== requested) throw new Error('Storage returned a different publication.')
@@ -37,6 +39,24 @@ export class InsightsQueryService {
     const page = readExtensionRequest(request)
     const result = await this.storage.read(signal, (client) => client.listInsightsExtensions(page))
     assertPublication(result.scanId, page.scanId)
+    return result
+  }
+
+  async listLargest(
+    request: unknown,
+    type: InsightsRankedEntry['type'],
+    signal: AbortSignal
+  ): Promise<InsightsRankingPage> {
+    const page = readRankingRequest(request)
+    const result = await this.storage.read(signal, (client) =>
+      type === 'file'
+        ? client.listInsightsLargestFiles(page)
+        : client.listInsightsLargestDirectories(page)
+    )
+    assertPublication(result.scanId, page.scanId)
+    if (result.offset !== page.offset || result.limit !== page.limit) {
+      throw new Error('Storage returned a different ranking page.')
+    }
     return result
   }
 }

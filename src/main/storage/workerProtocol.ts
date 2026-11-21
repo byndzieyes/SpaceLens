@@ -1,12 +1,16 @@
 import {
   INSIGHTS_FILE_CATEGORIES,
+  INSIGHTS_RANKING_LIMIT,
   MAX_INSIGHTS_EXTENSION_PAGE_SIZE,
   type InsightsCategories,
   type InsightsCategoryRow,
   type InsightsExtensionPage,
   type InsightsExtensionRequest,
   type InsightsFileBreakdown,
-  type InsightsFileTotals
+  type InsightsFileTotals,
+  type InsightsRankedEntry,
+  type InsightsRankingPage,
+  type InsightsRankingRequest
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
@@ -22,6 +26,7 @@ import {
 } from '../../shared/snapshot'
 import {
   readExtensionRequest,
+  readRankingRequest,
   readSnapshotId,
   validateSnapshotRequest,
   validateTreemapRequest
@@ -57,6 +62,14 @@ interface StorageCommands {
   listInsightsExtensions: {
     payload: Required<InsightsExtensionRequest>
     result: InsightsExtensionPage
+  }
+  listInsightsLargestFiles: {
+    payload: Required<InsightsRankingRequest>
+    result: InsightsRankingPage
+  }
+  listInsightsLargestDirectories: {
+    payload: Required<InsightsRankingRequest>
+    result: InsightsRankingPage
   }
   getScanSnapshot: { payload: null; result: ScanSnapshotAvailability }
   getScanEntry: { payload: ScanEntryRequest; result: FileEntry }
@@ -137,6 +150,9 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       return { requestId, operation, payload: { scanId: readSnapshotId(payload) } }
     case 'listInsightsExtensions':
       return { requestId, operation, payload: readExtensionRequest(payload) }
+    case 'listInsightsLargestFiles':
+    case 'listInsightsLargestDirectories':
+      return { requestId, operation, payload: readRankingRequest(payload) }
     case 'getScanEntry': {
       const request = payload as ScanEntryRequest
       validateSnapshotRequest(request, false)
@@ -346,6 +362,43 @@ function isInsightsExtensionPage(value: unknown): value is InsightsExtensionPage
   )
 }
 
+function isRankingPage(
+  value: unknown,
+  type: InsightsRankedEntry['type']
+): value is InsightsRankingPage {
+  if (!record(value)) return false
+  const { scanId, offset, limit, totalCount, entries, nextOffset, incomplete } = value
+  if (
+    !isSnapshotId(scanId) ||
+    typeof incomplete !== 'boolean' ||
+    !integer(offset) ||
+    !integer(limit) ||
+    limit < 1 ||
+    limit > INSIGHTS_RANKING_LIMIT ||
+    !integer(totalCount) ||
+    totalCount > INSIGHTS_RANKING_LIMIT ||
+    !Array.isArray(entries) ||
+    entries.length !== Math.min(limit, Math.max(0, totalCount - offset))
+  )
+    return false
+  const next = offset + entries.length
+  return (
+    nextOffset === (next < totalCount ? next : null) &&
+    Array.from(entries).every(
+      (row) =>
+        record(row) &&
+        row.scanId === scanId &&
+        row.type === type &&
+        isSnapshotId(row.id) &&
+        isSnapshotId(row.parentId) &&
+        row.parentId !== row.id &&
+        typeof row.name === 'string' &&
+        nonempty(row.path) &&
+        (row.bytes === null || integer(row.bytes))
+    )
+  )
+}
+
 const resultValidators: { [T in StorageOperation]: (value: unknown) => value is StorageResult<T> } =
   {
     initialize: isNull,
@@ -359,6 +412,9 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     requirePublishedScan: isCompletedScan,
     getInsightsCategories: isInsightsCategories,
     listInsightsExtensions: isInsightsExtensionPage,
+    listInsightsLargestFiles: (value): value is InsightsRankingPage => isRankingPage(value, 'file'),
+    listInsightsLargestDirectories: (value): value is InsightsRankingPage =>
+      isRankingPage(value, 'directory'),
     getScanSnapshot: isSnapshotAvailability,
     getScanEntry: isStorageEntry,
     listScanDirectory: isDirectoryPage,

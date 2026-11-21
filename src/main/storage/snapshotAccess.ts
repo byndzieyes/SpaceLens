@@ -1,7 +1,10 @@
 import {
   DEFAULT_INSIGHTS_EXTENSION_PAGE_SIZE,
+  DEFAULT_INSIGHTS_RANKING_PAGE_SIZE,
+  INSIGHTS_RANKING_LIMIT,
   MAX_INSIGHTS_EXTENSION_PAGE_SIZE,
-  type InsightsExtensionRequest
+  type InsightsExtensionRequest,
+  type InsightsRankingRequest
 } from '../../shared/insights'
 import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
@@ -36,6 +39,22 @@ export function readSnapshotId(request: unknown): string {
 }
 
 export function readExtensionRequest(request: unknown): Required<InsightsExtensionRequest> {
+  return readInsightsPage(
+    request,
+    DEFAULT_INSIGHTS_EXTENSION_PAGE_SIZE,
+    MAX_INSIGHTS_EXTENSION_PAGE_SIZE
+  )
+}
+
+export function readRankingRequest(request: unknown): Required<InsightsRankingRequest> {
+  return readInsightsPage(request, DEFAULT_INSIGHTS_RANKING_PAGE_SIZE, INSIGHTS_RANKING_LIMIT)
+}
+
+function readInsightsPage(
+  request: unknown,
+  defaultLimit: number,
+  maxLimit: number
+): { scanId: string; offset: number; limit: number } {
   if (
     record(request) &&
     Object.keys(request).every((key) => key === 'scanId' || key === 'offset' || key === 'limit') &&
@@ -43,21 +62,14 @@ export function readExtensionRequest(request: unknown): Required<InsightsExtensi
     isSnapshotId(request.scanId)
   ) {
     const offset = Object.hasOwn(request, 'offset') ? request.offset : 0
-    const limit = Object.hasOwn(request, 'limit')
-      ? request.limit
-      : DEFAULT_INSIGHTS_EXTENSION_PAGE_SIZE
-    if (
-      integer(offset) &&
-      integer(limit) &&
-      limit >= 1 &&
-      limit <= MAX_INSIGHTS_EXTENSION_PAGE_SIZE
-    ) {
+    const limit = Object.hasOwn(request, 'limit') ? request.limit : defaultLimit
+    if (integer(offset) && integer(limit) && limit >= 1 && limit <= maxLimit) {
       return { scanId: request.scanId, offset, limit }
     }
   }
   throw new SnapshotAccessError(
     'INVALID_REQUEST',
-    `A scan ID and pagination with a limit from 1 to ${MAX_INSIGHTS_EXTENSION_PAGE_SIZE} are required.`
+    `A scan ID and pagination with a limit from 1 to ${maxLimit} are required.`
   )
 }
 

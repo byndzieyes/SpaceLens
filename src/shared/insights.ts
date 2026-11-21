@@ -1,4 +1,4 @@
-import type { ScanSummary } from './scan'
+import type { FileEntry, ScanSummary } from './scan'
 
 /** Identifies a specific publication. Replacement does not retarget the request. */
 export interface InsightsRequest {
@@ -70,6 +70,34 @@ export interface InsightsExtensionRow extends InsightsCategoryRow {
 
 export interface InsightsExtensionPage extends InsightsFileBreakdown {
   readonly extensions: readonly InsightsExtensionRow[]
+  readonly totalCount: number
+  readonly nextOffset: number | null
+}
+
+export const INSIGHTS_RANKING_LIMIT = 20
+export const DEFAULT_INSIGHTS_RANKING_PAGE_SIZE = 10
+
+export interface InsightsRankingRequest extends InsightsRequest {
+  /** Defaults to zero. Offsets past the ranking return an empty page. */
+  readonly offset?: number
+  /** Defaults to 10, up to 20 ranked entries per page. */
+  readonly limit?: number
+}
+
+export interface InsightsRankedEntry extends Pick<FileEntry, 'scanId' | 'id' | 'name' | 'path'> {
+  readonly parentId: string
+  readonly type: 'file' | 'directory'
+  /** Stored logical size or directory aggregate. Directory totals can overlap. */
+  readonly bytes: number | null
+}
+
+export interface InsightsRankingPage {
+  readonly scanId: string
+  readonly incomplete: boolean
+  readonly entries: readonly InsightsRankedEntry[]
+  readonly offset: number
+  readonly limit: number
+  /** Number of eligible entries in the bounded ranking. */
   readonly totalCount: number
   readonly nextOffset: number | null
 }

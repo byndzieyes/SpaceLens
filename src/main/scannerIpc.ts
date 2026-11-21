@@ -316,7 +316,9 @@ export function registerScannerIpc(
     IPC_CHANNELS.getScanDirectoryTreemap,
     IPC_CHANNELS.getInsightsSummary,
     IPC_CHANNELS.getInsightsCategories,
-    IPC_CHANNELS.listInsightsExtensions
+    IPC_CHANNELS.listInsightsExtensions,
+    IPC_CHANNELS.listInsightsLargestFiles,
+    IPC_CHANNELS.listInsightsLargestDirectories
   ] as const
   for (const channel of readChannels) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
@@ -329,7 +331,9 @@ export function registerScannerIpc(
               'UNAVAILABLE',
               channel === IPC_CHANNELS.getInsightsSummary ||
                 channel === IPC_CHANNELS.getInsightsCategories ||
-                channel === IPC_CHANNELS.listInsightsExtensions
+                channel === IPC_CHANNELS.listInsightsExtensions ||
+                channel === IPC_CHANNELS.listInsightsLargestFiles ||
+                channel === IPC_CHANNELS.listInsightsLargestDirectories
                 ? 'The Insights context is no longer available.'
                 : 'The Explorer context is no longer available.'
             )
@@ -353,6 +357,14 @@ export function registerScannerIpc(
         }
         if (channel === IPC_CHANNELS.listInsightsExtensions) {
           const value = await insights.listExtensions(args[0], signal)
+          return reply({ ok: true, value })
+        }
+        if (
+          channel === IPC_CHANNELS.listInsightsLargestFiles ||
+          channel === IPC_CHANNELS.listInsightsLargestDirectories
+        ) {
+          const type = channel === IPC_CHANNELS.listInsightsLargestFiles ? 'file' : 'directory'
+          const value = await insights.listLargest(args[0], type, signal)
           return reply({ ok: true, value })
         }
         if (channel === IPC_CHANNELS.getScanDirectoryTreemap) {

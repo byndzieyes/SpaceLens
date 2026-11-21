@@ -54,6 +54,10 @@ const api: SpaceLensAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.getInsightsCategories, request),
   listInsightsExtensions: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.listInsightsExtensions, request),
+  listInsightsLargestFiles: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.listInsightsLargestFiles, request),
+  listInsightsLargestDirectories: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.listInsightsLargestDirectories, request),
   cancelScan: (request) => ipcRenderer.invoke(IPC_CHANNELS.cancelScan, request),
   onScanStateChanged: (callback) => {
     if (typeof callback !== 'function') throw new TypeError('A scan state callback is required.')

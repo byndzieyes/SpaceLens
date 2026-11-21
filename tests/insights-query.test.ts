@@ -16,6 +16,8 @@ const queries = {
   requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
   listInsightsExtensions: vi.fn<StorageWorkerClient['listInsightsExtensions']>(),
+  listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
+  listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
@@ -45,6 +47,8 @@ beforeEach(() => {
   queries.requirePublishedScan.mockReset()
   queries.getInsightsCategories.mockReset()
   queries.listInsightsExtensions.mockReset()
+  queries.listInsightsLargestFiles.mockReset()
+  queries.listInsightsLargestDirectories.mockReset()
 })
 
 test('the public Insights method uses the shared request and structured result', () => {
@@ -214,5 +218,84 @@ test('Worker replies reject unsafe counts and oversized extension pages', () => 
     expect(() => parseStorageResponse({ ...reply, result }, 1, 'listInsightsExtensions')).toThrow(
       'Invalid response'
     )
+  }
+})
+
+test('normalizes ranking requests and rejects a reply for a different page or publication', async () => {
+  const first = {
+    ...request,
+    offset: 0,
+    limit: 10,
+    totalCount: 0,
+    nextOffset: null,
+    incomplete: false,
+    entries: []
+  }
+  const second = { ...first, offset: 10, limit: 20 }
+  queries.listInsightsLargestFiles.mockResolvedValueOnce(first)
+  queries.listInsightsLargestDirectories.mockResolvedValueOnce(second)
+  await expect(insights.listLargest(request, 'file', signal)).resolves.toBe(first)
+  await expect(
+    insights.listLargest({ ...request, offset: 10, limit: 20 }, 'directory', signal)
+  ).resolves.toBe(second)
+  expect(queries.listInsightsLargestFiles).toHaveBeenCalledExactlyOnceWith({
+    ...request,
+    offset: 0,
+    limit: 10
+  })
+  expect(queries.listInsightsLargestDirectories).toHaveBeenCalledExactlyOnceWith({
+    ...request,
+    offset: 10,
+    limit: 20
+  })
+  await expect(
+    insights.listLargest({ ...request, limit: 21 }, 'file', signal)
+  ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  expect(read).toHaveBeenCalledTimes(2)
+  queries.listInsightsLargestFiles.mockResolvedValueOnce(second)
+  await expect(insights.listLargest(request, 'file', signal)).rejects.toThrow(
+    'different ranking page'
+  )
+  queries.listInsightsLargestFiles.mockResolvedValueOnce({ ...first, scanId: 'replaced' })
+  await expect(insights.listLargest(request, 'file', signal)).rejects.toThrow(
+    'different publication'
+  )
+})
+
+test('validates ranked Worker replies with exact safe byte values, matching entry identity and bounded pagination', () => {
+  const row = {
+    scanId: request.scanId,
+    id: 'entry',
+    parentId: 'parent',
+    type: 'file',
+    name: '資料',
+    path: 'C:\\資料',
+    bytes: null
+  }
+  const result = {
+    ...request,
+    entries: [row],
+    offset: 0,
+    limit: 1,
+    nextOffset: 1,
+    totalCount: 2,
+    incomplete: true
+  }
+  const reply = { requestId: 1, ok: true, result }
+  expect(parseStorageResponse(reply, 1, 'listInsightsLargestFiles')).toEqual(reply)
+  expect(() => parseStorageResponse(reply, 1, 'listInsightsLargestDirectories')).toThrow(
+    'Invalid response'
+  )
+  for (const invalid of [
+    { ...result, totalCount: 21 },
+    { ...result, nextOffset: null },
+    { ...result, entries: [] },
+    { ...result, entries: [{ ...row, bytes: Number.MAX_SAFE_INTEGER + 1 }] },
+    { ...result, entries: [{ ...row, scanId: 'mismatched' }] },
+    { ...result, entries: [{ ...row, parentId: null }] }
+  ]) {
+    expect(() =>
+      parseStorageResponse({ ...reply, result: invalid }, 1, 'listInsightsLargestFiles')
+    ).toThrow('Invalid response')
   }
 })
