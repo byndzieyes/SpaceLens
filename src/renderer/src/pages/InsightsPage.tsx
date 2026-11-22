@@ -4,6 +4,8 @@ import type { InsightsSummary } from '../../../shared/insights'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 import { InsightsCategoriesSection } from '../features/insights/InsightsCategoriesSection'
+import { InsightsExtensionsSection } from '../features/insights/InsightsExtensionsSection'
+import { InsightsSizeDistributionSection } from '../features/insights/InsightsSizeDistributionSection'
 import { InsightsSummaryCards } from '../features/insights/InsightsSummaryCards'
 import { useInsights } from '../features/insights/useInsights'
 import { formatScanDate } from '../features/overview/recentScanUtils'
@@ -55,11 +57,11 @@ export function InsightsPage({
 }): React.JSX.Element {
   const { state, retry, recheckPublication } = useInsights()
   const title = useRef<HTMLHeadingElement>(null)
-  const categoryScanId =
+  const analyticsScanId =
     state.status === 'ready'
       ? state.summary.scanId
       : state.status !== 'no-snapshot'
-        ? state.categoryScanId
+        ? state.analyticsScanId
         : undefined
 
   return (
@@ -110,7 +112,7 @@ export function InsightsPage({
         {state.status === 'error' && (
           <div className="space-y-3">
             <p role="alert" className="text-sm text-error">
-              {state.categoryScanId
+              {state.analyticsScanId
                 ? 'SpaceLens couldn’t load the scan summary. Try again.'
                 : errorMessages[state.reason]}
             </p>
@@ -127,12 +129,21 @@ export function InsightsPage({
         )}
         {state.status === 'ready' && <PublishedScan scan={state.summary} />}
       </Card>
-      {categoryScanId && (
-        <div className="space-y-6">
+      {analyticsScanId && (
+        <div key={analyticsScanId} className="space-y-6">
           {state.status === 'ready' && <InsightsSummaryCards summary={state.summary.summary} />}
           <InsightsCategoriesSection
-            key={categoryScanId}
-            scanId={categoryScanId}
+            scanId={analyticsScanId}
+            recheckPublication={recheckPublication}
+            pageTitle={title}
+          />
+          <InsightsSizeDistributionSection
+            scanId={analyticsScanId}
+            recheckPublication={recheckPublication}
+            pageTitle={title}
+          />
+          <InsightsExtensionsSection
+            scanId={analyticsScanId}
             recheckPublication={recheckPublication}
             pageTitle={title}
           />

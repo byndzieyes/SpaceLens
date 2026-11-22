@@ -5,16 +5,17 @@ import type {
   InsightsFileCategory
 } from '../../../../shared/insights'
 import { formatBytes } from '../../lib/storage'
+import { categoryLabels } from './insightsDisplay'
 
-const categoryDisplay: Record<InsightsFileCategory, { label: string; color: string }> = {
-  images: { label: 'Images', color: '#a5b4fc' },
-  videos: { label: 'Videos', color: '#38bdf8' },
-  audio: { label: 'Audio', color: '#5eead4' },
-  documents: { label: 'Documents', color: '#fcd34d' },
-  archives: { label: 'Archives', color: '#fb923c' },
-  code: { label: 'Code', color: '#c084fc' },
-  applications: { label: 'Applications', color: '#f9a8d4' },
-  other: { label: 'Other', color: '#94a3b8' }
+const categoryColors: Record<InsightsFileCategory, string> = {
+  images: '#a5b4fc',
+  videos: '#38bdf8',
+  audio: '#5eead4',
+  documents: '#fcd34d',
+  archives: '#fb923c',
+  code: '#c084fc',
+  applications: '#f9a8d4',
+  other: '#94a3b8'
 }
 
 const percent = new Intl.NumberFormat('en-US', { style: 'percent', maximumFractionDigits: 1 })
@@ -43,7 +44,8 @@ export function CategoryDonut({ data }: { data: InsightsCategories }): React.JSX
   for (const row of data.categories) {
     rows.push({
       ...row,
-      ...categoryDisplay[row.category],
+      label: categoryLabels[row.category],
+      color: categoryColors[row.category],
       share: knownBytes ? row.knownBytes / knownBytes : 0,
       offset: knownBytes ? precedingBytes / knownBytes : 0
     })

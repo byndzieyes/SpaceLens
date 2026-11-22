@@ -5,12 +5,12 @@ import type { ScanStateSnapshot, ScannerIpcErrorCode } from '../../../../shared/
 type ReadFailure = { code: ScannerIpcErrorCode; message: string }
 type ExpiredReference =
   | { scanId: string; source: 'summary'; error: ReadFailure }
-  | { scanId: string; source: 'categories' }
+  | { scanId: string; source: 'analytics' }
 type InsightsState =
-  | { status: 'loading'; refreshing: boolean; categoryScanId?: string }
+  | { status: 'loading'; refreshing: boolean; analyticsScanId?: string }
   | { status: 'no-snapshot' }
   | { status: 'ready'; summary: InsightsSummary }
-  | { status: 'error'; reason: 'expired' | 'unavailable' | 'read'; categoryScanId?: string }
+  | { status: 'error'; reason: 'expired' | 'unavailable' | 'read'; analyticsScanId?: string }
 
 const initialState: InsightsState = { status: 'loading', refreshing: false }
 
@@ -40,26 +40,26 @@ export function useInsights(): {
       expired?: ExpiredReference,
       retainedScanId?: string
     ): Promise<void> => {
-      // A category failure stays local unless the read confirms a publication change.
-      const verifyingCategory = expired?.source === 'categories'
+      // A section failure stays local unless the read confirms a publication change.
+      const verifyingAnalytics = expired?.source === 'analytics'
       const pending: NonNullable<typeof request> = {
-        visibleScanId: verifyingCategory ? resolvedScanId : retainedScanId
+        visibleScanId: verifyingAnalytics ? resolvedScanId : retainedScanId
       }
       const announcedAtStart = announcedScanId
       started = true
       request = pending
-      const clearSummary = (categoryScanId?: string): void => {
+      const clearSummary = (analyticsScanId?: string): void => {
         resolvedScanId = undefined
-        setState({ status: 'loading', refreshing, categoryScanId })
+        setState({ status: 'loading', refreshing, analyticsScanId })
       }
-      if (!verifyingCategory) clearSummary(retainedScanId)
+      if (!verifyingAnalytics) clearSummary(retainedScanId)
 
       const isCurrent = (): boolean => active && request === pending
       const fail = (detail: unknown, code?: ScannerIpcErrorCode): void => {
         if (!isCurrent()) return
         if (import.meta.env.DEV)
           console.warn('Could not load Insights for the published scan.', detail)
-        if (verifyingCategory && resolvedScanId !== undefined) return
+        if (verifyingAnalytics && resolvedScanId !== undefined) return
         const reason =
           code === 'SNAPSHOT_EXPIRED'
             ? 'expired'
@@ -67,7 +67,7 @@ export function useInsights(): {
               ? 'unavailable'
               : 'read'
         resolvedScanId = reason === 'read' ? (pending.scanId ?? pending.visibleScanId) : undefined
-        setState({ status: 'error', reason, categoryScanId: resolvedScanId })
+        setState({ status: 'error', reason, analyticsScanId: resolvedScanId })
       }
 
       try {
@@ -153,7 +153,7 @@ export function useInsights(): {
     }
     recheck.current = async (scanId) => {
       if (active && !request && resolvedScanId === scanId) {
-        await load(true, { scanId, source: 'categories' })
+        await load(true, { scanId, source: 'analytics' })
       }
     }
     // Skip requests from a mount that Strict Mode or page navigation has already discarded.
