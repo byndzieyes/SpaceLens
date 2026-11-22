@@ -1,8 +1,7 @@
-import { ChevronLeft, ChevronRight } from 'lucide-react'
 import { DEFAULT_INSIGHTS_EXTENSION_PAGE_SIZE as PAGE_SIZE } from '../../../../shared/insights'
-import { Button } from '../../components/ui/Button'
 import { formatBytes } from '../../lib/storage'
 import { InsightsAnalyticsSection } from './InsightsAnalyticsSection'
+import { InsightsPagination } from './InsightsPagination'
 import { categoryLabels } from './insightsDisplay'
 import { useInsightsRead, type InsightsSectionProps } from './useInsightsRead'
 
@@ -19,7 +18,6 @@ export function InsightsExtensionsSection(props: InsightsSectionProps): React.JS
   const page = state.status === 'ready' ? state.data : null
   const offset = state.status === 'ready' ? state.query : 0
   const nextOffset = page?.nextOffset ?? null
-  const previousDisabled = !page || offset === 0
   const showRange = page && page.extensions.length > 0
 
   return (
@@ -31,39 +29,18 @@ export function InsightsExtensionsSection(props: InsightsSectionProps): React.JS
       retry={retry}
       retryLabel="Retry extensions"
       controls={
-        <div className="flex flex-wrap items-center justify-between gap-3 border-b border-separator pb-3">
-          <p aria-live="polite" className="min-w-0 text-sm text-text-secondary tabular-nums">
-            {showRange
+        <InsightsPagination
+          label="Extensions pagination"
+          previousLabel="Previous extension page"
+          nextLabel="Next extension page"
+          range={
+            showRange
               ? `${counts.format(offset + 1)}–${counts.format(offset + page.extensions.length)} of ${counts.format(page.totalCount)} extensions`
-              : page && '0 extensions'}
-          </p>
-          <div role="group" aria-label="Extensions pagination" className="flex flex-wrap gap-2">
-            <Button
-              variant="secondary"
-              aria-label="Previous extension page"
-              aria-disabled={previousDisabled}
-              tabIndex={previousDisabled ? -1 : undefined}
-              className="aria-disabled:opacity-50"
-              onClick={() => {
-                if (!previousDisabled) load(Math.max(0, offset - PAGE_SIZE))
-              }}
-            >
-              <ChevronLeft size={14} aria-hidden="true" /> Previous
-            </Button>
-            <Button
-              variant="secondary"
-              aria-label="Next extension page"
-              aria-disabled={nextOffset === null}
-              tabIndex={nextOffset === null ? -1 : undefined}
-              className="aria-disabled:opacity-50"
-              onClick={() => {
-                if (nextOffset !== null) load(nextOffset)
-              }}
-            >
-              Next <ChevronRight size={14} aria-hidden="true" />
-            </Button>
-          </div>
-        </div>
+              : page && '0 extensions'
+          }
+          previous={offset > 0 ? () => load(Math.max(0, offset - PAGE_SIZE)) : null}
+          next={nextOffset === null ? null : () => load(nextOffset)}
+        />
       }
     >
       {showRange ? (

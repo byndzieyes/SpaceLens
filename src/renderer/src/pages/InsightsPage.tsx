@@ -5,6 +5,10 @@ import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 import { InsightsCategoriesSection } from '../features/insights/InsightsCategoriesSection'
 import { InsightsExtensionsSection } from '../features/insights/InsightsExtensionsSection'
+import {
+  InsightsLargestDirectoriesSection,
+  InsightsLargestFilesSection
+} from '../features/insights/InsightsLargestSections'
 import { InsightsSizeDistributionSection } from '../features/insights/InsightsSizeDistributionSection'
 import { InsightsSummaryCards } from '../features/insights/InsightsSummaryCards'
 import { useInsights } from '../features/insights/useInsights'
@@ -142,6 +146,18 @@ export function InsightsPage({
             recheckPublication={recheckPublication}
             pageTitle={title}
           />
+          <div className="grid min-w-0 items-start gap-6 xl:grid-cols-2">
+            <InsightsLargestFilesSection
+              scanId={analyticsScanId}
+              recheckPublication={recheckPublication}
+              pageTitle={title}
+            />
+            <InsightsLargestDirectoriesSection
+              scanId={analyticsScanId}
+              recheckPublication={recheckPublication}
+              pageTitle={title}
+            />
+          </div>
           <InsightsExtensionsSection
             scanId={analyticsScanId}
             recheckPublication={recheckPublication}

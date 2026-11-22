@@ -5,11 +5,16 @@ import App from '../src/renderer/src/App'
 import { CategoryDonut } from '../src/renderer/src/features/insights/CategoryDonut'
 import { InsightsPage } from '../src/renderer/src/pages/InsightsPage'
 import {
+  DEFAULT_INSIGHTS_RANKING_PAGE_SIZE,
+  INSIGHTS_RANKING_LIMIT,
   INSIGHTS_SIZE_BUCKETS,
   type InsightsCategories,
   type InsightsExtensionPage,
   type InsightsExtensionRow,
   type InsightsFileCategory,
+  type InsightsRankedEntry,
+  type InsightsRankingPage,
+  type InsightsRankingRequest,
   type InsightsSizeDistribution,
   type InsightsSummary
 } from '../src/shared/insights'
@@ -98,6 +103,56 @@ function distributionFor(
     knownSizeCount: sizes.length - unknownSizeCount,
     totals: { fileCount: sizes.length, knownBytes: scan.summary.totalBytes, unknownSizeCount },
     buckets
+  }
+}
+
+function rankedEntries(
+  scan: InsightsSummary,
+  type: InsightsRankedEntry['type']
+): InsightsRankedEntry[] {
+  const available = type === 'file' ? scan.summary.fileCount : scan.summary.directoryCount - 1
+  return Array.from({ length: Math.min(available, INSIGHTS_RANKING_LIMIT) }, (_, index) => {
+    const name = `${type}-${String(index + 1).padStart(2, '0')}`
+    return {
+      id: name,
+      scanId: scan.scanId,
+      parentId: 'root',
+      name,
+      path: `${scan.rootPath}\\${name}`,
+      type,
+      bytes: index === 0 ? scan.summary.totalBytes : 0
+    }
+  })
+}
+
+function rankingPage(
+  scan: InsightsSummary,
+  ranked: readonly InsightsRankedEntry[],
+  offset = 0,
+  limit = DEFAULT_INSIGHTS_RANKING_PAGE_SIZE
+): InsightsRankingPage {
+  const entries = ranked.slice(offset, offset + limit)
+  return {
+    scanId: scan.scanId,
+    incomplete: scan.incomplete,
+    entries,
+    offset,
+    limit,
+    totalCount: ranked.length,
+    nextOffset: offset + entries.length < ranked.length ? offset + entries.length : null
+  }
+}
+
+function readRanking(type: InsightsRankedEntry['type']) {
+  return async ({
+    scanId,
+    offset,
+    limit
+  }: InsightsRankingRequest): Promise<ScannerIpcResult<InsightsRankingPage>> => {
+    if (publication?.scanId !== scanId) {
+      return { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Expired fixture ID' } }
+    }
+    return success(rankingPage(publication, rankedEntries(publication, type), offset, limit))
   }
 }
 
@@ -243,8 +298,8 @@ beforeEach(() => {
       }))
       return success(extensionPage(publication, rows, offset))
     }),
-    listInsightsLargestFiles: vi.fn(),
-    listInsightsLargestDirectories: vi.fn(),
+    listInsightsLargestFiles: vi.fn(readRanking('file')),
+    listInsightsLargestDirectories: vi.fn(readRanking('directory')),
     onScanStateChanged: vi.fn((listener) => {
       listeners.add(listener)
       return () => listeners.delete(listener)
@@ -340,8 +395,6 @@ test('shows scoped completion details for a publication restored with an idle sc
     api.getScanEntry,
     api.listScanDirectory,
     api.getScanDirectoryTreemap,
-    api.listInsightsLargestFiles,
-    api.listInsightsLargestDirectories,
     api.getInsightsObservations
   ]) {
     expect(query).not.toHaveBeenCalled()
@@ -1224,6 +1277,304 @@ test('ignores expired in-flight extension and distribution replies after unmount
     const expired = { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Ignore' } } as const
     extensions.resolve(expired)
     distribution.resolve(expired)
+  })
+  expect(api.getScanSnapshot).toHaveBeenCalledOnce()
+  expect(diagnostics).not.toHaveBeenCalled()
+})
+
+const filesRanking = (): ReturnType<typeof within> =>
+  within(screen.getByRole('region', { name: 'Largest files' }))
+const directoriesRanking = (): ReturnType<typeof within> =>
+  within(screen.getByRole('region', { name: 'Largest directories' }))
+const scanWithRankings: InsightsSummary = {
+  ...regularScan,
+  summary: { fileCount: 27, directoryCount: 14, totalBytes: 12_500_000, errorCount: 0 }
+}
+
+test('renders global rankings in backend order with original names, full paths and measured sizes', async () => {
+  const scan: InsightsSummary = {
+    ...regularScan,
+    incomplete: true,
+    summary: { fileCount: 3, directoryCount: 5, totalBytes: 1_250_000, errorCount: 2 }
+  }
+  publication = scan
+  const name = 'Звіт 📁.bin'
+  const firstPath = `${scan.rootPath}\\North\\Archive\\${name}`
+  const secondPath = `${scan.rootPath}\\South\\${name}`
+  const files = rankedEntries(scan, 'file')
+  files[0] = { ...files[0], name, path: firstPath, parentId: 'north-archive' }
+  files[1] = { ...files[1], name, path: secondPath, parentId: 'south' }
+  files[2] = { ...files[2], bytes: null }
+  const directories = rankedEntries(scan, 'directory')
+  directories[1] = {
+    ...directories[1],
+    bytes: scan.summary.totalBytes,
+    path: `${directories[0].path}\\${directories[1].name}`,
+    parentId: directories[0].id
+  }
+  directories[3] = { ...directories[3], bytes: null }
+  api.listInsightsLargestFiles.mockResolvedValueOnce(success(rankingPage(scan, files)))
+  api.listInsightsLargestDirectories.mockResolvedValueOnce(success(rankingPage(scan, directories)))
+  openInsights()
+  const ordered = await screen.findByRole('list', { name: 'Largest files results' })
+  expect(ordered.tagName).toBe('OL')
+  expect(ordered).toHaveAttribute('start', '1')
+  const rows = within(ordered).getAllByRole('listitem')
+  expect(rows.map((row) => row.firstElementChild?.textContent)).toEqual(['#1', '#2', '#3'])
+  expect(within(rows[0]).getByText(name)).toBeVisible()
+  expect(within(rows[1]).getByText(name)).toBeVisible()
+  expect(within(rows[0]).getByText('1.25 MB')).toBeVisible()
+  expect(within(rows[1]).getByText('0 B')).toBeVisible()
+  expect(within(rows[2]).getByText('Unknown size')).toBeVisible()
+  expect(within(rows[1]).getByTitle(secondPath)).toHaveClass('truncate')
+  const preview = within(rows[0]).getByTitle(firstPath)
+  expect(preview).toHaveTextContent(firstPath)
+  const disclosure = preview.closest('summary')!
+  disclosure.focus()
+  expect(disclosure).toHaveFocus()
+  fireEvent.click(disclosure)
+  expect(disclosure.parentElement).toHaveAttribute('open')
+  expect(within(rows[0]).getByText(firstPath, { selector: 'details p bdi' })).toBeVisible()
+
+  const directoryList = await screen.findByRole('list', { name: 'Largest directories results' })
+  expect(within(directoryList).getAllByText('1.25 MB')).toHaveLength(2)
+  expect(within(directoryList).getByText('0 B')).toBeVisible()
+  expect(within(directoryList).getByText('Unknown size')).toBeVisible()
+  expect(directoriesRanking().getByText(/Parent and child totals can overlap/)).toBeVisible()
+  expect(screen.getByText('Some items couldn’t be scanned.')).toBeVisible()
+  expect(api.listInsightsLargestFiles).toHaveBeenCalledExactlyOnceWith({
+    scanId: scan.scanId,
+    offset: 0,
+    limit: 10
+  })
+  expect(api.listInsightsLargestDirectories).toHaveBeenCalledExactlyOnceWith({
+    scanId: scan.scanId,
+    offset: 0,
+    limit: 10
+  })
+  expect(screen.getByRole('region', { name: 'Largest files' }).parentElement).toHaveClass(
+    'xl:grid-cols-2',
+    'min-w-0'
+  )
+})
+
+test.each([0, 1, 10])(
+  'handles %i eligible files and a scan with no non-root directories',
+  async (fileCount) => {
+    publication = {
+      ...regularScan,
+      summary: { fileCount, directoryCount: 1, totalBytes: 0, errorCount: 0 }
+    }
+    openInsights()
+    if (fileCount) {
+      expect(await screen.findByText(`1–${fileCount} of ${fileCount} ranked files`)).toBeVisible()
+      expect(filesRanking().getAllByRole('listitem')).toHaveLength(fileCount)
+    } else {
+      expect(await screen.findByText('No files to rank in this scan.')).toBeVisible()
+    }
+    expect(await screen.findByText('No non-root directories to rank in this scan.')).toBeVisible()
+    expect(directoriesRanking().queryByRole('list')).not.toBeInTheDocument()
+    for (const [section, type] of [
+      [filesRanking(), 'file'],
+      [directoriesRanking(), 'directory']
+    ] as const) {
+      expect(
+        section.getByRole('button', { name: `Previous ${type} ranking page` })
+      ).toHaveAttribute('aria-disabled', 'true')
+      expect(section.getByRole('button', { name: `Next ${type} ranking page` })).toHaveAttribute(
+        'aria-disabled',
+        'true'
+      )
+    }
+  }
+)
+
+test('pages the two restored rankings independently and uses the bounded total and global ordinals', async () => {
+  publication = scanWithRankings
+  openInsights()
+  await screen.findByText('1–10 of 20 ranked files')
+  await screen.findByText('1–10 of 13 ranked directories')
+  emit(update(1))
+  expect(api.listInsightsLargestFiles).toHaveBeenCalledOnce()
+  expect(api.listInsightsLargestDirectories).toHaveBeenCalledOnce()
+  expect(api.getScanSnapshot).toHaveBeenCalledOnce()
+
+  const fileNext = filesRanking().getByRole('button', { name: 'Next file ranking page' })
+  fileNext.focus()
+  fireEvent.click(fileNext)
+  const lastFilePage = await filesRanking().findByRole('list', { name: 'Largest files results' })
+  expect(lastFilePage).toHaveAttribute('start', '11')
+  expect(within(lastFilePage).getAllByRole('listitem')[0].firstElementChild).toHaveTextContent(
+    '#11'
+  )
+  expect(within(lastFilePage).getAllByRole('listitem')[9].firstElementChild).toHaveTextContent(
+    '#20'
+  )
+  expect(fileNext).toHaveFocus()
+  expect(fileNext).toHaveAttribute('aria-disabled', 'true')
+  fireEvent.click(fileNext)
+  expect(api.listInsightsLargestFiles).toHaveBeenCalledTimes(2)
+  expect(api.listInsightsLargestDirectories).toHaveBeenCalledOnce()
+  expect(directoriesRanking().getByText('1–10 of 13 ranked directories')).toBeVisible()
+
+  fireEvent.click(directoriesRanking().getByRole('button', { name: 'Next directory ranking page' }))
+  expect(await screen.findByText('11–13 of 13 ranked directories')).toBeVisible()
+  expect(directoriesRanking().getAllByRole('listitem')).toHaveLength(3)
+  fireEvent.click(filesRanking().getByRole('button', { name: 'Previous file ranking page' }))
+  expect(await screen.findByText('1–10 of 20 ranked files')).toBeVisible()
+  expect(directoriesRanking().getByText('11–13 of 13 ranked directories')).toBeVisible()
+  expect(api.listInsightsLargestFiles.mock.calls.map(([request]) => request.offset)).toEqual([
+    0, 10, 0
+  ])
+  expect(api.listInsightsLargestDirectories.mock.calls.map(([request]) => request.offset)).toEqual([
+    0, 10
+  ])
+})
+
+test('keeps other analytics visible while a ranking page loads or fails and retries just that page', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  publication = scanWithRankings
+  const pending = Promise.withResolvers<ScannerIpcResult<InsightsRankingPage>>()
+  api.listInsightsLargestFiles
+    .mockImplementationOnce(readRanking('file'))
+    .mockReturnValueOnce(pending.promise)
+  openInsights()
+  await screen.findByText('1–10 of 20 ranked files')
+  await screen.findByText('1–10 of 13 ranked directories')
+  const next = filesRanking().getByRole('button', { name: 'Next file ranking page' })
+  act(() => {
+    next.click()
+    next.click()
+  })
+  expect(filesRanking().getByRole('status')).toHaveTextContent('Loading largest files')
+  expect(next).toHaveAttribute('aria-disabled', 'true')
+  expect(api.listInsightsLargestFiles).toHaveBeenCalledTimes(2)
+  await act(async () =>
+    pending.resolve({
+      ok: false,
+      error: { code: 'UNAVAILABLE', message: 'File ranking fixture error' }
+    })
+  )
+  expect(filesRanking().getByRole('alert')).toHaveTextContent(
+    'SpaceLens couldn’t load largest files'
+  )
+  expect(directoriesRanking().getByText('1–10 of 13 ranked directories')).toBeVisible()
+  expect(summaryCards()).toBeVisible()
+  expect(categoryPanel().querySelector('figure')).toBeVisible()
+  expect(distributionPanel().querySelector('figure')).toBeVisible()
+  expect(extensionsPanel().querySelector('table')).toBeVisible()
+
+  fireEvent.click(filesRanking().getByRole('button', { name: 'Retry largest files' }))
+  expect(filesRanking().getByRole('heading')).toHaveFocus()
+  expect(await screen.findByText('11–20 of 20 ranked files')).toBeVisible()
+  expect(api.listInsightsLargestFiles.mock.calls.map(([request]) => request.offset)).toEqual([
+    0, 10, 10
+  ])
+  expect(api.listInsightsLargestDirectories).toHaveBeenCalledOnce()
+})
+
+test('preserves both pages during a scan, cancellation or failure and resets them on replacement', async () => {
+  publication = scanWithRankings
+  openInsights()
+  await screen.findByText('1–10 of 20 ranked files')
+  await screen.findByText('1–10 of 13 ranked directories')
+  fireEvent.click(filesRanking().getByRole('button', { name: 'Next file ranking page' }))
+  fireEvent.click(directoriesRanking().getByRole('button', { name: 'Next directory ranking page' }))
+  await screen.findByText('11–20 of 20 ranked files')
+  const oldPage = await screen.findByText('11–13 of 13 ranked directories')
+  emit(update(1, 'running'))
+  emit(update(2, 'cancelled'))
+  emit(update(3, 'running'))
+  emit(update(4, 'failed'))
+  expect(oldPage).toBeVisible()
+  expect(filesRanking().getByText('11–20 of 20 ranked files')).toBeVisible()
+  expect(api.listInsightsLargestFiles).toHaveBeenCalledTimes(2)
+  expect(api.listInsightsLargestDirectories).toHaveBeenCalledTimes(2)
+
+  publication = { ...scanWithRankings, ...replacement, summary: scanWithRankings.summary }
+  emit(update(5, 'completed'))
+  expect(await screen.findByText('1–10 of 20 ranked files')).toBeVisible()
+  expect(await screen.findByText('1–10 of 13 ranked directories')).toBeVisible()
+  expect(api.listInsightsLargestFiles).toHaveBeenLastCalledWith({
+    scanId: replacement.scanId,
+    offset: 0,
+    limit: 10
+  })
+  expect(api.listInsightsLargestDirectories).toHaveBeenLastCalledWith({
+    scanId: replacement.scanId,
+    offset: 0,
+    limit: 10
+  })
+})
+
+test('ignores an old page that arrives after replacement ranking results', async () => {
+  publication = scanWithRankings
+  const pending = Promise.withResolvers<ScannerIpcResult<InsightsRankingPage>>()
+  api.listInsightsLargestDirectories
+    .mockImplementationOnce(readRanking('directory'))
+    .mockReturnValueOnce(pending.promise)
+  openInsights()
+  await screen.findByText('1–10 of 13 ranked directories')
+  fireEvent.click(directoriesRanking().getByRole('button', { name: 'Next directory ranking page' }))
+  expect(directoriesRanking().getByRole('status')).toBeVisible()
+  publication = { ...replacement, summary: { ...replacement.summary, directoryCount: 2 } }
+  emit(update(1, 'completed'))
+  expect(await screen.findByText('1–1 of 1 ranked directories')).toBeVisible()
+  await act(async () =>
+    pending.resolve(
+      success(rankingPage(scanWithRankings, rankedEntries(scanWithRankings, 'directory'), 10))
+    )
+  )
+  expect(directoriesRanking().getByText('1–1 of 1 ranked directories')).toBeVisible()
+  expect(directoriesRanking().queryByText('directory-11')).not.toBeInTheDocument()
+  expect(directoriesRanking().getByTitle(`${replacement.rootPath}\\directory-01`)).toBeVisible()
+})
+
+test('rechecks an expired ranking against SQLite and discards a cross-scan payload', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  publication = scanWithRankings
+  api.listInsightsLargestDirectories.mockImplementationOnce(async () => {
+    publication = replacement
+    return { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Fixture replaced' } }
+  })
+  api.listInsightsLargestFiles
+    .mockImplementationOnce(readRanking('file'))
+    .mockResolvedValueOnce(
+      success(rankingPage(scanWithRankings, rankedEntries(scanWithRankings, 'file')))
+    )
+  openInsights()
+  expect(await screen.findByText('No non-root directories to rank in this scan.')).toBeVisible()
+  expect(await filesRanking().findByRole('alert')).toHaveTextContent(
+    'SpaceLens couldn’t load largest files'
+  )
+  expect(filesRanking().queryByRole('list')).not.toBeInTheDocument()
+  expect(api.getScanSnapshot).toHaveBeenCalledTimes(2)
+  fireEvent.click(filesRanking().getByRole('button', { name: 'Retry largest files' }))
+  expect(await screen.findByText('1–3 of 3 ranked files')).toBeVisible()
+  expect(api.listInsightsLargestFiles).toHaveBeenLastCalledWith({
+    scanId: replacement.scanId,
+    offset: 0,
+    limit: 10
+  })
+})
+
+test('does not process ranking requests that finish after unmount', async () => {
+  const diagnostics = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  publication = scanWithRankings
+  const files = Promise.withResolvers<ScannerIpcResult<InsightsRankingPage>>()
+  const directories = Promise.withResolvers<ScannerIpcResult<InsightsRankingPage>>()
+  api.listInsightsLargestFiles.mockReturnValueOnce(files.promise)
+  api.listInsightsLargestDirectories.mockReturnValueOnce(directories.promise)
+  const view = openInsights()
+  await waitFor(() => {
+    expect(api.listInsightsLargestFiles).toHaveBeenCalledOnce()
+    expect(api.listInsightsLargestDirectories).toHaveBeenCalledOnce()
+  })
+  view.unmount()
+  await act(async () => {
+    const expired = { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Ignore' } } as const
+    files.resolve(expired)
+    directories.resolve(expired)
   })
   expect(api.getScanSnapshot).toHaveBeenCalledOnce()
   expect(diagnostics).not.toHaveBeenCalled()
