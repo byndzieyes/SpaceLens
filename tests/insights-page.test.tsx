@@ -2,8 +2,13 @@ import { StrictMode } from 'react'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi, type Mocked } from 'vitest'
 import App from '../src/renderer/src/App'
+import { CategoryDonut } from '../src/renderer/src/features/insights/CategoryDonut'
 import { InsightsPage } from '../src/renderer/src/pages/InsightsPage'
-import type { InsightsSummary } from '../src/shared/insights'
+import type {
+  InsightsCategories,
+  InsightsFileCategory,
+  InsightsSummary
+} from '../src/shared/insights'
 import type { ScannerIpcResult, ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
 import type { ScanStatus } from '../src/shared/scan'
 import type { ScanSnapshotAvailability } from '../src/shared/snapshot'
@@ -30,6 +35,20 @@ let listeners: Set<(update: ScanStateSnapshot) => void>
 
 function success<T>(value: T): ScannerIpcResult<T> {
   return { ok: true, value }
+}
+
+function categoriesFor(
+  scan: InsightsSummary,
+  category: InsightsFileCategory = 'images'
+): InsightsCategories {
+  const { fileCount, totalBytes: knownBytes } = scan.summary
+  const totals = { fileCount, knownBytes, unknownSizeCount: 0 }
+  return {
+    scanId: scan.scanId,
+    incomplete: scan.incomplete,
+    totals,
+    categories: fileCount > 0 ? [{ ...totals, category }] : []
+  }
 }
 
 function metadata(scan: InsightsSummary | null): ScannerIpcResult<ScanSnapshotAvailability> {
@@ -108,6 +127,14 @@ function scanPanel(): HTMLElement {
   return screen.getByRole('region', { name: 'Published scan' })
 }
 
+function categoryPanel(): HTMLElement {
+  return screen.getByRole('region', { name: 'File categories' })
+}
+
+function summaryCards(): HTMLElement {
+  return screen.getByRole('region', { name: 'Scan summary' })
+}
+
 beforeEach(() => {
   publication = null
   listeners = new Set()
@@ -125,7 +152,14 @@ beforeEach(() => {
       }
       return success(publication)
     }),
-    getInsightsCategories: vi.fn(),
+    getInsightsCategories: vi.fn(async ({ scanId }) => {
+      if (publication?.scanId !== scanId) {
+        return { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Expired fixture ID' } }
+      }
+      return success(
+        categoriesFor(publication, scanId === regularScan.scanId ? 'images' : 'documents')
+      )
+    }),
     getInsightsSizeDistribution: vi.fn(),
     getInsightsObservations: vi.fn(),
     listInsightsExtensions: vi.fn(),
@@ -179,6 +213,7 @@ test('starts on Overview and navigates between Insights, Explorer and Overview w
   expect(insights).toHaveAttribute('aria-current', 'page')
   await screen.findByRole('heading', { name: 'No completed scan' })
   expect(api.getInsightsSummary).not.toHaveBeenCalled()
+  expect(api.getInsightsCategories).not.toHaveBeenCalled()
 })
 
 test('announces loading while resolving metadata and distinguishes an absent publication', async () => {
@@ -191,6 +226,7 @@ test('announces loading while resolving metadata and distinguishes an absent pub
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   expect(api.getScanSnapshot).toHaveBeenCalledOnce()
   expect(api.getInsightsSummary).not.toHaveBeenCalled()
+  expect(api.getInsightsCategories).not.toHaveBeenCalled()
 })
 
 test('shows scoped completion details for a publication restored with an idle scanner', async () => {
@@ -206,15 +242,16 @@ test('shows scoped completion details for a publication restored with an idle sc
     new Date(completedAt)
   )
   expect(scanPanel().querySelector('time')).toHaveTextContent(localDate)
+  expect(await within(categoryPanel()).findByText('Images')).toBeVisible()
   emit(update(1))
   expect(api.getScanSnapshot).toHaveBeenCalledOnce()
   expect(api.getInsightsSummary).toHaveBeenCalledExactlyOnceWith({ scanId: regularScan.scanId })
+  expect(api.getInsightsCategories).toHaveBeenCalledExactlyOnceWith({ scanId: regularScan.scanId })
   expect(api.getScanState).not.toHaveBeenCalled()
   for (const query of [
     api.getScanEntry,
     api.listScanDirectory,
     api.getScanDirectoryTreemap,
-    api.getInsightsCategories,
     api.listInsightsExtensions,
     api.listInsightsLargestFiles,
     api.listInsightsLargestDirectories,
@@ -232,6 +269,13 @@ test('renders a completed zero-file scan and its completion metadata', async () 
   expect(screen.getByText(regularScan.rootPath)).toBeVisible()
   expect(scanPanel().querySelector('time')).toHaveAttribute('datetime', completedAt)
   expect(screen.queryByText('No completed scan')).not.toBeInTheDocument()
+  expect(
+    within(summaryCards())
+      .getAllByRole('definition')
+      .map((metric) => metric.textContent)
+  ).toEqual(['0 B', '0', '1', '0'])
+  expect(await within(categoryPanel()).findByText('No known bytes to chart.')).toBeVisible()
+  expect(categoryPanel().querySelector('[data-category]')).toBeNull()
 })
 
 test('retains completed scan context when some filesystem items could not be read', async () => {
@@ -329,7 +373,9 @@ test('stops automatic recovery for the same expired reference and offers reload'
 test('keeps the published scan through progress, cancellation and failure, then refreshes on publication', async () => {
   publication = regularScan
   openInsights()
-  await screen.findByText(regularScan.rootPath)
+  const oldLegendItem = (await screen.findByText('Images')).closest('li')!
+  act(() => oldLegendItem.focus())
+  expect(oldLegendItem).toHaveFocus()
   const pending = Promise.withResolvers<ScannerIpcResult<InsightsSummary>>()
   api.getInsightsSummary.mockReturnValueOnce(pending.promise)
   emit(update(1, 'running'))
@@ -339,17 +385,23 @@ test('keeps the published scan through progress, cancellation and failure, then 
   expect(screen.getByText(regularScan.rootPath)).toBeVisible()
   expect(api.getScanSnapshot).toHaveBeenCalledOnce()
   expect(api.getInsightsSummary).toHaveBeenCalledOnce()
+  expect(api.getInsightsCategories).toHaveBeenCalledOnce()
+  expect(oldLegendItem).toHaveFocus()
 
   publication = replacement
   await act(async () => emit(update(5, 'completed')))
   expect(screen.queryByText(regularScan.rootPath)).not.toBeInTheDocument()
   expect(screen.getByRole('status')).toHaveTextContent('Loading the latest scan')
   expect(scanPanel().querySelector('time')).toBeNull()
+  expect(screen.getByRole('heading', { name: 'Storage Insights' })).toHaveFocus()
+  expect(screen.queryByRole('region', { name: 'File categories' })).not.toBeInTheDocument()
   emit(update(6, 'completed'))
   await act(async () => pending.resolve(success(replacement)))
+  expect(await screen.findByText('Documents')).toBeVisible()
   expect(screen.getByText(replacement.rootPath)).toBeVisible()
   expect(api.getScanSnapshot).toHaveBeenCalledTimes(2)
   expect(api.getInsightsSummary).toHaveBeenNthCalledWith(2, { scanId: replacement.scanId })
+  expect(api.getInsightsCategories).toHaveBeenNthCalledWith(2, { scanId: replacement.scanId })
 })
 
 test('never requests a summary for older metadata received after a publication notification', async () => {
@@ -386,7 +438,7 @@ test('ignores a superseded summary, out-of-order revisions, and cross-scan reply
   api.getInsightsSummary.mockResolvedValueOnce(success(replacement))
   emit(update(4, 'completed'))
   expect(await screen.findByRole('alert')).toHaveTextContent(
-    'SpaceLens couldn’t load the saved scan'
+    'SpaceLens couldn’t load the scan summary'
   )
   expect(screen.queryByText(replacement.rootPath)).not.toBeInTheDocument()
 })
@@ -415,3 +467,282 @@ test.each(['snapshot', 'summary'] as const)(
     expect(api.getInsightsSummary).toHaveBeenCalledTimes(stage === 'snapshot' ? 0 : 1)
   }
 )
+
+test('renders the four persisted summary metrics in the responsive grid while categories load', async () => {
+  publication = {
+    ...regularScan,
+    incomplete: true,
+    summary: { fileCount: 10_329, directoryCount: 1_234, totalBytes: 1_450_000_000, errorCount: 16 }
+  }
+  const pending = Promise.withResolvers<ScannerIpcResult<InsightsCategories>>()
+  api.getInsightsCategories.mockReturnValueOnce(pending.promise)
+  openInsights()
+  const summary = await screen.findByRole('region', { name: 'Scan summary' })
+  expect(
+    within(summary)
+      .getAllByRole('term')
+      .map((metric) => metric.textContent)
+  ).toEqual(['Known Logical Size', 'Files', 'Directories', 'Scan Errors'])
+  expect(
+    within(summary)
+      .getAllByRole('definition')
+      .map((metric) => metric.textContent)
+  ).toEqual(['1.45 GB', '10,329', '1,234', '16'])
+  expect(summary).toHaveClass('grid-cols-1', 'sm:grid-cols-2', 'xl:grid-cols-4')
+  expect(within(categoryPanel()).getByRole('status')).toHaveTextContent('Loading file categories')
+  expect(screen.getByText('Some items couldn’t be scanned.')).toBeVisible()
+  expect(api.getInsightsCategories).toHaveBeenCalledExactlyOnceWith({ scanId: regularScan.scanId })
+  await act(async () => pending.resolve(success(categoriesFor(publication!))))
+  expect(summary).toBeVisible()
+  expect(within(categoryPanel()).getByText('Images')).toBeVisible()
+})
+
+const categoryFixture: InsightsCategories = {
+  scanId: regularScan.scanId,
+  incomplete: true,
+  totals: { fileCount: 10, knownBytes: 4_000_000, unknownSizeCount: 1 },
+  categories: [
+    { category: 'images', fileCount: 8, knownBytes: 1_000_000, unknownSizeCount: 0 },
+    { category: 'documents', fileCount: 1, knownBytes: 3_000_000, unknownSizeCount: 0 },
+    { category: 'code', fileCount: 1, knownBytes: 0, unknownSizeCount: 1 }
+  ]
+}
+
+test('shows byte shares, an accessible legend, and tooltips on slice hover and legend focus', async () => {
+  publication = {
+    ...regularScan,
+    incomplete: true,
+    summary: { ...regularScan.summary, fileCount: 10, totalBytes: 4_000_000, errorCount: 1 }
+  }
+  api.getInsightsCategories.mockResolvedValueOnce(success(categoryFixture))
+  openInsights()
+  const figure = await screen.findByRole('figure', { name: 'Known logical bytes by file category' })
+  const legend = within(figure).getByRole('list', { name: 'Category values' })
+  const docs = within(legend).getByText('Documents').closest('li')!
+  expect(docs).toHaveTextContent('1 file')
+  expect(docs).toHaveTextContent('3 MB')
+  expect(docs).toHaveTextContent('75%')
+  const images = within(legend).getByText('Images').closest('li')!
+  expect(images).toHaveTextContent('8 files')
+  expect(images).toHaveTextContent('1 MB')
+  expect(images).toHaveTextContent('25%')
+  const code = within(legend).getByText('Code').closest('li')!
+  expect(code).toHaveTextContent('1 file · 1 size unknown')
+  expect(code).toHaveTextContent('0 B')
+  expect(code).toHaveTextContent('0%')
+  expect(figure.querySelectorAll('[data-category]')).toHaveLength(2)
+  const docsSlice = figure.querySelector('[data-category="documents"]')!
+  expect(docsSlice).toHaveAttribute('stroke-dasharray', '0.75 0.25')
+  expect(docsSlice).toHaveAttribute('stroke-dashoffset', '-0.25')
+  fireEvent.pointerEnter(docsSlice)
+  expect(within(figure).getByRole('tooltip')).toHaveTextContent('Documents3 MB75%')
+  fireEvent.pointerLeave(docsSlice)
+  expect(within(figure).queryByRole('tooltip')).toBeNull()
+
+  act(() => docs.focus())
+  expect(docs).toHaveFocus()
+  expect(docs).toHaveAccessibleDescription('Documents 3 MB 75%')
+  fireEvent.keyDown(docs, { key: 'Escape' })
+  expect(within(figure).queryByRole('tooltip')).toBeNull()
+  expect(docs).toHaveFocus()
+})
+
+test('keeps category labels and slice colors stable as values and order change', () => {
+  const { container, rerender } = render(<CategoryDonut data={categoryFixture} />)
+  const stroke = (category: string): string | null | undefined =>
+    container.querySelector(`[data-category="${category}"]`)?.getAttribute('stroke')
+  const images = stroke('images')
+  const documents = stroke('documents')
+  expect(images).toBeTruthy()
+  expect(documents).not.toBe(images)
+  const changed = categoryFixture.categories
+    .map((row) => ({
+      ...row,
+      knownBytes: row.category === 'images' ? 1 : row.knownBytes
+    }))
+    .reverse()
+  rerender(
+    <CategoryDonut
+      data={{
+        ...categoryFixture,
+        totals: { ...categoryFixture.totals, knownBytes: 3_000_001 },
+        categories: changed
+      }}
+    />
+  )
+  expect(stroke('images')).toBe(images)
+  expect(stroke('documents')).toBe(documents)
+  expect(screen.getByText('Images').closest('li')).toHaveTextContent('<0.1%')
+  expect(screen.getByText('Documents').closest('li')).toHaveTextContent('>99.9%')
+})
+
+test.each([0, 2])(
+  'retains zero-byte or unknown-size file counts with %i unknown sizes',
+  async (unknownSizeCount) => {
+    publication = {
+      ...regularScan,
+      incomplete: unknownSizeCount > 0,
+      summary: { ...regularScan.summary, fileCount: 2, totalBytes: 0, errorCount: unknownSizeCount }
+    }
+    const totals = { fileCount: 2, knownBytes: 0, unknownSizeCount }
+    api.getInsightsCategories.mockResolvedValueOnce(
+      success({
+        ...categoriesFor(publication),
+        totals,
+        categories: [{ category: 'images', ...totals }]
+      })
+    )
+    openInsights()
+    expect(await screen.findByText('No known bytes to chart.')).toBeVisible()
+    expect(within(categoryPanel()).getByText('Images').closest('li')).toHaveTextContent('2 files')
+    expect(categoryPanel()).not.toHaveTextContent(/NaN|Infinity|%/)
+    expect(categoryPanel().querySelector('svg')).toBeNull()
+    expect(screen.queryByText('No files were found in this scan.')).toBeNull()
+    if (unknownSizeCount) {
+      expect(categoryPanel()).toHaveTextContent('2 sizes unknown')
+      expect(screen.getByText('Some items couldn’t be scanned.')).toBeVisible()
+    }
+  }
+)
+
+test('keeps summary visible on a category failure and issues one local read on retry', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  publication = regularScan
+  const pending = Promise.withResolvers<ScannerIpcResult<InsightsCategories>>()
+  api.getInsightsCategories
+    .mockResolvedValueOnce({
+      ok: false,
+      error: { code: 'UNAVAILABLE', message: 'Fixture storage error' }
+    })
+    .mockReturnValueOnce(pending.promise)
+  openInsights()
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent('SpaceLens couldn’t load file categories. Try again.')
+  expect(summaryCards()).toBeVisible()
+  expect(api.getInsightsCategories).toHaveBeenCalledOnce()
+  const retry = within(categoryPanel()).getByRole('button', { name: 'Retry categories' })
+  retry.focus()
+  expect(retry).toHaveFocus()
+  act(() => {
+    retry.click()
+    retry.click()
+  })
+  expect(within(categoryPanel()).getByRole('heading')).toHaveFocus()
+  expect(within(categoryPanel()).getByRole('status')).toBeVisible()
+  expect(summaryCards()).toBeVisible()
+  expect(api.getInsightsCategories).toHaveBeenCalledTimes(2)
+  expect(api.getScanSnapshot).toHaveBeenCalledOnce()
+  expect(api.getInsightsSummary).toHaveBeenCalledOnce()
+  await act(async () => pending.resolve(success(categoriesFor(regularScan))))
+  expect(within(categoryPanel()).getByText('Images')).toBeVisible()
+})
+
+test('uses confirmed metadata to show categories when the separate summary request fails', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  publication = regularScan
+  api.getInsightsSummary.mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'UNAVAILABLE', message: 'Fixture summary error' }
+  })
+  openInsights()
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'SpaceLens couldn’t load the scan summary'
+  )
+  const figure = await screen.findByRole('figure')
+  expect(within(figure).getByText('Images')).toBeVisible()
+  expect(screen.queryByRole('region', { name: 'Scan summary' })).not.toBeInTheDocument()
+  fireEvent.click(within(scanPanel()).getByRole('button', { name: 'Try again' }))
+  expect(await screen.findByRole('region', { name: 'Scan summary' })).toBeVisible()
+  expect(screen.getByRole('figure')).toBe(figure)
+  expect(api.getInsightsCategories).toHaveBeenCalledExactlyOnceWith({ scanId: regularScan.scanId })
+})
+
+test('clears retained categories as soon as a replacement is announced during a summary retry', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  publication = regularScan
+  api.getInsightsSummary.mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'UNAVAILABLE', message: 'Fixture summary error' }
+  })
+  openInsights()
+  expect(await screen.findByText('Images')).toBeVisible()
+  const pending = Promise.withResolvers<ScannerIpcResult<ScanSnapshotAvailability>>()
+  api.getScanSnapshot.mockReturnValueOnce(pending.promise)
+  fireEvent.click(within(scanPanel()).getByRole('button', { name: 'Try again' }))
+  expect(screen.getByText('Images')).toBeVisible()
+
+  publication = replacement
+  emit(update(1, 'completed'))
+  expect(screen.queryByText('Images')).not.toBeInTheDocument()
+  expect(within(scanPanel()).getByRole('status')).toHaveTextContent('Loading the latest scan')
+  await act(async () => pending.resolve(metadata(regularScan)))
+  expect(await screen.findByText('Documents')).toBeVisible()
+  expect(api.getInsightsCategories.mock.calls).toEqual([
+    [{ scanId: regularScan.scanId }],
+    [{ scanId: replacement.scanId }]
+  ])
+})
+
+test('discards stale category responses and rejects a mismatched response identity', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  publication = regularScan
+  const pending = Promise.withResolvers<ScannerIpcResult<InsightsCategories>>()
+  api.getInsightsCategories.mockReturnValueOnce(pending.promise)
+  openInsights()
+  await screen.findByRole('region', { name: 'Scan summary' })
+  publication = replacement
+  emit(update(1, 'completed'))
+  await screen.findByText('Documents')
+  await act(async () => pending.resolve(success(categoriesFor(regularScan))))
+  expect(screen.queryByText('Images')).not.toBeInTheDocument()
+  expect(screen.getByText(replacement.rootPath)).toBeVisible()
+  publication = { ...regularScan, scanId: 'scan-c' }
+  api.getInsightsCategories.mockResolvedValueOnce(success(categoriesFor(replacement)))
+  emit(update(2, 'completed'))
+  expect(await screen.findByRole('alert')).toHaveTextContent(
+    'SpaceLens couldn’t load file categories'
+  )
+  expect(screen.queryByText('Documents')).not.toBeInTheDocument()
+  expect(summaryCards()).toBeVisible()
+})
+
+test.each([false, true])(
+  'rechecks category expiry once when replacement is %s',
+  async (replaced) => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
+    publication = regularScan
+    api.getInsightsCategories.mockImplementationOnce(async () => {
+      if (replaced) publication = replacement
+      return { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Expired fixture' } }
+    })
+    openInsights()
+    if (replaced) {
+      expect(await screen.findByText('Documents')).toBeVisible()
+      emit(update(1, 'completed'))
+      expect(screen.getByText(replacement.rootPath)).toBeVisible()
+    } else {
+      expect(await screen.findByRole('alert')).toHaveTextContent('The saved scan may have changed')
+      expect(screen.getByText(regularScan.rootPath)).toBeVisible()
+      expect(summaryCards()).toBeVisible()
+    }
+    expect(api.getScanSnapshot).toHaveBeenCalledTimes(2)
+    expect(api.getInsightsSummary).toHaveBeenCalledTimes(replaced ? 2 : 1)
+    expect(api.getInsightsCategories).toHaveBeenCalledTimes(replaced ? 2 : 1)
+  }
+)
+
+test('does not recheck an expired category reply that arrives after navigation away', async () => {
+  const diagnostic = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  const pending = Promise.withResolvers<ScannerIpcResult<InsightsCategories>>()
+  publication = regularScan
+  api.getInsightsCategories.mockReturnValueOnce(pending.promise)
+  const page = openInsights()
+  await screen.findByText('Loading file categories…')
+  page.unmount()
+  await act(async () =>
+    pending.resolve({ ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Ignore' } })
+  )
+  expect(api.getScanSnapshot).toHaveBeenCalledOnce()
+  expect(api.getInsightsCategories).toHaveBeenCalledOnce()
+  expect(diagnostic).not.toHaveBeenCalled()
+})

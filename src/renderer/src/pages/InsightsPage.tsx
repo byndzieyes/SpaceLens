@@ -3,6 +3,8 @@ import { CircleAlert, Folder, FolderSearch, LoaderCircle } from 'lucide-react'
 import type { InsightsSummary } from '../../../shared/insights'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { InsightsCategoriesSection } from '../features/insights/InsightsCategoriesSection'
+import { InsightsSummaryCards } from '../features/insights/InsightsSummaryCards'
 import { useInsights } from '../features/insights/useInsights'
 import { formatScanDate } from '../features/overview/recentScanUtils'
 
@@ -51,8 +53,14 @@ export function InsightsPage({
 }: {
   onOpenOverview: () => void
 }): React.JSX.Element {
-  const { state, retry } = useInsights()
+  const { state, retry, recheckPublication } = useInsights()
   const title = useRef<HTMLHeadingElement>(null)
+  const categoryScanId =
+    state.status === 'ready'
+      ? state.summary.scanId
+      : state.status !== 'no-snapshot'
+        ? state.categoryScanId
+        : undefined
 
   return (
     <div className="min-w-0 space-y-8 sm:space-y-10">
@@ -102,7 +110,9 @@ export function InsightsPage({
         {state.status === 'error' && (
           <div className="space-y-3">
             <p role="alert" className="text-sm text-error">
-              {errorMessages[state.reason]}
+              {state.categoryScanId
+                ? 'SpaceLens couldn’t load the scan summary. Try again.'
+                : errorMessages[state.reason]}
             </p>
             <Button
               variant="secondary"
@@ -117,6 +127,17 @@ export function InsightsPage({
         )}
         {state.status === 'ready' && <PublishedScan scan={state.summary} />}
       </Card>
+      {categoryScanId && (
+        <div className="space-y-6">
+          {state.status === 'ready' && <InsightsSummaryCards summary={state.summary.summary} />}
+          <InsightsCategoriesSection
+            key={categoryScanId}
+            scanId={categoryScanId}
+            recheckPublication={recheckPublication}
+            pageTitle={title}
+          />
+        </div>
+      )}
     </div>
   )
 }
