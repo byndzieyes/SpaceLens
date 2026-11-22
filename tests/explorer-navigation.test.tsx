@@ -46,7 +46,7 @@ beforeEach(() => {
 })
 afterEach(() => vi.unstubAllGlobals())
 async function mount(): Promise<RenderHookResult<ReturnType<typeof useExplorer>, unknown>> {
-  const hook = renderHook(useExplorer)
+  const hook = renderHook(() => useExplorer())
   await waitFor(() => expect(hook.result.current.loading).toBe(false))
   return hook
 }

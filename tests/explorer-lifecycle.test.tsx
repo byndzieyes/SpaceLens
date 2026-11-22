@@ -15,7 +15,13 @@ const timestamp = '2026-11-18T14:00:00Z'
 type SavedFixture = { database: ScanDatabase; snapshot: ScanSnapshot }
 const databases = new Set<ScanDatabase>()
 
-function publishedFixture(scanId: string, name: string, errors = 0, extras = 0): SavedFixture {
+function publishedFixture(
+  scanId: string,
+  name: string,
+  errors = 0,
+  extras = 0,
+  deep = false
+): SavedFixture {
   const path = `/scans/${name}`
   const database = new ScanDatabase(':memory:')
   databases.add(database)
@@ -38,6 +44,22 @@ function publishedFixture(scanId: string, name: string, errors = 0, extras = 0):
     name: 'Nested',
     path: `${path}/Nested`
   }
+  const deeper = {
+    ...folder,
+    id: 'deeper',
+    parentId: folder.id,
+    name: 'Deeper',
+    path: `${folder.path}/Deeper`
+  }
+  const leaf = {
+    ...deeper,
+    id: 'leaf',
+    parentId: deeper.id,
+    name: 'Leaf',
+    path: `${deeper.path}/Leaf`
+  }
+  const dirs = deep ? [root, folder, deeper, leaf] : [root, folder]
+  const parent = deep ? leaf : folder
   const file = (id: string, parent: FileEntry, name: string, sizeBytes: number): FileEntry => ({
     ...root,
     id,
@@ -49,11 +71,11 @@ function publishedFixture(scanId: string, name: string, errors = 0, extras = 0):
   })
   const fileEntries = [
     file('report', root, `${name}.txt`, 3000),
-    file('nested', folder, 'inside.bin', 2000)
+    file('nested', parent, deep ? 'Ω-target.bin' : 'inside.bin', 2000)
   ]
   for (let i = 0; i < extras; i++) {
     const name = `sample-${String(i).padStart(3, '0')}.bin`
-    fileEntries.push(file(name.replace('.', '-'), root, name, 100 + i))
+    fileEntries.push(file(name.replace('.', '-'), deep ? leaf : root, name, 100 + i))
   }
   const scan = { id: scanId, rootPath: path, startedAt: timestamp }
   database.beginScan({
@@ -64,15 +86,15 @@ function publishedFixture(scanId: string, name: string, errors = 0, extras = 0):
   })
   const totalBytes = fileEntries.reduce((total, entry) => total + entry.sizeBytes!, 0)
   const operations: StorageBatchOperation[] = [
-    ...[root, folder, ...fileEntries].map((entry) => ({ type: 'entry' as const, entry })),
-    {
-      type: 'directory-finalized',
-      entry: { ...folder, type: 'directory', aggregatedSizeBytes: 2000 }
-    },
-    {
-      type: 'directory-finalized',
-      entry: { ...root, type: 'directory', aggregatedSizeBytes: totalBytes }
-    }
+    ...[...dirs, ...fileEntries].map((entry) => ({ type: 'entry' as const, entry })),
+    ...dirs.toReversed().map((dir) => ({
+      type: 'directory-finalized' as const,
+      entry: {
+        ...dir,
+        type: 'directory' as const,
+        aggregatedSizeBytes: dir.id === root.id ? totalBytes : deep ? totalBytes - 3000 : 2000
+      }
+    }))
   ]
   for (let start = 0; start < operations.length; start += SCANNER_BATCH_SIZE) {
     database.applyBatch(scanId, operations.slice(start, start + SCANNER_BATCH_SIZE))
@@ -82,7 +104,12 @@ function publishedFixture(scanId: string, name: string, errors = 0, extras = 0):
       ...scan,
       status: 'completed',
       finishedAt: timestamp,
-      summary: { fileCount: fileEntries.length, directoryCount: 2, totalBytes, errorCount: errors }
+      summary: {
+        fileCount: fileEntries.length,
+        directoryCount: dirs.length,
+        totalBytes,
+        errorCount: errors
+      }
     },
     root.id
   )
@@ -166,13 +193,36 @@ function mockApp(): {
   let nextId = 'scan-a'
   const api: Mocked<SpaceLensAPI> = {
     getAppInfo: vi.fn<SpaceLensAPI['getAppInfo']>(),
-    getInsightsSummary: vi.fn<SpaceLensAPI['getInsightsSummary']>(),
-    getInsightsCategories: vi.fn(),
-    getInsightsSizeDistribution: vi.fn(),
-    getInsightsObservations: vi.fn(),
-    listInsightsExtensions: vi.fn(),
-    listInsightsLargestFiles: vi.fn(),
-    listInsightsLargestDirectories: vi.fn(),
+    getInsightsSummary: vi.fn(async ({ scanId }) =>
+      read(scanId, (store) => {
+        const { rootPath, summary, finishedAt } = store.requirePublishedScan(scanId)
+        return {
+          scanId,
+          rootPath,
+          summary,
+          completedAt: finishedAt,
+          incomplete: summary.errorCount > 0
+        }
+      })
+    ),
+    getInsightsCategories: vi.fn(async ({ scanId }) =>
+      read(scanId, (store) => store.getInsightsCategories(scanId))
+    ),
+    getInsightsSizeDistribution: vi.fn(async ({ scanId }) =>
+      read(scanId, (store) => store.getInsightsSizeDistribution(scanId))
+    ),
+    getInsightsObservations: vi.fn(async ({ scanId }) =>
+      read(scanId, (store) => store.getInsightsObservations(scanId))
+    ),
+    listInsightsExtensions: vi.fn(async ({ scanId, offset = 0, limit = 50 }) =>
+      read(scanId, (store) => store.listInsightsExtensions({ scanId, offset, limit }))
+    ),
+    listInsightsLargestFiles: vi.fn(async ({ scanId, offset = 0, limit = 10 }) =>
+      read(scanId, (store) => store.listInsightsLargest({ scanId, offset, limit }, 'file'))
+    ),
+    listInsightsLargestDirectories: vi.fn(async ({ scanId, offset = 0, limit = 10 }) =>
+      read(scanId, (store) => store.listInsightsLargest({ scanId, offset, limit }, 'directory'))
+    ),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: state })),
     getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
       ok: true,
@@ -233,7 +283,7 @@ afterEach(() => {
 const panel = (name: string): ReturnType<typeof within> =>
   within(screen.getByRole('region', { name }))
 const button = (name: string): HTMLElement => screen.getByRole('button', { name })
-function open(page: 'Overview' | 'Explorer'): void {
+function open(page: 'Overview' | 'Explorer' | 'Insights'): void {
   fireEvent.click(
     within(screen.getByRole('navigation', { name: 'Main navigation' })).getByRole('button', {
       name: page
@@ -248,6 +298,206 @@ async function start(): Promise<void> {
   fireEvent.click(button('Scan Folder'))
   await screen.findByText('Scanning')
 }
+
+const rankedFilePath = '/scans/Alpha/Nested/Deeper/Leaf/Ω-target.bin'
+const rankedDirectoryPath = '/scans/Alpha/Nested/Deeper/Leaf'
+
+async function rankedAction(kind: 'files' | 'directories', path: string): Promise<HTMLElement> {
+  const ranking = await screen.findByRole('region', { name: `Largest ${kind}` })
+  return within(ranking).findByRole('button', { name: `Open in Explorer: ${path}` })
+}
+
+test('hands off a ranked file once and selects it from its exact Contents page', async () => {
+  const { api, restore } = mockApp()
+  restore(publishedFixture('scan-a', 'Alpha', 1, 320, true))
+  render(
+    <StrictMode>
+      <App />
+    </StrictMode>
+  )
+  open('Insights')
+  const action = await rankedAction('files', rankedFilePath)
+  const summary = action.closest('li')!.querySelector('summary')!
+  fireEvent.click(summary)
+  expect(summary.parentElement).toHaveAttribute('open')
+  expect(screen.getByRole('heading', { name: 'Storage Insights' })).toBeVisible()
+  action.focus()
+  expect(action).toHaveFocus()
+  fireEvent.click(action)
+
+  await chart('Leaf')
+  expect(screen.getByRole('heading', { name: 'Storage Explorer' })).toHaveFocus()
+  const breadcrumb = screen.getByRole('navigation', { name: 'Breadcrumb' })
+  expect(
+    Array.from(
+      breadcrumb.querySelectorAll('button, [aria-current=page]'),
+      (entry) => entry.textContent
+    )
+  ).toEqual(['Alpha', 'Nested', 'Deeper', 'Leaf'])
+  expect(panel('Directory Tree').getByRole('button', { name: 'Leaf' })).toHaveAttribute(
+    'aria-current',
+    'location'
+  )
+  const contents = panel('Directory Contents')
+  expect(contents.getByText('Page 4 of 4 · 321 entries')).toBeVisible()
+  expect(contents.getByRole('button', { name: 'Ω-target.bin' })).toHaveAttribute(
+    'aria-pressed',
+    'true'
+  )
+  expect(
+    panel('Treemap').getByRole('button', { name: 'Ω-target.bin, file, 2 KB' })
+  ).toHaveAttribute('aria-pressed', 'true')
+  expect(panel('Details').getByRole('heading', { name: 'Ω-target.bin' })).toBeVisible()
+  expect(panel('Details').getByText(rankedFilePath)).toBeVisible()
+  expect(api.getScanSnapshot).toHaveBeenCalledTimes(2)
+  expect(api.getScanEntry.mock.calls.map(([request]) => request)).toEqual(
+    ['nested', 'leaf', 'deeper', 'folder'].map((entryId) => ({ scanId: 'scan-a', entryId }))
+  )
+  expect(api.listScanDirectory.mock.calls.map(([request]) => request)).toEqual(
+    [
+      [0, 1],
+      [200, 1],
+      [300, 1],
+      [300, 100]
+    ].map(([offset, limit]) => ({ scanId: 'scan-a', entryId: 'leaf', offset, limit }))
+  )
+  expect(api.getScanDirectoryTreemap).toHaveBeenCalledExactlyOnceWith({
+    scanId: 'scan-a',
+    entryId: 'leaf'
+  })
+})
+
+test('opens a deep ranked directory and uses ordinary history, Up, and breadcrumbs after arrival', async () => {
+  const { api, restore } = mockApp()
+  restore(publishedFixture('scan-a', 'Alpha', 0, 5, true))
+  render(<App />)
+  open('Insights')
+  fireEvent.click(await rankedAction('directories', rankedDirectoryPath))
+  await chart('Leaf')
+  expect(
+    await panel('Directory Contents').findByRole('button', { name: 'Ω-target.bin' })
+  ).toBeVisible()
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+  expect(panel('Directory Tree').getByRole('button', { name: 'Leaf' })).toHaveAttribute(
+    'aria-current',
+    'location'
+  )
+  expect(api.getScanEntry).toHaveBeenNthCalledWith(1, { scanId: 'scan-a', entryId: 'leaf' })
+
+  fireEvent.click(button('Back'))
+  await chart('Alpha')
+  fireEvent.click(button('Forward'))
+  await chart('Leaf')
+  fireEvent.click(button('Up'))
+  await chart('Deeper')
+  expect(panel('Directory Tree').getByRole('button', { name: 'Deeper' })).toHaveAttribute(
+    'aria-current',
+    'location'
+  )
+  fireEvent.click(
+    within(screen.getByRole('navigation', { name: 'Breadcrumb' })).getByRole('button', {
+      name: 'Nested'
+    })
+  )
+  await chart('Nested')
+
+  open('Insights')
+  fireEvent.click(await rankedAction('files', '/scans/Alpha/Alpha.txt'))
+  await chart('Alpha')
+  expect(
+    await panel('Directory Contents').findByRole('button', { name: 'Alpha.txt' })
+  ).toHaveAttribute('aria-pressed', 'true')
+  expect(button('Back')).toHaveAttribute('aria-disabled', 'true')
+  open('Overview')
+  open('Explorer')
+  await chart('Alpha')
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+})
+
+test('rejects a ranked target when SQLite published a new scan before Explorer loads', async () => {
+  const { api, restore, publish } = mockApp()
+  restore(publishedFixture('scan-a', 'Alpha', 0, 4, true))
+  const beta = publishedFixture('scan-b', 'Beta')
+  render(<App />)
+  open('Insights')
+  const target = await rankedAction('files', rankedFilePath)
+  publish(beta, { notify: false })
+  fireEvent.click(target)
+  await chart('Beta')
+  expect(screen.getByRole('alert')).toHaveTextContent('The scan has changed')
+  expect(api.getScanEntry).not.toHaveBeenCalled()
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+})
+
+test('discards in-flight target resolution when a replacement is published', async () => {
+  const { api, restore, publish } = mockApp()
+  const alpha = publishedFixture('scan-a', 'Alpha', 0, 4, true)
+  restore(alpha)
+  const beta = publishedFixture('scan-b', 'Beta')
+  render(<App />)
+  open('Insights')
+  const target = await rankedAction('files', rankedFilePath)
+  const pending = Promise.withResolvers<ScannerIpcResult<FileEntry>>()
+  api.getScanEntry.mockReturnValueOnce(pending.promise)
+  fireEvent.click(target)
+  await waitFor(() =>
+    expect(api.getScanEntry).toHaveBeenCalledExactlyOnceWith({
+      scanId: 'scan-a',
+      entryId: 'nested'
+    })
+  )
+  act(() => publish(beta))
+  await chart('Beta')
+  await act(async () =>
+    pending.resolve({
+      ok: true,
+      value: alpha.database.getScanEntry({ scanId: 'scan-a', entryId: 'nested' })
+    })
+  )
+  expect(screen.getByRole('alert')).toHaveTextContent('The scan has changed')
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+  expect(api.getScanEntry).toHaveBeenCalledOnce()
+  expect(api.listScanDirectory.mock.calls.every(([request]) => request.scanId === 'scan-b')).toBe(
+    true
+  )
+})
+
+test('keeps Explorer usable at the published root when the target entry is missing', async () => {
+  const { api, restore } = mockApp()
+  restore(publishedFixture('scan-a', 'Alpha', 0, 4, true))
+  render(<App />)
+  open('Insights')
+  const target = await rankedAction('files', rankedFilePath)
+  api.getScanEntry.mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'ENTRY_NOT_FOUND', message: 'Missing entry' }
+  })
+  fireEvent.click(target)
+  await chart('Alpha')
+  expect(screen.getByRole('alert')).toHaveTextContent('The ranked item is unavailable')
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+  fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'Alpha.txt' }))
+  expect(await panel('Details').findByRole('heading', { name: 'Alpha.txt' })).toBeVisible()
+})
+
+test('refreshes once when a target read expires before the replacement notification', async () => {
+  const { api, restore, publish } = mockApp()
+  restore(publishedFixture('scan-a', 'Alpha', 0, 4, true))
+  const beta = publishedFixture('scan-b', 'Beta')
+  render(<App />)
+  open('Insights')
+  const target = await rankedAction('files', rankedFilePath)
+  api.getScanEntry.mockImplementationOnce(async () => {
+    publish(beta, { notify: false })
+    return { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Replaced fixture' } }
+  })
+  fireEvent.click(target)
+  await chart('Beta')
+  expect(screen.getByRole('alert')).toHaveTextContent('The scan has changed')
+  expect(api.getScanSnapshot).toHaveBeenCalledTimes(3)
+  expect(api.getScanEntry).toHaveBeenCalledOnce()
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+})
 
 test('a settled scan opens Explorer with one published identity across all four panels', async () => {
   const { api, listeners, publish } = mockApp()

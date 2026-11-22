@@ -1,9 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
-import type { ScannerIpcResult } from '../../../../shared/ipc'
 import type { FileEntry } from '../../../../shared/scan'
-import { resolveExplorerSnapshot, type ExplorerSnapshotState } from './data'
+import type { ExplorerTarget } from '../../navigation'
+import {
+  invalidExplorerEntry,
+  isStaleSnapshotError,
+  locateFileContentsPage,
+  resolveDirectoryAncestry,
+  resolveExplorerSnapshot,
+  type ExplorerAccessError,
+  type ExplorerSnapshotState,
+  type LocatedContentsPage
+} from './data'
 
-type AccessError = Extract<ScannerIpcResult<never>, { ok: false }>['error']
+type NavigationMode = 'new' | 'back' | 'forward'
+type RequestError = ExplorerAccessError | { code: 'TRANSPORT_ERROR'; message: string }
 export interface ExplorerState {
   availability: ExplorerSnapshotState | null
   breadcrumbs: readonly FileEntry[]
@@ -11,7 +21,10 @@ export interface ExplorerState {
   back: readonly string[]
   forward: readonly string[]
   loading: boolean
-  error: AccessError | { code: 'TRANSPORT_ERROR'; message: string } | null
+  error: RequestError | null
+  targetNotice: string | null
+  revealPath: boolean
+  fileArrival?: { entry: FileEntry; contents: LocatedContentsPage }
 }
 const initial: ExplorerState = {
   availability: null,
@@ -20,11 +33,51 @@ const initial: ExplorerState = {
   back: [],
   forward: [],
   loading: true,
-  error: null
+  error: null,
+  targetNotice: null,
+  revealPath: false
 }
-const invalid = (message: string): AccessError => ({ code: 'INVALID_REQUEST', message })
+const scanChanged = 'The scan has changed. Browse the current snapshot in Explorer.'
+const missingTarget = 'The ranked item is unavailable. Browse the current snapshot in Explorer.'
 
-export function useExplorer(): ExplorerState & {
+function requestError(error: unknown, fallback: string): RequestError {
+  return error && typeof error === 'object' && 'code' in error && 'message' in error
+    ? (error as ExplorerAccessError)
+    : { code: 'TRANSPORT_ERROR', message: fallback }
+}
+
+function enterDirectory(
+  before: ExplorerState,
+  breadcrumbs: readonly FileEntry[],
+  mode: NavigationMode
+): ExplorerState {
+  const previous = before.breadcrumbs.at(-1)?.id
+  const destination: ExplorerState = {
+    ...before,
+    breadcrumbs,
+    selectedEntryId: null,
+    fileArrival: undefined,
+    loading: false,
+    error: null,
+    targetNotice: null
+  }
+  if (!previous || previous === breadcrumbs.at(-1)?.id) return destination
+  return {
+    ...destination,
+    back: mode === 'back' ? before.back.slice(0, -1) : [...before.back, previous],
+    forward:
+      mode === 'forward'
+        ? before.forward.slice(0, -1)
+        : mode === 'back'
+          ? [...before.forward, previous]
+          : []
+  }
+}
+
+export function useExplorer(
+  target?: ExplorerTarget,
+  onTargetConsumed?: (target: ExplorerTarget) => void
+): ExplorerState & {
   currentDirectoryId: string | null
   navigateToDirectory: (id: string) => Promise<void>
   goBack: () => Promise<void>
@@ -38,20 +91,32 @@ export function useExplorer(): ExplorerState & {
   const sequence = useRef(0)
   const mounted = useRef(false)
   const refreshing = useRef(false)
+  const openingTarget = useRef<ExplorerTarget | undefined>(undefined)
   const publish = (next: ExplorerState): void => {
     current.current = next
     setState(next)
   }
-  const refreshSnapshot = async (replacing = false): Promise<void> => {
+  const refreshSnapshot = async (
+    replacing = false,
+    intent?: ExplorerTarget,
+    targetNotice = replacing ? current.current.targetNotice : null
+  ): Promise<void> => {
     if (!mounted.current) return
     const ticket = ++sequence.current
+    const isCurrent = (): boolean => mounted.current && ticket === sequence.current
     refreshing.current = true
-    publish({ ...(replacing ? initial : current.current), loading: true, error: null })
+    openingTarget.current = intent
+    publish({
+      ...(replacing ? initial : current.current),
+      loading: true,
+      error: null,
+      targetNotice
+    })
     try {
       const result = await resolveExplorerSnapshot()
-      if (!mounted.current || ticket !== sequence.current) return
+      if (!isCurrent()) return
       if (!result.ok) {
-        publish({ ...initial, loading: false, error: result.error })
+        publish({ ...initial, loading: false, error: result.error, targetNotice })
         return
       }
       const previous = current.current
@@ -60,29 +125,98 @@ export function useExplorer(): ExplorerState & {
         availability.status === 'available' &&
         previous.availability?.status === 'available' &&
         availability.snapshot.entries.scanId === previous.availability.snapshot.entries.scanId
-      publish({
+      const resolved = {
         ...(same ? previous : initial),
         availability,
         loading: false,
         error: null,
+        targetNotice,
         breadcrumbs: same
           ? previous.breadcrumbs
           : availability.status === 'available'
             ? [availability.snapshot.root]
             : []
-      })
+      }
+      if (!intent) {
+        publish(resolved)
+        return
+      }
+      if (
+        availability.status !== 'available' ||
+        availability.snapshot.entries.scanId !== intent.scanId
+      ) {
+        publish({ ...resolved, targetNotice: scanChanged })
+        return
+      }
+
+      try {
+        let file: FileEntry | undefined
+        if (intent.type === 'file') {
+          const entry = await window.spaceLens.getScanEntry({
+            scanId: intent.scanId,
+            entryId: intent.entryId
+          })
+          if (!isCurrent()) return
+          if (!entry.ok) throw entry.error
+          file = entry.value
+          if (
+            file.scanId !== intent.scanId ||
+            file.id !== intent.entryId ||
+            file.parentId !== intent.parentId ||
+            file.type !== 'file'
+          )
+            throw invalidExplorerEntry('The ranked file does not match its published entry.')
+        }
+        const directoryId = file ? intent.parentId : intent.entryId
+        const chain = await resolveDirectoryAncestry(availability.snapshot, directoryId, isCurrent)
+        if (!chain || !isCurrent()) return
+        if (!file && chain.at(-1)?.parentId !== intent.parentId)
+          throw invalidExplorerEntry('The ranked directory does not match its published parent.')
+        const destination = { ...enterDirectory(resolved, chain, 'new'), revealPath: true }
+        if (file) {
+          const contents = await locateFileContentsPage(
+            { scanId: intent.scanId, entryId: directoryId },
+            file,
+            isCurrent
+          )
+          if (!contents || !isCurrent()) return
+          publish({
+            ...destination,
+            selectedEntryId: file.id,
+            fileArrival: { entry: file, contents }
+          })
+        } else publish(destination)
+      } catch (error) {
+        if (!isCurrent()) return
+        const failure = requestError(
+          error,
+          'The ranked item could not be opened. Browse the current snapshot in Explorer.'
+        )
+        if (isStaleSnapshotError(failure.code)) void refreshSnapshot(true, undefined, scanChanged)
+        else if (
+          failure.code === 'ENTRY_NOT_FOUND' ||
+          failure.code === 'INVALID_REQUEST' ||
+          failure.code === 'NOT_DIRECTORY'
+        )
+          publish({ ...resolved, targetNotice: missingTarget })
+        else publish({ ...resolved, error: failure })
+      }
     } catch {
       if (mounted.current && ticket === sequence.current)
         publish({
           ...initial,
           loading: false,
+          targetNotice,
           error: {
             code: 'TRANSPORT_ERROR',
             message: 'Snapshot availability could not be loaded. Retry the request.'
           }
         })
     } finally {
-      if (ticket === sequence.current) refreshing.current = false
+      if (ticket === sequence.current) {
+        refreshing.current = false
+        openingTarget.current = undefined
+      }
     }
   }
   useEffect(() => {
@@ -91,6 +225,7 @@ export function useExplorer(): ExplorerState & {
     const ticket = requests.current
     let revision = -1
     let latestPublished: string | undefined
+    let waitingTarget = target
     const unsubscribe = window.spaceLens.onScanStateChanged((update) => {
       if (update.revision <= revision) return
       revision = update.revision
@@ -101,27 +236,35 @@ export function useExplorer(): ExplorerState & {
         update.latestCompleted?.id ?? (session.status === 'completed' ? session.id : undefined)
       if (!published || latestPublished === published) return
       latestPublished = published
+      if (waitingTarget) return
+      if (openingTarget.current) {
+        if (openingTarget.current.scanId !== published)
+          void refreshSnapshot(true, undefined, scanChanged)
+        return
+      }
       const previous = current.current.availability?.snapshot?.entries.scanId
       if (previous !== published) void refreshSnapshot(previous !== undefined)
     })
     // A discarded Strict Mode mount does not need its own availability request.
     queueMicrotask(() => {
-      if (requests.current === ticket) void refreshSnapshot()
+      if (requests.current !== ticket) return
+      const intent = waitingTarget
+      waitingTarget = undefined
+      if (intent) onTargetConsumed?.(intent)
+      void refreshSnapshot(false, intent)
     })
     return () => {
       mounted.current = false
       requests.current++
       refreshing.current = false
+      openingTarget.current = undefined
       unsubscribe()
     }
     // Availability is queried on activation and when the scanner reports a new publication.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
-  const navigate = async (
-    entryId: string,
-    mode: 'new' | 'back' | 'forward' = 'new'
-  ): Promise<void> => {
+  const navigate = async (entryId: string, mode: NavigationMode = 'new'): Promise<void> => {
     const before = current.current
     if (!mounted.current || refreshing.current || before.availability?.status !== 'available')
       return
@@ -132,65 +275,14 @@ export function useExplorer(): ExplorerState & {
       publish({ ...before, loading: false })
       return
     }
-    publish({ ...before, loading: true, error: null })
+    publish({ ...before, loading: true, error: null, targetNotice: null })
     try {
-      const chain: FileEntry[] = []
-      const seen = new Set<string>()
-      let id: string | null = entryId
-      // Bound requests even for malformed or exceptionally deep snapshots.
-      while (id !== null && chain.length < 256) {
-        if (seen.has(id)) throw invalid('Directory ancestry contains a cycle.')
-        seen.add(id)
-        let entry: FileEntry
-        if (id === snapshot.root.id) entry = snapshot.root
-        else {
-          const result = await window.spaceLens.getScanEntry({
-            scanId: snapshot.entries.scanId,
-            entryId: id
-          })
-          if (!mounted.current || ticket !== sequence.current) return
-          if (!result.ok) throw result.error
-          entry = result.value
-        }
-        if (entry.scanId !== snapshot.entries.scanId || entry.id !== id)
-          throw invalid('Entry identity does not match this snapshot.')
-        if (entry.type !== 'directory')
-          throw {
-            code: 'NOT_DIRECTORY',
-            message: 'Only directories can be opened.'
-          } satisfies AccessError
-        chain.push(entry)
-        if (entry.id === snapshot.root.id) break
-        id = entry.parentId
-      }
-      if (chain.at(-1)?.id !== snapshot.root.id)
-        throw invalid(
-          'Directory ancestry could not be resolved within the snapshot root (maximum depth 256).'
-        )
-      if (!mounted.current || ticket !== sequence.current) return
-      publish({
-        ...before,
-        breadcrumbs: chain.reverse(),
-        selectedEntryId: null,
-        loading: false,
-        error: null,
-        back: mode === 'back' ? before.back.slice(0, -1) : [...before.back, oldId!],
-        forward:
-          mode === 'forward'
-            ? before.forward.slice(0, -1)
-            : mode === 'back'
-              ? [...before.forward, oldId!]
-              : []
-      })
+      const isCurrent = (): boolean => mounted.current && ticket === sequence.current
+      const chain = await resolveDirectoryAncestry(snapshot, entryId, isCurrent)
+      if (chain && isCurrent()) publish(enterDirectory(before, chain, mode))
     } catch (error) {
       if (!mounted.current || ticket !== sequence.current) return
-      const failure =
-        error && typeof error === 'object' && 'code' in error && 'message' in error
-          ? (error as AccessError)
-          : {
-              code: 'TRANSPORT_ERROR' as const,
-              message: 'Directory could not be loaded. Retry the request.'
-            }
+      const failure = requestError(error, 'Directory could not be loaded. Retry the request.')
       publish({ ...before, loading: false, error: failure })
     }
   }

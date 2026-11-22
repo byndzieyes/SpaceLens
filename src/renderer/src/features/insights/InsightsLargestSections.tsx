@@ -5,6 +5,7 @@ import {
   type InsightsRankedEntry
 } from '../../../../shared/insights'
 import { formatBytes } from '../../lib/storage'
+import type { ExplorerTarget } from '../../navigation'
 import { InsightsAnalyticsSection } from './InsightsAnalyticsSection'
 import { InsightsPagination } from './InsightsPagination'
 import { useInsightsRead, type InsightsSectionProps } from './useInsightsRead'
@@ -28,12 +29,16 @@ const rankings = {
   }
 } as const
 
+type RankingProps = InsightsSectionProps & { onOpenExplorer?: (target: ExplorerTarget) => void }
+
 function RankedEntryRow({
   entry,
-  rank
+  rank,
+  onOpenExplorer
 }: {
   entry: InsightsRankedEntry
   rank: number
+  onOpenExplorer: RankingProps['onOpenExplorer']
 }): React.JSX.Element {
   const Icon = entry.type === 'file' ? File : Folder
 
@@ -57,6 +62,23 @@ function RankedEntryRow({
             <bdi>{entry.path}</bdi>
           </p>
         </details>
+        {onOpenExplorer && (
+          <button
+            type="button"
+            aria-label={`Open in Explorer: ${entry.path}`}
+            className="min-h-8 max-w-full rounded-sm text-left text-xs font-medium text-accent hover:underline"
+            onClick={() =>
+              onOpenExplorer({
+                scanId: entry.scanId,
+                entryId: entry.id,
+                parentId: entry.parentId,
+                type: entry.type
+              })
+            }
+          >
+            Open in Explorer
+          </button>
+        )}
       </div>
       <span className="max-w-24 text-right font-medium tabular-nums [overflow-wrap:anywhere]">
         {entry.bytes === null ? 'Unknown size' : formatBytes(entry.bytes)}
@@ -67,8 +89,9 @@ function RankedEntryRow({
 
 function LargestEntriesSection({
   kind,
+  onOpenExplorer,
   ...props
-}: InsightsSectionProps & { kind: keyof typeof rankings }): React.JSX.Element {
+}: RankingProps & { kind: keyof typeof rankings }): React.JSX.Element {
   const { title, description, noun, empty, read } = rankings[kind]
   const { state, load, retry } = useInsightsRead(props, read, 0)
   const page = state.status === 'ready' ? state.data : null
@@ -111,6 +134,7 @@ function LargestEntriesSection({
               key={`${entry.scanId}:${entry.id}`}
               entry={entry}
               rank={page.offset + index + 1}
+              onOpenExplorer={onOpenExplorer}
             />
           ))}
         </ol>
@@ -121,10 +145,10 @@ function LargestEntriesSection({
   )
 }
 
-export function InsightsLargestFilesSection(props: InsightsSectionProps): React.JSX.Element {
+export function InsightsLargestFilesSection(props: RankingProps): React.JSX.Element {
   return <LargestEntriesSection {...props} kind="file" />
 }
 
-export function InsightsLargestDirectoriesSection(props: InsightsSectionProps): React.JSX.Element {
+export function InsightsLargestDirectoriesSection(props: RankingProps): React.JSX.Element {
   return <LargestEntriesSection {...props} kind="directory" />
 }

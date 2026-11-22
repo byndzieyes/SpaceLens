@@ -8,6 +8,7 @@ interface Props {
   scanId: string | null
   selectedEntryId: string | null
   disabled?: boolean
+  initialEntry?: FileEntry
   onRefresh?: () => void
 }
 
@@ -36,6 +37,7 @@ export function DetailsPanel({
   scanId,
   selectedEntryId,
   disabled,
+  initialEntry,
   onRefresh
 }: Props): React.JSX.Element {
   if (!scanId || !selectedEntryId)
@@ -52,6 +54,11 @@ export function DetailsPanel({
       scanId={scanId}
       entryId={selectedEntryId}
       disabled={disabled}
+      initialEntry={
+        initialEntry?.scanId === scanId && initialEntry.id === selectedEntryId
+          ? initialEntry
+          : undefined
+      }
       onRefresh={onRefresh}
     />
   )
@@ -61,13 +68,20 @@ function EntryDetails({
   scanId,
   entryId,
   disabled,
+  initialEntry,
   onRefresh
-}: Pick<Props, 'disabled' | 'onRefresh'> & { scanId: string; entryId: string }): React.JSX.Element {
-  const [state, setState] = useState<DetailsState>({ status: 'loading' })
+}: Pick<Props, 'disabled' | 'onRefresh' | 'initialEntry'> & {
+  scanId: string
+  entryId: string
+}): React.JSX.Element {
+  const [state, setState] = useState<DetailsState>(
+    initialEntry ? { status: 'loaded', entry: initialEntry } : { status: 'loading' }
+  )
   const [attempt, setAttempt] = useState(0)
   const focusTarget = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
+    if (initialEntry && attempt === 0) return
     let active = true
     // A discarded Strict Mode effect must not issue a duplicate request.
     queueMicrotask(async () => {
@@ -96,7 +110,7 @@ function EntryDetails({
     return () => {
       active = false
     }
-  }, [scanId, entryId, attempt])
+  }, [scanId, entryId, initialEntry, attempt])
 
   if (state.status !== 'loaded')
     return (

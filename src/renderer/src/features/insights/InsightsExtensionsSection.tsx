@@ -1,10 +1,10 @@
-import { DEFAULT_INSIGHTS_EXTENSION_PAGE_SIZE as PAGE_SIZE } from '../../../../shared/insights'
 import { formatBytes } from '../../lib/storage'
 import { InsightsAnalyticsSection } from './InsightsAnalyticsSection'
 import { InsightsPagination } from './InsightsPagination'
 import { categoryLabels } from './insightsDisplay'
 import { useInsightsRead, type InsightsSectionProps } from './useInsightsRead'
 
+const PAGE_SIZE = 20
 const counts = new Intl.NumberFormat('en-US')
 
 const readExtensions = (

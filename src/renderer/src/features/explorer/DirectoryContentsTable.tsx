@@ -1,9 +1,12 @@
 import { useEffect, useId, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { File, Folder, Link } from 'lucide-react'
-import type { ScanDirectoryPage } from '../../../../shared/snapshot'
+import {
+  MAX_SCAN_DIRECTORY_PAGE_SIZE as PAGE_SIZE,
+  type ScanDirectoryPage
+} from '../../../../shared/snapshot'
 import { Button } from '../../components/ui/Button'
 import { formatBytes } from '../../lib/storage'
-import { isStaleSnapshotError, listExplorerDirectoryPage } from './data'
+import { isStaleSnapshotError, listExplorerDirectoryPage, type LocatedContentsPage } from './data'
 import { ExplorerRequestError, type ExplorerRequestFailure } from './ExplorerRequestError'
 
 interface Props {
@@ -11,12 +14,11 @@ interface Props {
   directoryId: string | null
   selectedEntryId: string | null
   disabled?: boolean
+  initialPage?: LocatedContentsPage
   onSelect: (id: string | null) => void
   onNavigate: (id: string) => Promise<void>
   onRefresh?: () => void
 }
-
-const PAGE_SIZE = 100
 
 export function DirectoryContentsTable(props: Props): React.JSX.Element {
   const focusTarget = useRef<HTMLDivElement>(null)
@@ -42,18 +44,19 @@ function ContentsPage({
   directoryId,
   selectedEntryId,
   disabled,
+  initialPage,
   onSelect,
   onNavigate,
   onRefresh,
   focusTarget
 }: Props & { focusTarget: RefObject<HTMLDivElement | null> }): React.JSX.Element {
-  const [page, setPage] = useState<ScanDirectoryPage | null>(null)
-  const [offset, setOffset] = useState(0)
-  const [loading, setLoading] = useState(!!scanId && !!directoryId)
+  const [page, setPage] = useState<ScanDirectoryPage | null>(initialPage?.page ?? null)
+  const [offset, setOffset] = useState(initialPage?.offset ?? 0)
+  const [loading, setLoading] = useState(!initialPage && !!scanId && !!directoryId)
   const [error, setError] = useState<ExplorerRequestFailure | null>(null)
   const pending = useRef(false)
   const sequence = useRef(0)
-  const retryOffset = useRef(0)
+  const retryOffset = useRef(initialPage?.offset ?? 0)
   const description = useId()
   useLayoutEffect(
     () => () => {
@@ -97,9 +100,11 @@ function ContentsPage({
     const inFlight = pending
     const ticket = requests.current
     // Defer the initial request so a discarded Strict Mode mount cannot issue it.
-    queueMicrotask(() => {
-      if (requests.current === ticket) void load(0)
-    })
+    if (!initialPage) {
+      queueMicrotask(() => {
+        if (requests.current === ticket) void load(0)
+      })
+    }
     return () => {
       requests.current++
       inFlight.current = false

@@ -5,6 +5,8 @@ import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 import { InsightsCategoriesSection } from '../features/insights/InsightsCategoriesSection'
 import { InsightsExtensionsSection } from '../features/insights/InsightsExtensionsSection'
+import { InsightsObservationsSection } from '../features/insights/InsightsObservationsSection'
+import type { ExplorerTarget } from '../navigation'
 import {
   InsightsLargestDirectoriesSection,
   InsightsLargestFilesSection
@@ -55,9 +57,11 @@ function PublishedScan({ scan }: { scan: InsightsSummary }): React.JSX.Element {
 }
 
 export function InsightsPage({
-  onOpenOverview
+  onOpenOverview,
+  onOpenExplorer
 }: {
   onOpenOverview: () => void
+  onOpenExplorer?: (target: ExplorerTarget) => void
 }): React.JSX.Element {
   const { state, retry, recheckPublication } = useInsights()
   const title = useRef<HTMLHeadingElement>(null)
@@ -151,14 +155,21 @@ export function InsightsPage({
               scanId={analyticsScanId}
               recheckPublication={recheckPublication}
               pageTitle={title}
+              onOpenExplorer={onOpenExplorer}
             />
             <InsightsLargestDirectoriesSection
               scanId={analyticsScanId}
               recheckPublication={recheckPublication}
               pageTitle={title}
+              onOpenExplorer={onOpenExplorer}
             />
           </div>
           <InsightsExtensionsSection
+            scanId={analyticsScanId}
+            recheckPublication={recheckPublication}
+            pageTitle={title}
+          />
+          <InsightsObservationsSection
             scanId={analyticsScanId}
             recheckPublication={recheckPublication}
             pageTitle={title}

@@ -4,10 +4,11 @@ import { DirectoryTreemap } from '../features/explorer/DirectoryTreemap'
 import { useExplorer } from '../features/explorer/useExplorer'
 import { DirectoryTree } from '../features/explorer/DirectoryTree'
 import { isStaleSnapshotError } from '../features/explorer/data'
-import { useRef, type ReactNode } from 'react'
+import { useLayoutEffect, useRef, type ReactNode } from 'react'
 import { ArrowLeft, ArrowRight, ArrowUp, FolderTree } from 'lucide-react'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import type { ExplorerTarget } from '../navigation'
 
 function ExplorerPanel({
   id,
@@ -30,13 +31,23 @@ function ExplorerPanel({
   )
 }
 
-export function ExplorerPage(): React.JSX.Element {
-  const explorer = useExplorer()
+export function ExplorerPage({
+  target,
+  onTargetConsumed
+}: {
+  target?: ExplorerTarget
+  onTargetConsumed?: (target: ExplorerTarget) => void
+} = {}): React.JSX.Element {
+  const explorer = useExplorer(target, onTargetConsumed)
   const { availability, error, loading } = explorer
   const snapshot = availability?.status === 'available' ? availability.snapshot : null
   const scanId = snapshot?.entries.scanId ?? null
   const breadcrumb = useRef<HTMLElement>(null)
   const refreshControl = useRef<HTMLButtonElement>(null)
+  const title = useRef<HTMLHeadingElement>(null)
+  useLayoutEffect(() => {
+    if (target) title.current?.focus({ preventScroll: true })
+  }, [target])
   const refresh = (): void => {
     if (loading) return
     refreshControl.current?.focus()
@@ -60,7 +71,9 @@ export function ExplorerPage(): React.JSX.Element {
   return (
     <div className="min-w-0 space-y-5">
       <header className="space-y-2">
-        <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Storage Explorer</h2>
+        <h2 ref={title} tabIndex={-1} className="text-2xl font-semibold tracking-tight sm:text-3xl">
+          Storage Explorer
+        </h2>
         <p className="text-sm text-text-secondary">
           Explore directories, storage usage and item details.
         </p>
@@ -174,6 +187,11 @@ export function ExplorerPage(): React.JSX.Element {
             ' Use Refresh snapshot to check which results are available.'}
         </p>
       )}
+      {explorer.targetNotice && (
+        <p role="alert" className="text-warning [overflow-wrap:anywhere]">
+          {explorer.targetNotice}
+        </p>
+      )}
       {snapshot?.incomplete && (
         <p className="text-warning">Incomplete snapshot: known sizes may be partial.</p>
       )}
@@ -183,6 +201,7 @@ export function ExplorerPage(): React.JSX.Element {
             <DirectoryTree
               snapshot={snapshot}
               currentDirectoryId={explorer.currentDirectoryId}
+              activePath={explorer.revealPath ? explorer.breadcrumbs : undefined}
               navigationDisabled={explorer.loading}
               onNavigate={explorer.navigateToDirectory}
               onRefresh={refresh}
@@ -222,6 +241,7 @@ export function ExplorerPage(): React.JSX.Element {
               scanId={scanId}
               selectedEntryId={explorer.selectedEntryId}
               disabled={loading}
+              initialEntry={explorer.fileArrival?.entry}
               onRefresh={refresh}
             />
           )}
@@ -235,6 +255,7 @@ export function ExplorerPage(): React.JSX.Element {
             directoryId={explorer.currentDirectoryId}
             selectedEntryId={explorer.selectedEntryId}
             disabled={explorer.loading}
+            initialPage={explorer.fileArrival?.contents}
             onSelect={explorer.selectEntry}
             onNavigate={explorer.navigateToDirectory}
             onRefresh={refresh}

@@ -12,6 +12,7 @@ import {
   type InsightsExtensionPage,
   type InsightsExtensionRow,
   type InsightsFileCategory,
+  type InsightsObservations,
   type InsightsRankedEntry,
   type InsightsRankingPage,
   type InsightsRankingRequest,
@@ -63,9 +64,10 @@ function categoriesFor(
 function extensionPage(
   scan: InsightsSummary,
   rows: readonly InsightsExtensionRow[],
-  offset = 0
+  offset = 0,
+  limit = 20
 ): InsightsExtensionPage {
-  const extensions = rows.slice(offset, offset + 50)
+  const extensions = rows.slice(offset, offset + limit)
   const next = offset + extensions.length
   return {
     scanId: scan.scanId,
@@ -285,8 +287,13 @@ beforeEach(() => {
         )
       )
     }),
-    getInsightsObservations: vi.fn(),
-    listInsightsExtensions: vi.fn(async ({ scanId, offset }) => {
+    getInsightsObservations: vi.fn(async ({ scanId }) => {
+      if (publication?.scanId !== scanId) {
+        return { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Expired fixture ID' } }
+      }
+      return success({ scanId, incomplete: publication.incomplete, observations: [] })
+    }),
+    listInsightsExtensions: vi.fn(async ({ scanId, offset, limit }) => {
       if (publication?.scanId !== scanId) {
         return { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Expired fixture ID' } }
       }
@@ -296,7 +303,7 @@ beforeEach(() => {
         ...row,
         extension: original ? 'jpg' : 'md'
       }))
-      return success(extensionPage(publication, rows, offset))
+      return success(extensionPage(publication, rows, offset, limit))
     }),
     listInsightsLargestFiles: vi.fn(readRanking('file')),
     listInsightsLargestDirectories: vi.fn(readRanking('directory')),
@@ -349,6 +356,7 @@ test('starts on Overview and navigates between Insights, Explorer and Overview w
   await screen.findByRole('heading', { name: 'No completed scan' })
   expect(api.getInsightsSummary).not.toHaveBeenCalled()
   expect(api.getInsightsCategories).not.toHaveBeenCalled()
+  expect(api.getInsightsObservations).not.toHaveBeenCalled()
 })
 
 test('announces loading while resolving metadata and distinguishes an absent publication', async () => {
@@ -388,15 +396,14 @@ test('shows scoped completion details for a publication restored with an idle sc
   expect(api.listInsightsExtensions).toHaveBeenCalledExactlyOnceWith({
     scanId: regularScan.scanId,
     offset: 0,
-    limit: 50
+    limit: 20
   })
   expect(api.getScanState).not.toHaveBeenCalled()
-  for (const query of [
-    api.getScanEntry,
-    api.listScanDirectory,
-    api.getScanDirectoryTreemap,
-    api.getInsightsObservations
-  ]) {
+  expect(await screen.findByText('No notable patterns met the observation rules.')).toBeVisible()
+  expect(api.getInsightsObservations).toHaveBeenCalledExactlyOnceWith({
+    scanId: regularScan.scanId
+  })
+  for (const query of [api.getScanEntry, api.listScanDirectory, api.getScanDirectoryTreemap]) {
     expect(query).not.toHaveBeenCalled()
   }
 })
@@ -936,16 +943,16 @@ test('shows backend extension order, normalized suffixes, known bytes and unknow
   expect(within(extensionsPanel()).getByText('1–3 of 3 extensions')).toBeVisible()
 })
 
-const extensionGroups = Array.from({ length: 103 }, (_, index): InsightsExtensionRow => ({
+const extensionGroups = Array.from({ length: 43 }, (_, index): InsightsExtensionRow => ({
   extension: `x${String(index + 1).padStart(3, '0')}`,
   category: 'other',
   fileCount: 1,
-  knownBytes: 103 - index,
+  knownBytes: 43 - index,
   unknownSizeCount: 0
 }))
 const scanWithExtensions: InsightsSummary = {
   ...regularScan,
-  summary: { ...regularScan.summary, fileCount: 103, totalBytes: 5356 }
+  summary: { ...regularScan.summary, fileCount: 43, totalBytes: 946 }
 }
 const previousPage = (): HTMLElement =>
   within(extensionsPanel()).getByRole('button', { name: 'Previous extension page' })
@@ -955,19 +962,20 @@ const nextPage = (): HTMLElement =>
 test('paginates only on demand and preserves keyboard focus while controls are disabled', async () => {
   publication = scanWithExtensions
   const pending = Promise.withResolvers<ScannerIpcResult<InsightsExtensionPage>>()
-  api.listInsightsExtensions.mockImplementation(async ({ offset }) =>
-    offset === 50
+  api.listInsightsExtensions.mockImplementation(async ({ offset, limit }) =>
+    offset === 20
       ? pending.promise
-      : success(extensionPage(scanWithExtensions, extensionGroups, offset))
+      : success(extensionPage(scanWithExtensions, extensionGroups, offset, limit))
   )
   openInsights()
-  expect(await screen.findByText('1–50 of 103 extensions')).toBeVisible()
+  expect(await screen.findByText('1–20 of 43 extensions')).toBeVisible()
+  expect(within(extensionsPanel()).getAllByRole('rowheader')).toHaveLength(20)
   expect(previousPage()).toHaveAttribute('aria-disabled', 'true')
   expect(nextPage()).toHaveAttribute('aria-disabled', 'false')
   expect(api.listInsightsExtensions).toHaveBeenCalledExactlyOnceWith({
     scanId: regularScan.scanId,
     offset: 0,
-    limit: 50
+    limit: 20
   })
   const next = nextPage()
   next.focus()
@@ -981,22 +989,23 @@ test('paginates only on demand and preserves keyboard focus while controls are d
   expect(within(extensionsPanel()).getByRole('status')).toHaveTextContent('Loading file extensions')
   expect(api.listInsightsExtensions).toHaveBeenCalledTimes(2)
   await act(async () =>
-    pending.resolve(success(extensionPage(scanWithExtensions, extensionGroups, 50)))
+    pending.resolve(success(extensionPage(scanWithExtensions, extensionGroups, 20)))
   )
-  expect(await screen.findByText('51–100 of 103 extensions')).toBeVisible()
+  expect(await screen.findByText('21–40 of 43 extensions')).toBeVisible()
   expect(next).toHaveFocus()
-  expect(screen.getByRole('rowheader', { name: '.x051' })).toBeVisible()
+  expect(screen.getByRole('rowheader', { name: '.x021' })).toBeVisible()
   fireEvent.click(next)
-  expect(await screen.findByText('101–103 of 103 extensions')).toBeVisible()
+  expect(await screen.findByText('41–43 of 43 extensions')).toBeVisible()
+  expect(within(extensionsPanel()).getAllByRole('rowheader')).toHaveLength(3)
   expect(next).toHaveAttribute('aria-disabled', 'true')
   fireEvent.click(next)
   expect(api.listInsightsExtensions).toHaveBeenCalledTimes(3)
   fireEvent.click(previousPage())
-  expect(await screen.findByText('51–100 of 103 extensions')).toBeVisible()
+  expect(await screen.findByText('21–40 of 43 extensions')).toBeVisible()
   fireEvent.click(previousPage())
-  expect(await screen.findByText('1–50 of 103 extensions')).toBeVisible()
+  expect(await screen.findByText('1–20 of 43 extensions')).toBeVisible()
   expect(api.listInsightsExtensions.mock.calls.map(([request]) => request.offset)).toEqual([
-    0, 50, 100, 50, 0
+    0, 20, 40, 20, 0
   ])
 })
 
@@ -1009,9 +1018,9 @@ test('retries the failed page and leaves the other analytics visible', async () 
       ok: false,
       error: { code: 'UNAVAILABLE', message: 'Extension fixture error' }
     })
-    .mockResolvedValueOnce(success(extensionPage(scanWithExtensions, extensionGroups, 50)))
+    .mockResolvedValueOnce(success(extensionPage(scanWithExtensions, extensionGroups, 20)))
   openInsights()
-  await screen.findByText('1–50 of 103 extensions')
+  await screen.findByText('1–20 of 43 extensions')
   fireEvent.click(nextPage())
   expect(await within(extensionsPanel()).findByRole('alert')).toHaveTextContent(
     'SpaceLens couldn’t load file extensions'
@@ -1026,9 +1035,9 @@ test('retries the failed page and leaves the other analytics visible', async () 
     retry.click()
   })
   expect(within(extensionsPanel()).getByRole('heading')).toHaveFocus()
-  expect(await screen.findByText('51–100 of 103 extensions')).toBeVisible()
+  expect(await screen.findByText('21–40 of 43 extensions')).toBeVisible()
   expect(api.listInsightsExtensions.mock.calls.map(([request]) => request.offset)).toEqual([
-    0, 50, 50
+    0, 20, 20
   ])
   expect(api.getInsightsSizeDistribution).toHaveBeenCalledOnce()
   expect(api.getInsightsCategories).toHaveBeenCalledOnce()
@@ -1189,17 +1198,17 @@ test('keeps the selected page and distribution during failed or cancelled scans 
   publication = scanWithExtensions
   api.listInsightsExtensions
     .mockResolvedValueOnce(success(extensionPage(scanWithExtensions, extensionGroups)))
-    .mockResolvedValueOnce(success(extensionPage(scanWithExtensions, extensionGroups, 50)))
+    .mockResolvedValueOnce(success(extensionPage(scanWithExtensions, extensionGroups, 20)))
   openInsights()
-  await screen.findByText('1–50 of 103 extensions')
+  await screen.findByText('1–20 of 43 extensions')
   fireEvent.click(nextPage())
-  await screen.findByText('51–100 of 103 extensions')
+  await screen.findByText('21–40 of 43 extensions')
   const chart = await within(distributionPanel()).findByRole('figure')
   emit(update(1, 'running'))
   emit(update(2, 'cancelled'))
   emit(update(3, 'running'))
   emit(update(4, 'failed'))
-  expect(screen.getByText('51–100 of 103 extensions')).toBeVisible()
+  expect(screen.getByText('21–40 of 43 extensions')).toBeVisible()
   expect(within(distributionPanel()).getByRole('figure')).toBe(chart)
   expect(api.getInsightsSizeDistribution).toHaveBeenCalledOnce()
   expect(api.listInsightsExtensions).toHaveBeenCalledTimes(2)
@@ -1209,7 +1218,7 @@ test('keeps the selected page and distribution during failed or cancelled scans 
   expect(api.listInsightsExtensions).toHaveBeenLastCalledWith({
     scanId: replacement.scanId,
     offset: 0,
-    limit: 50
+    limit: 20
   })
   expect(api.getInsightsSizeDistribution).toHaveBeenLastCalledWith({ scanId: replacement.scanId })
   expect(within(distributionPanel()).getByRole('figure')).not.toBe(chart)
@@ -1224,21 +1233,21 @@ test('ignores delayed extension pages and distribution responses from a supersed
     .mockReturnValueOnce(extensions.promise)
   api.getInsightsSizeDistribution.mockReturnValueOnce(distribution.promise)
   openInsights()
-  await screen.findByText('1–50 of 103 extensions')
+  await screen.findByText('1–20 of 43 extensions')
   fireEvent.click(nextPage())
   publication = replacement
   emit(update(1, 'completed'))
   expect(await screen.findByRole('rowheader', { name: '.md' })).toBeVisible()
   const chart = await within(distributionPanel()).findByRole('figure')
   await act(async () => {
-    extensions.resolve(success(extensionPage(scanWithExtensions, extensionGroups, 50)))
-    distribution.resolve(success(distributionFor(scanWithExtensions, 5356, ...Array(102).fill(0))))
+    extensions.resolve(success(extensionPage(scanWithExtensions, extensionGroups, 20)))
+    distribution.resolve(success(distributionFor(scanWithExtensions, 946, ...Array(42).fill(0))))
   })
   expect(screen.getByRole('rowheader', { name: '.md' })).toBeVisible()
-  expect(screen.queryByText('51–100 of 103 extensions')).not.toBeInTheDocument()
+  expect(screen.queryByText('21–40 of 43 extensions')).not.toBeInTheDocument()
   expect(within(distributionPanel()).getByRole('figure')).toBe(chart)
   expect(api.listInsightsExtensions.mock.calls.map(([request]) => request.offset)).toEqual([
-    0, 50, 0
+    0, 20, 0
   ])
 })
 
@@ -1282,6 +1291,8 @@ test('ignores expired in-flight extension and distribution replies after unmount
   expect(diagnostics).not.toHaveBeenCalled()
 })
 
+const observationsPanel = (): ReturnType<typeof within> =>
+  within(screen.getByRole('region', { name: 'Storage observations' }))
 const filesRanking = (): ReturnType<typeof within> =>
   within(screen.getByRole('region', { name: 'Largest files' }))
 const directoriesRanking = (): ReturnType<typeof within> =>
@@ -1578,4 +1589,187 @@ test('does not process ranking requests that finish after unmount', async () => 
   })
   expect(api.getScanSnapshot).toHaveBeenCalledOnce()
   expect(diagnostics).not.toHaveBeenCalled()
+})
+
+const observationFixture: InsightsObservations = {
+  scanId: regularScan.scanId,
+  incomplete: true,
+  observations: [
+    {
+      id: 'incompleteScan',
+      type: 'incompleteScan',
+      title: 'Incomplete scan coverage',
+      message: 'Some file sizes were unavailable.',
+      severity: 'warning',
+      evidence: { errorCount: 2, unknownSizeCount: 2 }
+    },
+    {
+      id: 'largeFileConcentration',
+      type: 'largeFileConcentration',
+      title: 'Known bytes concentrated in a few files',
+      message: 'The 5 largest files account for at least 50% of known logical bytes.',
+      severity: 'info',
+      evidence: { fileCount: 5, knownBytes: 15_000_000, totalKnownBytes: 25_000_000 }
+    },
+    {
+      id: 'dominantCategory',
+      type: 'dominantCategory',
+      title: 'One file category has a large byte share',
+      message: 'The images category accounts for at least 60% of known logical bytes.',
+      severity: 'info',
+      evidence: { category: 'images', knownBytes: 20_000_000, totalKnownBytes: 25_000_000 }
+    },
+    {
+      id: 'directoryConcentration',
+      type: 'directoryConcentration',
+      title: 'Known bytes concentrated in one directory',
+      message: 'The largest non-root directory contains at least 50% of known logical bytes.',
+      severity: 'info',
+      evidence: { entryId: 'largest-dir', knownBytes: 18_000_000, totalKnownBytes: 25_000_000 }
+    },
+    {
+      id: 'smallFilesPrevalence',
+      type: 'smallFilesPrevalence',
+      title: 'Most measured files are small',
+      message: 'At least 80% of files with known sizes are empty or smaller than 1 MiB.',
+      severity: 'info',
+      evidence: { smallFileCount: 18, knownSizeCount: 22 }
+    }
+  ]
+}
+
+test('renders the five supplied observations in order with severity, original copy and measured evidence', async () => {
+  publication = {
+    ...regularScan,
+    incomplete: true,
+    summary: { fileCount: 24, directoryCount: 4, totalBytes: 25_000_000, errorCount: 2 }
+  }
+  api.getInsightsObservations.mockResolvedValueOnce(success(observationFixture))
+  openInsights()
+  const list = await screen.findByRole('list', { name: 'Scan observations' })
+  const rows = within(list).getAllByRole('listitem')
+  expect(rows.map((row) => row.dataset.observationId)).toEqual(
+    observationFixture.observations.map(({ id }) => id)
+  )
+  expect(rows.map((row) => row.dataset.observationType)).toEqual(
+    observationFixture.observations.map(({ type }) => type)
+  )
+  const evidence = [
+    '2 filesystem errors · 2 files with unknown sizes',
+    '15 MB of 25 MB in known logical bytes',
+    '20 MB of 25 MB in known logical bytes',
+    '18 MB of 25 MB in known logical bytes',
+    '18 of 22 files with known sizes'
+  ]
+  rows.forEach((row, index) => {
+    const item = observationFixture.observations[index]
+    expect(within(row).getByRole('heading', { name: item.title })).toBeVisible()
+    expect(within(row).getByText(item.message)).toBeVisible()
+    expect(
+      within(row).getByText(item.severity === 'warning' ? 'Warning' : 'Information')
+    ).toBeVisible()
+    expect(within(row).getByText(evidence[index])).toBeVisible()
+  })
+  expect(screen.getByText('Some items couldn’t be scanned.')).toBeVisible()
+  emit(update(1, 'running'))
+  emit(update(2, 'cancelled'))
+  expect(observationsPanel().getByRole('list', { name: 'Scan observations' })).toBe(list)
+  expect(api.getInsightsObservations).toHaveBeenCalledExactlyOnceWith({
+    scanId: regularScan.scanId
+  })
+})
+
+test('preserves zero evidence on an incomplete zero-byte scan', async () => {
+  publication = {
+    ...regularScan,
+    incomplete: true,
+    summary: { ...regularScan.summary, totalBytes: 0, errorCount: 1 }
+  }
+  const {
+    observations: [warning]
+  } = observationFixture
+  api.getInsightsObservations.mockResolvedValueOnce(
+    success({
+      ...observationFixture,
+      observations: [
+        {
+          ...warning,
+          id: 'incompleteScan',
+          type: 'incompleteScan',
+          evidence: { errorCount: 1, unknownSizeCount: 0 }
+        }
+      ]
+    })
+  )
+  openInsights()
+  expect(await screen.findByText('1 filesystem error · 0 files with unknown sizes')).toBeVisible()
+  expect(observationsPanel().getAllByRole('listitem')).toHaveLength(1)
+  expect(summaryCards()).toHaveTextContent('0 B')
+})
+
+test('keeps other analytics usable while observations load or fail and retries independently', async () => {
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
+  publication = scanWithRankings
+  const pending = Promise.withResolvers<ScannerIpcResult<InsightsObservations>>()
+  api.getInsightsObservations.mockReturnValueOnce(pending.promise)
+  openInsights()
+  await screen.findByText('1–10 of 20 ranked files')
+  expect(observationsPanel().getByRole('status')).toHaveTextContent('Loading storage observations')
+  expect(summaryCards()).toBeVisible()
+  expect(await within(categoryPanel()).findByRole('figure')).toBeVisible()
+  expect(await within(distributionPanel()).findByRole('figure')).toBeVisible()
+  expect(await within(extensionsPanel()).findByRole('table')).toBeVisible()
+
+  await act(async () =>
+    pending.resolve({ ok: false, error: { code: 'UNAVAILABLE', message: 'Unavailable fixture' } })
+  )
+  expect(observationsPanel().getByRole('alert')).toHaveTextContent(
+    'SpaceLens couldn’t load storage observations'
+  )
+  fireEvent.click(observationsPanel().getByRole('button', { name: 'Retry observations' }))
+  expect(observationsPanel().getByRole('heading')).toHaveFocus()
+  expect(
+    await observationsPanel().findByText('No notable patterns met the observation rules.')
+  ).toBeVisible()
+  expect(api.getInsightsObservations.mock.calls).toEqual([
+    [{ scanId: regularScan.scanId }],
+    [{ scanId: regularScan.scanId }]
+  ])
+  expect(api.listInsightsLargestFiles).toHaveBeenCalledOnce()
+  expect(api.getInsightsSummary).toHaveBeenCalledOnce()
+  expect(api.listInsightsExtensions).toHaveBeenCalledOnce()
+})
+
+test('preserves observations on cancellation and rejects late results after a replacement', async () => {
+  publication = regularScan
+  const pending = Promise.withResolvers<ScannerIpcResult<InsightsObservations>>()
+  api.getInsightsObservations.mockReturnValueOnce(pending.promise)
+  openInsights()
+  await screen.findByText('Loading storage observations…')
+  await waitFor(() => expect(api.getInsightsObservations).toHaveBeenCalledOnce())
+  emit(update(1, 'running'))
+  emit(update(2, 'cancelled'))
+  expect(api.getInsightsObservations).toHaveBeenCalledOnce()
+  publication = replacement
+  emit(update(3, 'completed'))
+  expect(await screen.findByText('No notable patterns met the observation rules.')).toBeVisible()
+  await act(async () => pending.resolve(success(observationFixture)))
+  expect(observationsPanel().queryByText('Incomplete scan coverage')).not.toBeInTheDocument()
+  expect(api.getInsightsObservations.mock.calls).toEqual([
+    [{ scanId: regularScan.scanId }],
+    [{ scanId: replacement.scanId }]
+  ])
+})
+
+test('ignores an expired observation response on unmount', async () => {
+  publication = regularScan
+  const pending = Promise.withResolvers<ScannerIpcResult<InsightsObservations>>()
+  api.getInsightsObservations.mockReturnValueOnce(pending.promise)
+  const view = openInsights()
+  await waitFor(() => expect(api.getInsightsObservations).toHaveBeenCalledOnce())
+  view.unmount()
+  await act(async () =>
+    pending.resolve({ ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Ignore' } })
+  )
+  expect(api.getScanSnapshot).toHaveBeenCalledOnce()
 })

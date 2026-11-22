@@ -1,4 +1,4 @@
-import { useEffect, useId, useRef, useState } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { ChevronDown, ChevronRight, Folder } from 'lucide-react'
 import type { FileEntry } from '../../../../shared/scan'
 import type { ScanSnapshot } from '../../../../shared/snapshot'
@@ -8,6 +8,7 @@ import { ExplorerRequestError, type ExplorerRequestFailure } from './ExplorerReq
 interface TreeProps {
   snapshot: ScanSnapshot
   currentDirectoryId: string | null
+  activePath?: readonly FileEntry[]
   navigationDisabled?: boolean
   onNavigate: (entryId: string) => Promise<void>
   onRefresh?: () => void
@@ -28,8 +29,22 @@ export function DirectoryTree(props: TreeProps): React.JSX.Element {
 
 function TreeSession(props: TreeProps): React.JSX.Element {
   const [budget] = useState(() => new Set<string>())
+  const viewport = useRef<HTMLDivElement>(null)
+  const { activePath } = props
+  useLayoutEffect(() => {
+    const container = viewport.current
+    const active = container?.querySelector('[aria-current="location"]')
+    if (!activePath || !container || !active) return
+    const bounds = container.getBoundingClientRect()
+    const row = active.getBoundingClientRect()
+    if (row.bottom > bounds.bottom) container.scrollTop += row.bottom - bounds.bottom
+    else if (row.top < bounds.top) container.scrollTop -= bounds.top - row.top
+  }, [activePath])
   return (
-    <div className="max-h-96 min-w-0 overflow-y-auto py-3 scrollbar-none md:min-h-0 md:max-h-none md:flex-1 md:contain-size">
+    <div
+      ref={viewport}
+      className="max-h-96 min-w-0 overflow-y-auto py-3 scrollbar-none md:min-h-0 md:max-h-none md:flex-1 md:contain-size"
+    >
       <ul aria-label="Snapshot directories">
         <DirectoryNode {...props} entry={props.snapshot.root} budget={budget} depth={0} />
       </ul>
@@ -43,7 +58,11 @@ function DirectoryNode({
   depth,
   ...tree
 }: TreeProps & { entry: FileEntry; budget: Set<string>; depth: number }): React.JSX.Element {
-  const [expanded, setExpanded] = useState(false)
+  const child = tree.activePath?.[depth + 1]
+  const activeChild = child?.parentId === entry.id ? child : undefined
+  const [expansion, setExpansion] = useState<{ childId?: string; expanded: boolean } | null>(null)
+  const expanded =
+    expansion && expansion.childId === activeChild?.id ? expansion.expanded : !!activeChild
   const [page, setPage] = useState<Page | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<ExplorerRequestFailure | null>(null)
@@ -102,9 +121,14 @@ function DirectoryNode({
     }
   }
   const toggle = (): void => {
-    setExpanded(!expanded)
+    setExpansion({ childId: activeChild?.id, expanded: !expanded })
     if (!expanded && !page && !error) void load(0)
   }
+  // Breadcrumb ancestry is already validated. Reveal it without requesting all ancestor pages.
+  const children =
+    activeChild && !page?.directories.some(({ id }) => id === activeChild.id)
+      ? [...(page?.directories ?? []), activeChild]
+      : (page?.directories ?? [])
   const name = entry.name || entry.path
   const indent = `${Math.min(depth, 4) * 0.5}rem`
   const pagingDisabled = loading || !!tree.navigationDisabled || isStaleSnapshotError(error?.code)
@@ -173,9 +197,23 @@ function DirectoryNode({
                 />
               </div>
             )}
-            {page && (
+            {!page && !loading && !error && activeChild && (
+              <button
+                type="button"
+                disabled={tree.navigationDisabled}
+                className="rounded-sm px-1 py-1 text-left text-xs text-accent hover:underline"
+                style={{ marginInlineStart: indent }}
+                onClick={() => {
+                  expander.current?.focus({ preventScroll: true })
+                  void load(0)
+                }}
+              >
+                Browse subdirectories
+              </button>
+            )}
+            {(page || activeChild) && (
               <>
-                {!page.directories.length && (
+                {page && !children.length && (
                   <p
                     className="py-2 text-xs text-text-secondary"
                     style={{ marginInlineStart: indent }}
@@ -187,8 +225,8 @@ function DirectoryNode({
                         : 'No directories on this page.'}
                   </p>
                 )}
-                <ul key={page.offset} aria-label={`Subdirectories of ${name}`}>
-                  {page.directories.map((child) => (
+                <ul key={page?.offset} aria-label={`Subdirectories of ${name}`}>
+                  {children.map((child) => (
                     <DirectoryNode
                       key={child.id}
                       {...tree}
@@ -198,7 +236,7 @@ function DirectoryNode({
                     />
                   ))}
                 </ul>
-                {(page.offset > 0 || page.nextOffset !== null) && (
+                {page && (page.offset > 0 || page.nextOffset !== null) && (
                   <div
                     role="group"
                     aria-label={`Pages for ${name}`}
