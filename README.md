@@ -1,6 +1,27 @@
 ﻿# SpaceLens
 
-Desktop filesystem storage analysis application. Overview displays demo storage device cards and the latest completed scan summary. Device capacities use decimal GB (1 GB = 1,000,000,000 bytes); these are example drives, not detected devices. Scan Folder opens a native directory picker and scans the selected directory in a worker, with progress and cancellation.
+SpaceLens analyzes the logical sizes of files in a selected folder. **Scan Folder** opens the native directory picker. A worker reads the selected folder and reports progress, and you can cancel an active scan.
+
+- **Overview** shows the active scan and the latest published summary. The storage device cards use example drives and decimal GB (1 GB = 1,000,000,000 bytes).
+- **Explorer** browses the published directory tree, file details, contents pages, and Treemap.
+- **Insights** shows file categories, extensions, size distribution, the largest files and directories, and storage observations. Extensions displays 20 groups per page, and ranked entries can open directly in Explorer.
+
+## Windows x64 installation
+
+Run `spacelens-0.1.0-setup.exe` and launch SpaceLens from the Start menu or desktop shortcut. The one-click NSIS installer installs for the current Windows user. A new installation typically uses `%LOCALAPPDATA%\Programs\spacelens`. The installer is unsigned, so Windows may display a security warning.
+
+SpaceLens stores its SQLite database in `%APPDATA%\spacelens\scans.sqlite` on Windows. The normal uninstall configuration preserves the profile and scan database.
+
+To build the installer from this repository after `npm ci`:
+
+```sh
+npm run build
+npm exec -- electron-builder --win --x64 --config.electronDist=node_modules/electron/dist --publish never
+```
+
+The installer is generated in `dist/`. The installed app uses the bundled runtime and production resources.
+
+## Scan storage
 
 SpaceLens streams scanner batches into `scans.sqlite` in Electron's `userData` directory. Overview restores the latest published scan after startup recovery and displays its folder, completion time, logical size, file and directory counts, and filesystem errors. The Folder scan panel starts idle. Recent Scans displays an empty state until the first successful scan.
 
@@ -10,11 +31,13 @@ Storage requests have a 10-second deadline. On normal shutdown Main waits for sc
 
 SQLite uses its default `DELETE` rollback journal. Snapshot replacement and recovery free pages for future writes, so the database can stay near its previous peak size after the old rows are removed. A rollback journal may be present during a write or after an interruption. SQLite handles journal recovery when the database is reopened.
 
-Overview and Explorer use the same SQLite publication. A running, cancelled, or failed scan leaves the last acknowledged publication visible. A successful commit replaces it and refreshes Explorer at the new root. SpaceLens keeps one published scan and at most one building scan. It maintains no history or parallel entry index in memory. Known logical bytes may be incomplete after recoverable filesystem errors.
+Overview, Explorer, and Insights use the same SQLite publication. A running, cancelled, or failed scan leaves the last acknowledged publication visible. A successful commit replaces it and refreshes the pages for the new root. SpaceLens keeps one published scan and at most one building scan. Known logical sizes can be partial when some items are unreadable. The UI reports scan errors and incomplete coverage.
 
 Directory pages contain at most 100 direct children, sorted by name then ID in UTF-16 order. References expire on replacement. Treemap reads the same SQLite publication, including after restart. It ranks up to 100 direct children by known size and groups the remaining entries into Other. It uses logical file sizes and the scanner's stored directory totals.
 
-Main serializes reads and scanner writes through one Storage Worker. Scanner writes take priority over queued reads. Up to 16 reads may wait for a turn, each with a 10-second queue deadline. Document changes and shutdown drop queued Explorer work. An active query may finish before the next write because SQLite runs synchronously inside the Worker. Cancellation remains available through traversal and batch persistence and closes when the final publication request is sent.
+Main serializes reads and scanner writes through one Storage Worker. Scanner writes take priority over queued reads. Up to 16 reads may wait for a turn, each with a 10-second queue deadline. Document changes and shutdown drop queued snapshot reads. An active SQLite query can delay the next write. Cold analytics and targeting a file in a wide or deeply nested directory can take noticeable time on large scans. Cancellation remains available through traversal and batch persistence and closes when the final publication request is sent.
+
+Scan history and comparisons, duplicate detection, file cleanup, and background monitoring are deferred beyond Phase 4.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 
@@ -66,7 +89,7 @@ Tests live in `tests/` as `.test.ts` and `.test.tsx` files. `vitest.config.mts` 
 
 - `src/main` — Electron lifecycle, scanner worker, scan session management, and SQLite storage and recovery.
 - `src/preload` — isolated, typed context bridge for application information, authorized scanning and bounded snapshot retrieval.
-- `src/renderer` — React application shell, UI primitives, Overview dashboard layout and other section placeholder pages.
+- `src/renderer` — React application shell, UI primitives, Overview, Explorer, and Insights.
 - `src/shared` — shared IPC contracts and channel names.
 
 The sidebar and topbar stay in place while the main content scrolls. At narrower widths, the sidebar becomes an icon rail. Typed React state selects Overview, Explorer, Insights or History without a router. Each launch starts on Overview; page selection is not persisted. Settings remains disabled until implemented.
