@@ -42,6 +42,7 @@ import { bindFilesystemText, readFilesystemText } from './filesystemText'
 import { PublishedAnalytics } from './publishedAnalytics'
 
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
+const SQLITE_PAGE_CACHE_KIB = 64 * 1024
 const SELECT_SCAN = `
   SELECT id, root_path, status, started_at, finished_at, total_bytes, file_count,
          directory_count, error_count FROM scans
@@ -205,6 +206,9 @@ export class ScanDatabase {
       if (this.connection.prepare('PRAGMA foreign_keys').get()?.foreign_keys !== 1) {
         throw new Error('SQLite foreign-key enforcement is unavailable.')
       }
+      // Retiring a large scan touches several indexes with unrelated page orderings.
+      // A bounded connection-local cache limits page churn during atomic replacement.
+      this.connection.exec(`PRAGMA main.cache_size = -${SQLITE_PAGE_CACHE_KIB}`)
       inTransaction(this.connection, () => initializeSchema(this.connection))
       this.analytics = new PublishedAnalytics(this.connection)
 

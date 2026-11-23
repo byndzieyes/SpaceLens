@@ -114,6 +114,19 @@ test('creates a version 1 database with two strict tables and the default rollba
   })
 })
 
+test('sets a bounded page cache on the application connection without persisting it', () => {
+  const connect = vi.spyOn(DatabaseSync.prototype, 'open')
+  open()
+  expect(connect).toHaveBeenCalledOnce()
+  const connection = connect.mock.contexts[0] as DatabaseSync
+  connect.mockRestore()
+
+  expect(connection.prepare('PRAGMA main.cache_size').get()?.cache_size).toBe(-64 * 1024)
+  inspectDatabase((other) => {
+    expect(other.prepare('PRAGMA main.cache_size').get()?.cache_size).not.toBe(-64 * 1024)
+  })
+})
+
 test('repeated initialization and idempotent close preserve all stored metadata', () => {
   const db = open()
   db.transaction(() => {

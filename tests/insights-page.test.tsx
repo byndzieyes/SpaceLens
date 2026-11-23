@@ -899,7 +899,7 @@ test('does not recheck an expired category reply that arrives after navigation a
   publication = regularScan
   api.getInsightsCategories.mockReturnValueOnce(pending.promise)
   const page = openInsights()
-  await screen.findByText('Loading file categories…')
+  await waitFor(() => expect(api.getInsightsCategories).toHaveBeenCalledOnce())
   page.unmount()
   await act(async () =>
     pending.resolve({ ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Ignore' } })

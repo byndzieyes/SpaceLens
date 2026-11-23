@@ -4,6 +4,7 @@ import type { FileEntry } from '../src/shared/scan'
 import type { ScanDirectoryPage, ScanSnapshot } from '../src/shared/snapshot'
 import {
   listExplorerDirectoryPage,
+  resolveDirectoryAncestry,
   resolveExplorerSnapshot
 } from '../src/renderer/src/features/explorer/data'
 
@@ -107,6 +108,36 @@ test('re-queries availability instead of caching a replaced snapshot', async () 
   expect(await resolveExplorerSnapshot()).toMatchObject({ value: { snapshot } })
   expect(await resolveExplorerSnapshot()).toMatchObject({ value: { snapshot: replacement } })
   expect(api.getScanSnapshot).toHaveBeenCalledTimes(2)
+})
+
+test('resolves a published directory more than 256 levels below its root', async () => {
+  const chain = [root]
+  for (let depth = 1; depth <= 260; depth++) {
+    const parent = chain[depth - 1]
+    chain.push({
+      ...root,
+      id: `directory-${depth}`,
+      parentId: parent.id,
+      path: `${parent.path}\\d`,
+      name: 'd'
+    })
+  }
+  const metadata: ScanSnapshot = {
+    ...snapshot,
+    entryCount: chain.length,
+    summary: { ...snapshot.summary, fileCount: 0, directoryCount: chain.length, totalBytes: 0 }
+  }
+  const entries = new Map(chain.map((entry) => [entry.id, entry]))
+  api.getScanEntry.mockImplementation(async ({ entryId }) => {
+    const entry = entries.get(entryId)
+    return entry ? { ok: true, value: entry } : failure('ENTRY_NOT_FOUND')
+  })
+
+  await expect(resolveDirectoryAncestry(metadata, 'directory-260', () => true)).resolves.toEqual(
+    chain
+  )
+  expect(api.getScanEntry).toHaveBeenCalledTimes(260)
+  expect(api.getScanEntry).not.toHaveBeenCalledWith(directory)
 })
 
 test('loads one default page without reordering, copying entries, or following nextOffset', async () => {

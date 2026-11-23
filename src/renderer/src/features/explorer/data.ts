@@ -91,7 +91,7 @@ export async function resolveDirectoryAncestry(
   const chain: FileEntry[] = []
   const seen = new Set<string>()
   let id: string | null = entryId
-  while (id !== null && chain.length < 256) {
+  while (id !== null && chain.length < snapshot.summary.directoryCount) {
     if (seen.has(id)) throw invalidExplorerEntry('Directory ancestry contains a cycle.')
     seen.add(id)
     let entry: FileEntry
@@ -116,9 +116,7 @@ export async function resolveDirectoryAncestry(
     if (id === snapshot.root.id) return chain.reverse()
     id = entry.parentId
   }
-  throw invalidExplorerEntry(
-    'Directory ancestry could not be resolved within the snapshot root (maximum depth 256).'
-  )
+  throw invalidExplorerEntry('Directory ancestry could not be resolved within the snapshot root.')
 }
 
 /** Read a single key at page boundaries, then materialize only the page that contains the file. */
