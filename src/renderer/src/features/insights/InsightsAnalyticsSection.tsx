@@ -11,15 +11,20 @@ export function InsightsAnalyticsSection({
   state,
   retry,
   retryLabel,
+  headerClassName = '',
   controls,
   children
 }: {
   title: string
   description: string
   pageTitle: InsightsSectionProps['pageTitle']
-  state: { status: 'loading' | 'ready' } | { status: 'error'; expired: boolean }
+  state:
+    | { status: 'loading'; interactive: boolean }
+    | { status: 'ready' }
+    | { status: 'error'; expired: boolean }
   retry: () => void
   retryLabel: string
+  headerClassName?: string
   controls?: ReactNode
   children: ReactNode
 }): React.JSX.Element {
@@ -38,7 +43,7 @@ export function InsightsAnalyticsSection({
 
   return (
     <Card ref={region} aria-labelledby={titleId} className="min-w-0 space-y-5">
-      <header className="space-y-1">
+      <header className={`space-y-1 ${headerClassName}`}>
         <h3 id={titleId} ref={heading} tabIndex={-1} className="text-base font-semibold">
           {title}
         </h3>
@@ -46,7 +51,11 @@ export function InsightsAnalyticsSection({
       </header>
       {controls}
       {state.status === 'loading' && (
-        <p role="status" className="flex items-center gap-2 text-sm text-text-secondary">
+        <p
+          role="status"
+          aria-live={state.interactive ? 'polite' : 'off'}
+          className="flex items-center gap-2 text-sm text-text-secondary"
+        >
           <LoaderCircle
             size={16}
             className="shrink-0 text-accent motion-safe:animate-spin"

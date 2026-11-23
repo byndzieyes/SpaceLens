@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import type { ScannerIpcResult } from '../../../../shared/ipc'
 
 type ReadState<Data, Query> =
-  | { status: 'loading' }
+  | { status: 'loading'; interactive: boolean }
   | { status: 'error'; expired: boolean }
   | { status: 'ready'; data: Data; query: Query }
 
@@ -18,7 +18,10 @@ export function useInsightsRead<Data extends { scanId: string }, Query>(
   read: (scanId: string, query: Query) => Promise<ScannerIpcResult<Data>>,
   initialQuery: NoInfer<Query>
 ): { state: ReadState<Data, Query>; load: (query: Query) => void; retry: () => void } {
-  const [state, setState] = useState<ReadState<Data, Query>>({ status: 'loading' })
+  const [state, setState] = useState<ReadState<Data, Query>>({
+    status: 'loading',
+    interactive: false
+  })
   const actions = useRef<{ load: (query: Query) => Promise<void>; retry: () => void } | null>(null)
 
   useEffect(() => {
@@ -30,11 +33,11 @@ export function useInsightsRead<Data extends { scanId: string }, Query>(
       if (import.meta.env.DEV) console.warn('Could not load an Insights section.', detail)
       setState({ status: 'error', expired })
     }
-    const load = async (query: Query): Promise<void> => {
+    const load = async (query: Query, interactive: boolean): Promise<void> => {
       if (!active || pending) return
       pending = true
       lastQuery = query
-      setState({ status: 'loading' })
+      setState({ status: 'loading', interactive })
       try {
         const result = await read(scanId, query)
         if (!active) return
@@ -54,9 +57,12 @@ export function useInsightsRead<Data extends { scanId: string }, Query>(
       }
     }
 
-    actions.current = { load, retry: () => void load(lastQuery) }
+    actions.current = {
+      load: (query) => load(query, true),
+      retry: () => void load(lastQuery, true)
+    }
     // Skip the first Strict Mode effect if its cleanup has already run.
-    queueMicrotask(() => void load(initialQuery))
+    queueMicrotask(() => void load(initialQuery, false))
     return () => {
       active = false
       actions.current = null

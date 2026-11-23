@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useEffect, useId, useState } from 'react'
 import type {
   InsightsCategories,
   InsightsCategoryRow,
@@ -52,17 +52,26 @@ export function CategoryDonut({ data }: { data: InsightsCategories }): React.JSX
     precedingBytes += row.knownBytes
   }
   const active = rows.find((row) => row.category === (hovered ?? focused))
+  const tooltipVisible = active !== undefined
+
+  useEffect(() => {
+    if (!tooltipVisible) return
+
+    function dismissTooltip(event: KeyboardEvent): void {
+      if (event.key === 'Escape') {
+        setHovered(null)
+        setFocused(null)
+      }
+    }
+
+    document.addEventListener('keydown', dismissTooltip)
+    return () => document.removeEventListener('keydown', dismissTooltip)
+  }, [tooltipVisible])
 
   return (
     <figure
       aria-label="Known logical bytes by file category"
       className="grid min-w-0 items-center gap-6 md:grid-cols-[minmax(0,13rem)_minmax(0,1fr)]"
-      onKeyDown={(event) => {
-        if (event.key === 'Escape' && active) {
-          setHovered(null)
-          setFocused(null)
-        }
-      }}
     >
       {knownBytes > 0 ? (
         <div className="relative mx-auto grid aspect-square w-full max-w-52 place-items-center">

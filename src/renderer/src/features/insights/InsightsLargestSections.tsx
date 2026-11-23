@@ -41,6 +41,11 @@ function RankedEntryRow({
   onOpenExplorer: RankingProps['onOpenExplorer']
 }): React.JSX.Element {
   const Icon = entry.type === 'file' ? File : Folder
+  const nameStart = entry.path.length - entry.name.length
+  const parentPath =
+    nameStart > 0 && entry.path.endsWith(entry.name) && /[/\\]/.test(entry.path[nameStart - 1])
+      ? entry.path.slice(0, nameStart)
+      : entry.path
 
   return (
     <li className="grid min-w-0 grid-cols-[1.75rem_minmax(0,1fr)_auto] items-start gap-2 py-3 text-sm">
@@ -51,10 +56,13 @@ function RankedEntryRow({
           <bdi className="min-w-0 whitespace-pre-wrap [overflow-wrap:anywhere]">{entry.name}</bdi>
         </p>
         <details className="group min-w-0 text-xs text-text-secondary">
-          <summary className="flex min-w-0 cursor-pointer items-center gap-1 rounded-sm [&::-webkit-details-marker]:hidden">
-            <bdi className="min-w-0 truncate group-open:hidden" title={entry.path}>
-              {entry.path}
-            </bdi>
+          <summary
+            aria-label={`Full path: ${entry.path}`}
+            className="flex min-w-0 cursor-pointer items-center gap-1 rounded-sm [&::-webkit-details-marker]:hidden"
+          >
+            <span dir="rtl" className="min-w-0 truncate group-open:hidden" title={entry.path}>
+              <bdi>{parentPath}</bdi>
+            </span>
             <span className="hidden group-open:inline">Hide full path</span>
             <ChevronDown size={13} className="shrink-0 group-open:rotate-180" aria-hidden="true" />
           </summary>
@@ -105,6 +113,7 @@ function LargestEntriesSection({
       state={state}
       retry={retry}
       retryLabel={`Retry largest ${noun}`}
+      headerClassName="xl:min-h-17"
       controls={
         <InsightsPagination
           label={`${title} pagination`}
