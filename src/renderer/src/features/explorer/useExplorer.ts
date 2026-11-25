@@ -82,6 +82,7 @@ export function useExplorer(
   snapshots?: ViewSnapshotOptions
 ): ExplorerState & {
   currentDirectoryId: string | null
+  historical: boolean
   navigateToDirectory: (id: string) => Promise<void>
   goBack: () => Promise<void>
   goForward: () => Promise<void>
@@ -92,6 +93,7 @@ export function useExplorer(
   const selections = useSnapshotSelections(snapshots?.controller)
   const selection = snapshots?.selection ?? followLatest
   const [state, setState] = useState<ExplorerState>(initial)
+  const [historical, setHistorical] = useState(false)
   const current = useRef(state)
   const sequence = useRef(0)
   const mounted = useRef(false)
@@ -127,6 +129,7 @@ export function useExplorer(
         publish({ ...initial, loading: false, error: result.error, targetNotice })
         return
       }
+      setHistorical(selections.isHistoricalExplorerSelection())
       const previous = current.current
       const availability = result.value
       const same =
@@ -235,8 +238,12 @@ export function useExplorer(
     let latestPublished: string | null | undefined
     let waitingTarget = target
     const unsubscribe = selections.subscribeScanState((update) => {
-      if (selection.mode !== 'follow-latest' || update.revision <= revision) return
+      if (update.revision <= revision) return
       revision = update.revision
+      if (selection.mode === 'explicit') {
+        setHistorical(selections.isHistoricalExplorerSelection())
+        return
+      }
       const session = update.state?.session
       // Recovery metadata arrives with an idle scanner. The initial SQLite read already waits for it.
       if (!session && update.historyRevision === undefined) return
@@ -303,6 +310,7 @@ export function useExplorer(
   }
   return {
     ...state,
+    historical,
     currentDirectoryId: state.breadcrumbs.at(-1)?.id ?? null,
     navigateToDirectory: (id: string) => navigate(id),
     goBack: () => {

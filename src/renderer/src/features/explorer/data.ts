@@ -33,7 +33,7 @@ export type ExplorerSnapshotState =
   | { readonly status: 'missing'; readonly snapshot: null }
 
 /**
- * Resolve the published SQLite snapshot without loading its children.
+ * Resolve the adopted SQLite snapshot without loading its children.
  * Its entries.scanId and root.id identify the explorable root. A completed
  * scan summary alone does not identify a browsable snapshot.
  *

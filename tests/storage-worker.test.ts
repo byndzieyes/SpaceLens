@@ -418,9 +418,13 @@ test('coordinates a real Worker after startup and prioritizes publication over E
     ready.resolve(client)
     await received.promise
 
-    const oldEntry = expect(
-      storage.read(signal, (db) => db.getScanEntry({ scanId: old.id, entryId: file.id }))
-    ).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
+    const publishRequest = vi.spyOn(client, 'publishScan')
+    const entryRequest = vi.spyOn(client, 'getScanEntry')
+    const oldEntry = storage.read(
+      signal,
+      (db) => db.getScanEntry({ scanId: old.id, entryId: file.id }),
+      old.id
+    )
     const nextSnapshot = storage.read(signal, (db) => db.getScanSnapshot())
     const queuedHistory = storage.read(signal, (db) => db.listScanHistory({}))
     const expiredSummary = expect(
@@ -451,7 +455,10 @@ test('coordinates a real Worker after startup and prioritizes publication over E
     release.resolve()
     expect((await oldRead).scanId).toBe(old.id)
     await publish
-    await oldEntry
+    expect(await oldEntry).toEqual({ ...file, scanId: old.id })
+    expect(publishRequest.mock.invocationCallOrder[0]).toBeLessThan(
+      entryRequest.mock.invocationCallOrder[0]
+    )
     await expiredSummary
     await expiredExtensions
     await oldRanking
@@ -1041,8 +1048,15 @@ test('queries published Explorer snapshots through the Worker and returns struct
     snapshot: { entries: { scanId: previous.id } }
   })
   await client.publishScan(next, root.id)
-  await expect(client.getScanEntry(fileRequest)).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
-  await expect(client.listScanDirectory(page)).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
+  await expect(client.openExplorerSnapshot(previous.id)).resolves.toMatchObject({
+    entries: { scanId: previous.id, rootEntryId: root.id },
+    entryCount: 2
+  })
+  await expect(client.getScanEntry(fileRequest)).resolves.toEqual({ ...file, scanId: previous.id })
+  await expect(client.listScanDirectory(page)).resolves.toMatchObject({
+    scanId: previous.id,
+    entries: [{ ...file, scanId: previous.id }]
+  })
   await client.dispose()
   await expect(client.getScanSnapshot()).rejects.toThrow('closing or closed')
   await expect(client.getScanEntry(rootRequest)).rejects.toThrow('closing or closed')
@@ -1057,6 +1071,10 @@ test('queries published Explorer snapshots through the Worker and returns struct
   await expect(reopened.getScanEntry({ ...fileRequest, scanId: next.id })).resolves.toEqual({
     ...file,
     scanId: next.id
+  })
+  await expect(reopened.openExplorerSnapshot(previous.id)).resolves.toMatchObject({
+    entries: { scanId: previous.id },
+    entryCount: 2
   })
 })
 
@@ -1393,8 +1411,9 @@ test('reads completed history through the worker and coordinator across publicat
   await expect(client.getScanHistoryMetadata({ scanId: 'invalid/path' })).rejects.toMatchObject({
     code: 'INVALID_REQUEST'
   })
-  await expect(client.getScanEntry({ scanId: first.id, entryId: root.id })).rejects.toMatchObject({
-    code: 'SNAPSHOT_EXPIRED'
+  await expect(client.getScanEntry({ scanId: first.id, entryId: root.id })).resolves.toMatchObject({
+    scanId: first.id,
+    id: root.id
   })
   await client.dispose()
 
@@ -1483,11 +1502,16 @@ test('reads completed history through the worker and coordinator across publicat
         view: 'explorer',
         selection: { mode: 'explicit', scanId: first.id }
       } as const
+      const activeBuild = await preparePublication(restored, lifecycleScan('active-build'))
       const prepared = await prepareSelection(firstSelection)
       expect(prepared).toMatchObject({
         ok: true,
         value: { resolution: { metadata: { id: first.id } } }
       })
+      expect(prepared).not.toHaveProperty('value.resolution.explorerSnapshot')
+      await expect(
+        handlers.get(IPC_CHANNELS.getScanEntry)!(event, { scanId: first.id, entryId: root.id })
+      ).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_UNAVAILABLE' } })
       await expect(
         handlers.get(IPC_CHANNELS.deleteSnapshot)!(event, { scanId: first.id })
       ).resolves.toMatchObject({
@@ -1500,13 +1524,37 @@ test('reads completed history through the worker and coordinator across publicat
           view: 'explorer',
           ticket: prepared.value.ticket
         })
-      ).resolves.toEqual({ ok: true, value: null })
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { entries: { scanId: first.id, rootEntryId: root.id } }
+      })
       await expect(
         handlers.get(IPC_CHANNELS.getScanEntry)!(event, { scanId: first.id, entryId: root.id })
       ).resolves.toMatchObject({
-        ok: false,
-        error: { code: 'SNAPSHOT_EXPIRED' }
+        ok: true,
+        value: { scanId: first.id, id: root.id }
       })
+      await expect(
+        handlers.get(IPC_CHANNELS.listScanDirectory)!(event, {
+          scanId: first.id,
+          entryId: root.id,
+          offset: 0,
+          limit: 100
+        })
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { scanId: first.id, entries: [{ id: file.id }], totalCount: 1 }
+      })
+      await expect(
+        handlers.get(IPC_CHANNELS.getScanDirectoryTreemap)!(event, {
+          scanId: first.id,
+          entryId: root.id
+        })
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { scanId: first.id, entries: [{ id: file.id }], totalCount: 1 }
+      })
+      await restored.discardBuildingScan(activeBuild.id)
       await expect(
         handlers.get(IPC_CHANNELS.getInsightsSummary)!(event, { scanId: first.id })
       ).resolves.toMatchObject({

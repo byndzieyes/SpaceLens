@@ -3,10 +3,12 @@ import type { ScanHistoryItem } from '../../shared/history'
 import type {
   PreparedSnapshotSelection,
   SnapshotSelectionAdoption,
+  SnapshotSelectionAdoptionResult,
   SnapshotSelectionRequest,
   SnapshotSelectionResolution,
   SnapshotView
 } from '../../shared/snapshotSelection'
+import type { ScanSnapshot } from '../../shared/snapshot'
 import { StorageUnavailableError, type ScanStorageCoordinator } from './coordinator'
 import { isSnapshotId, record } from './payloads'
 import { SnapshotAccessError } from './snapshotAccess'
@@ -17,12 +19,13 @@ interface PendingSelection {
   readonly ticket: string
   readonly abort: AbortController
   scanId?: string
+  explorerSnapshot?: ScanSnapshot
   expiry?: ReturnType<typeof setTimeout>
 }
 
 interface ViewSelection {
   readonly owner: SnapshotProtectionOwner<ScanHistoryItem>
-  selectedId?: string
+  adopted?: { readonly scanId: string }
   pending?: PendingSelection
 }
 
@@ -115,10 +118,23 @@ export class ViewSnapshotSelections {
 
     try {
       let resolution: SnapshotSelectionResolution
+      const signal = AbortSignal.any([this.document, pending.abort.signal])
       if (selection.mode === 'explicit') {
-        resolution = { mode: 'explicit', metadata: await acquire(selection.scanId) }
+        const { scanId } = selection
+        const metadata = await acquire(scanId)
+        requireCurrent()
+        if (view === 'explorer') {
+          const explorerSnapshot = await this.storage.read(
+            signal,
+            (client) => client.openExplorerSnapshot(scanId),
+            scanId
+          )
+          if (explorerSnapshot.entries.scanId !== scanId)
+            throw new Error('Storage returned a different Explorer snapshot.')
+          pending.explorerSnapshot = explorerSnapshot
+        }
+        resolution = { mode: 'explicit', metadata }
       } else {
-        const signal = AbortSignal.any([this.document, pending.abort.signal])
         const discover = async (): Promise<SnapshotSelectionResolution> => {
           const availability = await this.storage.read(signal, (client) => client.getScanSnapshot())
           requireCurrent()
@@ -126,7 +142,7 @@ export class ViewSnapshotSelections {
             const scanId = availability.snapshot.entries.scanId
             const metadata = await acquire(scanId)
             // A queued publication can run between discovery and validation.
-            if (scanId !== slot.selectedId && !metadata.isLatest)
+            if (scanId !== slot.adopted?.scanId && !metadata.isLatest)
               throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'The latest saved scan changed.')
           }
           return { mode: 'follow-latest', availability }
@@ -141,7 +157,7 @@ export class ViewSnapshotSelections {
             throw error
           // The next read observes a queued deletion or publication before resolving Latest again.
           requireCurrent()
-          if (pending.scanId !== undefined && pending.scanId !== slot.selectedId)
+          if (pending.scanId !== undefined && pending.scanId !== slot.adopted?.scanId)
             slot.owner.release(pending.scanId)
           pending.scanId = undefined
           resolution = await discover()
@@ -159,20 +175,35 @@ export class ViewSnapshotSelections {
     }
   }
 
-  adopt({ view, ticket }: SnapshotSelectionAdoption): void {
+  adopt({ view, ticket }: SnapshotSelectionAdoption): SnapshotSelectionAdoptionResult {
     const slot = this.views.get(view)
     const pending = slot?.pending
     if (!slot || !pending?.expiry || pending.ticket !== ticket) throw inactive()
-    const previous = slot.selectedId
-    slot.selectedId = pending.scanId
+    const previous = slot.adopted?.scanId
+    if (pending.scanId !== previous)
+      slot.adopted = pending.scanId === undefined ? undefined : { scanId: pending.scanId }
     this.cancelPending(slot)
-    if (previous !== undefined && previous !== slot.selectedId) slot.owner.release(previous)
-    if (slot.selectedId === undefined) this.release(view)
+    if (previous !== undefined && previous !== slot.adopted?.scanId) slot.owner.release(previous)
+    if (!slot.adopted) this.release(view)
+    return pending.explorerSnapshot ?? null
   }
 
   discardPrepared({ view, ticket }: SnapshotSelectionAdoption): void {
     const slot = this.views.get(view)
     if (slot?.pending?.ticket === ticket) this.discard(view, slot, slot.pending)
+  }
+
+  /** Use the adoption identity to reject replies from a previous selection or visit. */
+  authorizeExplorerRead(scanId: string): () => boolean {
+    const adopted = this.views.get('explorer')?.adopted
+    if (!adopted)
+      throw new SnapshotAccessError(
+        'SNAPSHOT_UNAVAILABLE',
+        'Open a saved snapshot in Explorer first.'
+      )
+    if (adopted.scanId !== scanId)
+      throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'Explorer is using a different snapshot.')
+    return () => this.views.get('explorer')?.adopted === adopted
   }
 
   release(view: SnapshotView): void {
@@ -186,7 +217,7 @@ export class ViewSnapshotSelections {
   private discard(view: SnapshotView, slot: ViewSelection, pending: PendingSelection): void {
     if (slot.pending !== pending) return
     this.cancelPending(slot)
-    if (slot.selectedId === undefined) this.release(view)
+    if (!slot.adopted) this.release(view)
   }
 
   private cancelPending(slot: ViewSelection): void {
@@ -195,7 +226,7 @@ export class ViewSnapshotSelections {
     slot.pending = undefined
     clearTimeout(pending.expiry)
     pending.abort.abort()
-    if (pending.scanId !== undefined && pending.scanId !== slot.selectedId)
+    if (pending.scanId !== undefined && pending.scanId !== slot.adopted?.scanId)
       slot.owner.release(pending.scanId)
   }
 }

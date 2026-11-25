@@ -325,8 +325,8 @@ export function registerScannerIpc(
           return failure('UNAVAILABLE', 'The snapshot selection context is no longer available.')
         }
         if (channel === IPC_CHANNELS.adoptSnapshotSelection)
-          viewSelections.adopt(readSelectionAdoption(args[0]))
-        else viewSelections.release(readSelectionView(args[0]))
+          return { ok: true, value: viewSelections.adopt(readSelectionAdoption(args[0])) }
+        viewSelections.release(readSelectionView(args[0]))
         return { ok: true, value: null }
       } catch (error) {
         return current()
@@ -409,7 +409,14 @@ export function registerScannerIpc(
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
       if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
       if (!authorized(event)) return failure('UNAUTHORIZED', 'Scanner access is not authorized.')
+      const explorerRead =
+        channel === IPC_CHANNELS.getScanEntry ||
+        channel === IPC_CHANNELS.listScanDirectory ||
+        channel === IPC_CHANNELS.getScanDirectoryTreemap
+      if (explorerRead && documentNavigating)
+        return failure('UNAUTHORIZED', 'Explorer access is not authorized.')
       const { signal } = readContext
+      let stillSelected: (() => boolean) | undefined
       const history =
         channel === IPC_CHANNELS.listScanHistory ||
         channel === IPC_CHANNELS.getScanHistoryMetadata ||
@@ -432,7 +439,9 @@ export function registerScannerIpc(
                   ? 'The Insights context is no longer available.'
                   : 'The Explorer context is no longer available.'
             )
-          : result
+          : stillSelected && !stillSelected()
+            ? failure('SNAPSHOT_EXPIRED', 'The Explorer selection changed during this request.')
+            : result
       try {
         if (channel === IPC_CHANNELS.getScanSnapshot) {
           if (args.length !== 0)
@@ -518,6 +527,7 @@ export function registerScannerIpc(
         if (channel === IPC_CHANNELS.getScanDirectoryTreemap) {
           const request = args[0]
           validateTreemapRequest(request)
+          stillSelected = viewSelections.authorizeExplorerRead(request.scanId)
           const value = await storage.read(
             signal,
             (client) => client.getScanDirectoryTreemap(request),
@@ -527,6 +537,7 @@ export function registerScannerIpc(
         }
         const request = args[0] as ScanEntryRequest | ScanDirectoryRequest
         validateSnapshotRequest(request, channel === IPC_CHANNELS.listScanDirectory)
+        stillSelected = viewSelections.authorizeExplorerRead(request.scanId)
         if (channel === IPC_CHANNELS.getScanEntry) {
           const value = await storage.read(
             signal,

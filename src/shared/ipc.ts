@@ -23,6 +23,7 @@ import type { FileEntry, RecentScanSummary, ScanSessionState } from './scan'
 import type {
   PreparedSnapshotSelection,
   SnapshotSelectionAdoption,
+  SnapshotSelectionAdoptionResult,
   SnapshotSelectionRequest,
   SnapshotViewRequest
 } from './snapshotSelection'
@@ -51,7 +52,9 @@ export interface SpaceLensAPI {
   prepareSnapshotSelection: (
     request: SnapshotSelectionRequest
   ) => Promise<ScannerIpcResult<PreparedSnapshotSelection>>
-  adoptSnapshotSelection: (request: SnapshotSelectionAdoption) => Promise<ScannerIpcResult<null>>
+  adoptSnapshotSelection: (
+    request: SnapshotSelectionAdoption
+  ) => Promise<ScannerIpcResult<SnapshotSelectionAdoptionResult>>
   releaseSnapshotSelection: (request: SnapshotViewRequest) => Promise<ScannerIpcResult<null>>
   listScanHistory: (
     query: ScanHistoryQuery

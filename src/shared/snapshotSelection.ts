@@ -1,5 +1,5 @@
 import type { ScanHistoryItem } from './history'
-import type { ScanSnapshotAvailability } from './snapshot'
+import type { ScanSnapshot, ScanSnapshotAvailability } from './snapshot'
 
 export type SnapshotView = 'explorer' | 'insights'
 
@@ -25,6 +25,9 @@ export interface PreparedSnapshotSelection {
 export interface SnapshotSelectionAdoption extends SnapshotViewRequest {
   readonly ticket: string
 }
+
+/** Only explicit Explorer adoption returns the validated snapshot. */
+export type SnapshotSelectionAdoptionResult = ScanSnapshot | null
 
 export interface SnapshotViewRequest {
   readonly view: SnapshotView

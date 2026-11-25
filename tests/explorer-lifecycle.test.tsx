@@ -6,6 +6,10 @@ import { SnapshotAccessError } from '../src/main/storage/snapshotAccess'
 import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
 import type { StorageBatchOperation } from '../src/main/storage/payloads'
 import App from '../src/renderer/src/App'
+import { ExplorerPage } from '../src/renderer/src/pages/ExplorerPage'
+import { useSnapshotSelections } from '../src/renderer/src/features/snapshots/selection'
+import { useSnapshotNavigation } from '../src/renderer/src/features/snapshots/useSnapshotNavigation'
+import type { SnapshotNavigationTarget } from '../src/renderer/src/navigation'
 import { mockSnapshotSelection } from './snapshot-selection-fixture'
 import type { ScannerIpcResult, ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
 import type { FileEntry, RecentScanSummary, ScanSessionState, ScanStatus } from '../src/shared/scan'
@@ -310,6 +314,256 @@ function open(page: 'Overview' | 'Explorer' | 'Insights'): void {
 async function chart(directory: string): Promise<HTMLElement> {
   return panel('Treemap').findByRole('figure', { name: `Storage distribution in ${directory}` })
 }
+
+function historicalApp(...saved: SavedFixture[]): ReturnType<typeof mockApp> {
+  const main = mockApp()
+  const { api } = main
+  const retained = new Map(saved.map((storage) => [storage.snapshot.entries.scanId, storage]))
+  const prepareLatest = api.prepareSnapshotSelection.getMockImplementation()!
+  api.prepareSnapshotSelection.mockImplementation(async (request) => {
+    if (request.selection.mode === 'follow-latest') return prepareLatest(request)
+    const { scanId } = request.selection
+    const fixture = retained.get(scanId)
+    if (!fixture)
+      return {
+        ok: false,
+        error: { code: 'SNAPSHOT_EXPIRED', message: 'This saved scan no longer exists.' }
+      }
+    const latest = await api.getScanState()
+    return {
+      ok: true,
+      value: {
+        ticket: scanId,
+        resolution: {
+          mode: 'explicit',
+          metadata: {
+            ...fixture.database.getScanHistoryMetadata({ scanId }),
+            isLatest: latest.ok && latest.value.latestCompleted?.id === scanId
+          }
+        }
+      }
+    }
+  })
+  api.adoptSnapshotSelection.mockImplementation(async ({ ticket }) => {
+    const fixture = retained.get(ticket)
+    return { ok: true, value: fixture?.database.openExplorerSnapshot({ scanId: ticket }) ?? null }
+  })
+  function browse<T>(scanId: string, query: (database: ScanDatabase) => T): ScannerIpcResult<T> {
+    const fixture = retained.get(scanId)
+    if (!fixture)
+      return { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Missing fixture.' } }
+    return { ok: true, value: query(fixture.database) }
+  }
+  api.getScanEntry.mockImplementation(async (request) =>
+    browse(request.scanId, (db) => db.getScanEntry(request))
+  )
+  api.listScanDirectory.mockImplementation(async (request) =>
+    browse(request.scanId, (db) => db.listScanDirectory(request))
+  )
+  api.getScanDirectoryTreemap.mockImplementation(async (request) =>
+    browse(request.scanId, (db) => db.getScanDirectoryTreemap(request))
+  )
+  return main
+}
+
+function HistoricalExplorer({
+  targets
+}: {
+  targets: readonly { label: string; destination: SnapshotNavigationTarget }[]
+}): React.JSX.Element {
+  const selections = useSnapshotSelections()
+  const { destination, navigate, navigateToSnapshot, consumeTarget, viewOptions } =
+    useSnapshotNavigation(selections)
+  return (
+    <>
+      {targets.map(({ label, destination }) => (
+        <button key={label} onClick={() => navigateToSnapshot(destination)}>
+          {label}
+        </button>
+      ))}
+      <main tabIndex={-1}>
+        {destination.page === 'explorer' && (
+          <ExplorerPage
+            key={destination.activation}
+            target={destination.target}
+            snapshots={viewOptions}
+            onTargetConsumed={consumeTarget}
+            onFollowLatest={() => navigate('explorer')}
+          />
+        )}
+      </main>
+    </>
+  )
+}
+
+function savedTarget(
+  label: string,
+  scanId: string,
+  entry?: { entryId: string; parentId: string; type: 'file' | 'directory' }
+): {
+  label: string
+  destination: SnapshotNavigationTarget
+} {
+  return {
+    label,
+    destination: {
+      view: 'explorer',
+      selection: { mode: 'explicit', scanId },
+      entry: entry && { ...entry, scanId }
+    }
+  }
+}
+
+test('an explicit selection of Latest keeps historical navigation and entry selection through publication', async () => {
+  const alpha = publishedFixture('scan-a', 'Alpha', 1)
+  const beta = publishedFixture('scan-b', 'Beta')
+  const { api, restore, publish, changeHistory } = historicalApp(alpha, beta)
+  restore(alpha)
+  render(<HistoricalExplorer targets={[savedTarget('Open Alpha', 'scan-a')]} />)
+  fireEvent.click(button('Open Alpha'))
+  await chart('Alpha')
+  expect(screen.getByText('Explicit snapshot')).toBeVisible()
+  expect(screen.queryByText('Historical snapshot')).not.toBeInTheDocument()
+  const context = screen.getByLabelText('Snapshot details')
+  expect(context).toHaveTextContent('/scans/Alpha')
+  expect(context.querySelector('time')).toHaveAttribute('datetime', timestamp)
+  expect(screen.getByText('Incomplete snapshot: known sizes may be partial.')).toBeVisible()
+  fireEvent.click(button('Expand Alpha'))
+  const tree = panel('Directory Tree')
+  const nested = await tree.findByRole('button', { name: 'Nested' })
+  fireEvent.doubleClick(panel('Treemap').getByRole('button', { name: 'Nested, directory, 2 KB' }))
+  await chart('Nested')
+  expect(nested).toHaveAttribute('aria-current', 'location')
+  fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'inside.bin' }))
+  await panel('Details').findByText('/scans/Alpha/Nested/inside.bin')
+  await act(async () => {
+    publish(beta)
+    changeHistory()
+  })
+  expect(screen.getByText('Historical snapshot')).toBeVisible()
+  expect(panel('Details').getByText('/scans/Alpha/Nested/inside.bin')).toBeVisible()
+  expect(nested).toHaveAttribute('aria-current', 'location')
+  expect(api.prepareSnapshotSelection).toHaveBeenCalledOnce()
+
+  fireEvent.click(button('Back'))
+  await chart('Alpha')
+  fireEvent.click(button('Forward'))
+  await chart('Nested')
+  fireEvent.click(button('Up'))
+  await chart('Alpha')
+  fireEvent.click(nested)
+  await chart('Nested')
+  const breadcrumb = within(screen.getByRole('navigation', { name: 'Breadcrumb' }))
+  fireEvent.click(breadcrumb.getByRole('button', { name: 'Alpha' }))
+  await chart('Alpha')
+
+  fireEvent.click(button('Follow Latest'))
+  await chart('Beta')
+  expect(screen.getByText('Following Latest')).toBeVisible()
+  expect(screen.queryByText('Historical snapshot')).not.toBeInTheDocument()
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+  expect(button('Back')).toHaveAttribute('aria-disabled', 'true')
+  expect(screen.getByRole('main')).toHaveFocus()
+})
+
+test('opens an exact historical entry and rejects a target from a different scan with the same IDs', async () => {
+  const alpha = publishedFixture('scan-a', 'Alpha', 0, 4, true)
+  const beta = publishedFixture('scan-b', 'Beta')
+  const { api, restore } = historicalApp(alpha, beta)
+  restore(beta)
+  const exact = savedTarget('Open historical file', 'scan-a', {
+    entryId: 'nested',
+    parentId: 'leaf',
+    type: 'file'
+  })
+  const stale = {
+    label: 'Open mismatched file',
+    destination: {
+      ...exact.destination,
+      view: 'explorer',
+      entry: {
+        scanId: 'scan-b',
+        entryId: 'nested',
+        parentId: 'leaf',
+        type: 'file'
+      }
+    } as const
+  }
+  render(<HistoricalExplorer targets={[exact, stale]} />)
+  fireEvent.click(button(exact.label))
+  await chart('Leaf')
+  expect(screen.getByText('Historical snapshot')).toBeVisible()
+  expect(panel('Details').getByText(rankedFilePath)).toBeVisible()
+  expect(api.getScanEntry.mock.calls.every(([request]) => request.scanId === 'scan-a')).toBe(true)
+  api.getScanEntry.mockClear()
+  fireEvent.click(button(stale.label))
+  await chart('Alpha')
+  expect(screen.getByRole('alert')).toHaveTextContent('The scan has changed')
+  expect(api.getScanEntry).not.toHaveBeenCalled()
+})
+
+test('drops late entry and selection results across rapid historical transitions with identical IDs', async () => {
+  const alpha = publishedFixture('scan-a', 'Alpha')
+  const beta = publishedFixture('scan-b', 'Beta')
+  const gamma = publishedFixture('scan-c', 'Gamma')
+  const { api, restore } = historicalApp(alpha, beta, gamma)
+  restore(gamma)
+  render(
+    <HistoricalExplorer
+      targets={[
+        savedTarget('Open Alpha', 'scan-a'),
+        savedTarget('Open Beta', 'scan-b'),
+        savedTarget('Open Gamma', 'scan-c')
+      ]}
+    />
+  )
+  fireEvent.click(button('Open Alpha'))
+  await chart('Alpha')
+  const details = Promise.withResolvers<ScannerIpcResult<FileEntry>>()
+  api.getScanEntry.mockReturnValueOnce(details.promise)
+  fireEvent.click(await panel('Directory Contents').findByRole('button', { name: 'Alpha.txt' }))
+  await waitFor(() =>
+    expect(api.getScanEntry).toHaveBeenCalledWith({ scanId: 'scan-a', entryId: 'report' })
+  )
+  const prepare = api.prepareSnapshotSelection.getMockImplementation()!
+  const delayed = Promise.withResolvers<void>()
+  api.prepareSnapshotSelection.mockImplementationOnce(async (request) => {
+    const result = await prepare(request)
+    await delayed.promise
+    return result
+  })
+  fireEvent.click(button('Open Beta'))
+  expect(screen.getByRole('status')).toHaveTextContent('Loading snapshot')
+  fireEvent.click(button('Open Gamma'))
+  await chart('Gamma')
+  await act(async () => {
+    delayed.resolve()
+    details.resolve({
+      ok: true,
+      value: alpha.database.getScanEntry({ scanId: 'scan-a', entryId: 'report' })
+    })
+  })
+  expect(api.adoptSnapshotSelection.mock.calls.map(([request]) => request.ticket)).toEqual([
+    'scan-a',
+    'scan-c'
+  ])
+  expect(panel('Details').getByText('No item selected')).toBeVisible()
+  expect(screen.queryByText('Alpha.txt')).not.toBeInTheDocument()
+  expect(screen.queryByText('Beta.txt')).not.toBeInTheDocument()
+})
+
+test('keeps a missing explicit selection visible and offers a deliberate return to Latest', async () => {
+  const alpha = publishedFixture('scan-a', 'Alpha')
+  const { api, restore } = historicalApp(alpha)
+  restore(alpha)
+  render(<HistoricalExplorer targets={[savedTarget('Open missing', 'missing')]} />)
+  fireEvent.click(button('Open missing'))
+  expect(await screen.findByRole('alert')).toHaveTextContent('This saved scan no longer exists.')
+  expect(api.getScanSnapshot).not.toHaveBeenCalled()
+  expect(api.listScanDirectory).not.toHaveBeenCalled()
+  fireEvent.click(button('Follow Latest'))
+  await chart('Alpha')
+})
 async function start(): Promise<void> {
   await waitFor(() => expect(button('Scan Folder')).toBeEnabled())
   fireEvent.click(button('Scan Folder'))

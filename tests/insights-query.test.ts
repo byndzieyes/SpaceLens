@@ -28,6 +28,7 @@ const queries = {
   listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
   listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
+  openExplorerSnapshot: vi.fn<StorageWorkerClient['openExplorerSnapshot']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
   getScanDirectoryTreemap: vi.fn<StorageWorkerClient['getScanDirectoryTreemap']>()

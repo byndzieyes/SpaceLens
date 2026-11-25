@@ -5,7 +5,7 @@ import type {
   ScanStateSnapshot,
   SpaceLensAPI
 } from '../../../../shared/ipc'
-import type { ScanSnapshotAvailability } from '../../../../shared/snapshot'
+import type { ScanSnapshot, ScanSnapshotAvailability } from '../../../../shared/snapshot'
 import type {
   SnapshotSelection,
   SnapshotSelectionResolution,
@@ -18,6 +18,7 @@ type SettledSelection =
       readonly status: 'resolved' | 'empty'
       readonly selection: SnapshotSelection
       readonly resolution: SnapshotSelectionResolution
+      readonly explorerSnapshot: ScanSnapshot | null
       readonly latestVersion: number
     }
   | {
@@ -113,6 +114,7 @@ export class SnapshotSelections {
             : 'resolved',
         selection,
         resolution,
+        explorerSnapshot: adopted.value,
         latestVersion
       } as const
       this.views.set(view, outcome)
@@ -139,7 +141,17 @@ export class SnapshotSelections {
     if (!outcome || !current())
       return { ok: false, error: selectionError('UNAVAILABLE', 'The snapshot selection changed.') }
     if ('error' in outcome) return { ok: false, error: outcome.error }
-    if (outcome.resolution.mode === 'explicit')
+    if (outcome.resolution.mode === 'explicit') {
+      const { explorerSnapshot } = outcome
+      const { metadata } = outcome.resolution
+      if (
+        view === 'explorer' &&
+        selection.mode === 'explicit' &&
+        metadata.id === selection.scanId &&
+        explorerSnapshot?.entries.scanId === selection.scanId
+      ) {
+        return { ok: true, value: { snapshot: explorerSnapshot, unavailable: null } }
+      }
       return {
         ok: false,
         error: selectionError(
@@ -147,7 +159,17 @@ export class SnapshotSelections {
           'Historical snapshots cannot be opened in this view yet.'
         )
       }
+    }
     return { ok: true, value: outcome.resolution.availability }
+  }
+
+  isHistoricalExplorerSelection(): boolean {
+    const state = this.get('explorer')
+    if (state?.status !== 'resolved' || state.resolution.mode !== 'explicit') return false
+    const { metadata } = state.resolution
+    return this.latestVersion === state.latestVersion
+      ? !metadata.isLatest
+      : this.latestCompleted?.id !== metadata.id
   }
 
   release(view: SnapshotView): void {

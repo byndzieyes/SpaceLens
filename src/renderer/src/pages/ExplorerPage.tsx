@@ -6,8 +6,10 @@ import { DirectoryTree } from '../features/explorer/DirectoryTree'
 import { isStaleSnapshotError } from '../features/explorer/data'
 import { useLayoutEffect, useRef, type ReactNode } from 'react'
 import { ArrowLeft, ArrowRight, ArrowUp, FolderTree } from 'lucide-react'
+import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
+import { formatScanDate } from '../features/overview/recentScanUtils'
 import type { ExplorerTarget } from '../navigation'
 import type { ViewSnapshotOptions } from '../features/snapshots/selection'
 
@@ -35,22 +37,25 @@ function ExplorerPanel({
 export function ExplorerPage({
   target,
   onTargetConsumed,
-  snapshots
+  snapshots,
+  onFollowLatest
 }: {
   target?: ExplorerTarget
   onTargetConsumed?: (target: ExplorerTarget) => void
   snapshots?: ViewSnapshotOptions
+  onFollowLatest?: () => void
 } = {}): React.JSX.Element {
   const explorer = useExplorer(target, onTargetConsumed, snapshots)
   const { availability, error, loading } = explorer
   const snapshot = availability?.status === 'available' ? availability.snapshot : null
   const scanId = snapshot?.entries.scanId ?? null
+  const explicit = snapshots?.selection.mode === 'explicit'
   const breadcrumb = useRef<HTMLElement>(null)
   const refreshControl = useRef<HTMLButtonElement>(null)
   const title = useRef<HTMLHeadingElement>(null)
   useLayoutEffect(() => {
-    if (target) title.current?.focus({ preventScroll: true })
-  }, [target])
+    if (target || explicit) title.current?.focus({ preventScroll: true })
+  }, [explicit, target])
   const refresh = (): void => {
     if (loading) return
     refreshControl.current?.focus()
@@ -77,9 +82,35 @@ export function ExplorerPage({
         <h2 ref={title} tabIndex={-1} className="text-2xl font-semibold tracking-tight sm:text-3xl">
           Storage Explorer
         </h2>
-        <p className="text-sm text-text-secondary">
-          Explore directories, storage usage and item details.
-        </p>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge>{explicit ? 'Explicit snapshot' : 'Following Latest'}</Badge>
+          {snapshot && explorer.historical && <Badge>Historical snapshot</Badge>}
+          {explicit && onFollowLatest && (
+            <Button
+              variant="secondary"
+              onClick={(event) => {
+                event.currentTarget.closest('main')?.focus({ preventScroll: true })
+                onFollowLatest()
+              }}
+            >
+              Follow Latest
+            </Button>
+          )}
+        </div>
+        {snapshot && (
+          <dl aria-label="Snapshot details" className="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+            <div className="min-w-0">
+              <dt className="text-xs text-text-secondary">Snapshot root</dt>
+              <dd className="[overflow-wrap:anywhere]">{snapshot.root.path}</dd>
+            </div>
+            <div>
+              <dt className="text-xs text-text-secondary">Completed</dt>
+              <dd>
+                <time dateTime={snapshot.completedAt}>{formatScanDate(snapshot.completedAt)}</time>
+              </dd>
+            </div>
+          </dl>
+        )}
       </header>
 
       <div
@@ -187,7 +218,9 @@ export function ExplorerPage({
         <p role="alert" className="text-error [overflow-wrap:anywhere]">
           {error.code}: {error.message}
           {(!availability || isStaleSnapshotError(error.code)) &&
-            ' Use Refresh snapshot to check which results are available.'}
+            (explicit
+              ? ' Use Refresh snapshot to retry this selection.'
+              : ' Use Refresh snapshot to check which results are available.')}
         </p>
       )}
       {explorer.targetNotice && (

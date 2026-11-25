@@ -25,6 +25,7 @@ function App(): React.JSX.Element {
         snapshots={viewOptions}
         target={target}
         onTargetConsumed={consumeTarget}
+        onFollowLatest={() => navigate('explorer')}
       />
     ),
     insights: (

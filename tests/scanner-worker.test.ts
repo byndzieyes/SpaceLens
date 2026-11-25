@@ -296,11 +296,9 @@ test('runs live scans through SQLite and keeps the prior publication through can
     expect(await storage.getPublishedScan()).toEqual(second)
     expect(await storage.getScan(first.id)).toEqual(first)
     expect(await storage.getEntry(first.id, empty.id)).toEqual(empty)
-    await expect(
-      storage.getScanEntry({ scanId: first.id, entryId: empty.id })
-    ).rejects.toMatchObject({
-      code: 'SNAPSHOT_EXPIRED'
-    })
+    await expect(storage.getScanEntry({ scanId: first.id, entryId: empty.id })).resolves.toEqual(
+      empty
+    )
     const saved = (await requests.read(signal, (db) => db.getScanSnapshot())).snapshot!
     expect(saved.entries.scanId).toBe(second.id)
     expect(saved.entryCount).toBe(132)
@@ -323,8 +321,12 @@ test('runs live scans through SQLite and keeps the prior publication through can
       other: { count: 30, knownBytes: 29, zeroCount: 1, unknownCount: 0 }
     })
     await expect(
-      requests.read(signal, (db) => db.getScanEntry({ scanId: first.id, entryId: empty.id }))
-    ).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
+      requests.read(
+        signal,
+        (db) => db.getScanEntry({ scanId: first.id, entryId: empty.id }),
+        first.id
+      )
+    ).resolves.toEqual(empty)
   } finally {
     release.resolve()
     requests.stopReads()
@@ -390,9 +392,7 @@ test.each(['development', 'production'])(
       expect((await storage.getScanSnapshot()).snapshot).toEqual(snapshot)
       await instance.start(nested)
       expect((await storage.getScanSnapshot()).snapshot!.root.aggregatedSizeBytes).toBe(7)
-      await expect(storage.listScanDirectory(request)).rejects.toMatchObject({
-        code: 'SNAPSHOT_EXPIRED'
-      })
+      await expect(storage.listScanDirectory(request)).resolves.toEqual(children)
     } finally {
       await instance.dispose()
       await storage.dispose()

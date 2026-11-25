@@ -27,6 +27,7 @@ import {
   type ScanDirectoryTreemap,
   type ScanDirectoryTreemapRequest,
   type ScanEntryRequest,
+  type ScanSnapshot,
   type ScanSnapshotAvailability
 } from '../../shared/snapshot'
 import {
@@ -91,6 +92,7 @@ interface StorageCommands {
     result: InsightsRankingPage
   }
   getScanSnapshot: { payload: null; result: ScanSnapshotAvailability }
+  openExplorerSnapshot: { payload: { scanId: string }; result: ScanSnapshot }
   getScanEntry: { payload: ScanEntryRequest; result: FileEntry }
   listScanDirectory: { payload: ScanDirectoryRequest; result: ScanDirectoryPage }
   getScanDirectoryTreemap: { payload: ScanDirectoryTreemapRequest; result: ScanDirectoryTreemap }
@@ -166,6 +168,7 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       break
     case 'requirePublishedScan':
     case 'getScanHistoryMetadata':
+    case 'openExplorerSnapshot':
     case 'deleteSnapshot':
     case 'getInsightsCategories':
     case 'getInsightsSizeDistribution':
@@ -322,8 +325,10 @@ function isHistoryPage(value: unknown): value is ScanHistoryPage {
 
 function isSnapshotAvailability(value: unknown): value is ScanSnapshotAvailability {
   if (!record(value) || value.unavailable !== null) return false
-  const { snapshot } = value
-  if (snapshot === null) return true
+  return value.snapshot === null || isSnapshot(value.snapshot)
+}
+
+function isSnapshot(snapshot: unknown): snapshot is ScanSnapshot {
   if (!record(snapshot)) return false
   const { entries, root, summary, completedAt, entryCount, incomplete } = snapshot
   return (
@@ -647,6 +652,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     listInsightsLargestDirectories: (value): value is InsightsRankingPage =>
       isRankingPage(value, 'directory'),
     getScanSnapshot: isSnapshotAvailability,
+    openExplorerSnapshot: isSnapshot,
     getScanEntry: isStorageEntry,
     listScanDirectory: isDirectoryPage,
     getScanDirectoryTreemap: isDirectoryTreemap,

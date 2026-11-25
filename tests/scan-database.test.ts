@@ -621,7 +621,7 @@ function readyScan(db: ScanDatabase, id = 'scan-a', bytes = 20): CompletedScan {
   return completed(pending, { totalBytes: bytes })
 }
 
-test('reads Explorer metadata across reopen and a change to Latest', () => {
+test('reads Explorer metadata across reopen and browses retained scans with identical entry IDs', () => {
   const db = open()
   const old = readyScan(db, 'previous')
   const oldRoot = { scanId: old.id, entryId: 'root' }
@@ -651,7 +651,7 @@ test('reads Explorer metadata across reopen and a change to Latest', () => {
   expect(reopened.getScanSnapshot()).toEqual(expected)
   expect(reopened.getScanEntry(oldRoot)).toEqual(root(old.id))
   expect(reopened.getScanEntry({ ...oldRoot, entryId: 'file' })).toEqual(file(old.id))
-  const next = readyScan(reopened, 'next')
+  const next = readyScan(reopened, 'next', 37)
   const nextRoot = { ...oldRoot, scanId: next.id }
   expect(reopened.getScanSnapshot()).toEqual(expected)
   expect(() => reopened.getScanEntry({ ...nextRoot, entryId: 'file' })).toThrow(
@@ -665,21 +665,132 @@ test('reads Explorer metadata across reopen and a change to Latest', () => {
   ).toThrow(expect.objectContaining({ code: 'NOT_DIRECTORY' }))
 
   reopened.publishScan(next, 'root')
-  expect(reopened.getEntry(old.id, 'file')).toEqual(file(old.id))
-  expect(() => reopened.getScanEntry(oldRoot)).toThrow(
-    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
-  )
-  expect(() => reopened.listScanDirectory({ ...oldRoot, offset: 0, limit: 100 })).toThrow(
-    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
-  )
+  expect(reopened.openExplorerSnapshot({ scanId: old.id })).toEqual(expected.snapshot)
+  expect(reopened.getScanEntry(oldRoot)).toEqual(root(old.id))
+  expect(reopened.listScanDirectory({ ...oldRoot, offset: 0, limit: 100 })).toMatchObject({
+    scanId: old.id,
+    entries: [file(old.id)]
+  })
   expect(reopened.getScanSnapshot().snapshot?.entries).toEqual({
     scanId: next.id,
     rootEntryId: 'root'
   })
-  expect(reopened.getScanEntry({ ...nextRoot, entryId: 'file' })).toEqual(file(next.id))
+  expect(reopened.getScanEntry({ ...nextRoot, entryId: 'file' })).toEqual({
+    ...file(next.id),
+    sizeBytes: 37
+  })
 })
 
-test('returns SQLite metadata and deterministic pages and Treemap for mixed names, types and depths', () => {
+test.each([
+  [
+    'root',
+    "UPDATE entries SET aggregated_size_bytes = 1 WHERE scan_id = 'historical' AND id = 'root'"
+  ],
+  [
+    'parent',
+    "UPDATE entries SET parent_id = 'missing' WHERE scan_id = 'historical' AND id = 'file'"
+  ],
+  ['count', "UPDATE scans SET file_count = 2 WHERE id = 'historical'"],
+  ['size', "UPDATE entries SET size_bytes = 21 WHERE scan_id = 'historical' AND id = 'file'"],
+  [
+    'aggregate',
+    "UPDATE entries SET aggregated_size_bytes = 19 WHERE scan_id = 'historical' AND id = 'inner'"
+  ],
+  ['metadata', "UPDATE scans SET finished_at = 'invalid' WHERE id = 'historical'"]
+] as const)(
+  'rejects invalid historical %s on demand and preserves Latest and the saved rows',
+  (_case, corrupt) => {
+    const db = open()
+    const historical = building('historical')
+    const top = root(historical.id)
+    const inner = { ...top, id: 'inner', parentId: top.id }
+    db.beginScan(historical)
+    db.applyBatch(historical.id, [
+      discover(top),
+      discover(inner),
+      discover({ ...file(historical.id), parentId: inner.id }),
+      finalize(inner, 20),
+      finalize(top, 20)
+    ])
+    db.publishScan(completed(historical, { directoryCount: 2 }), top.id)
+    const latest = db.publishScan(readyScan(db, 'latest'), top.id)
+    db.close()
+    inspectDatabase((sql) => {
+      sql.exec('PRAGMA foreign_keys = OFF')
+      sql.exec(corrupt)
+    })
+    const reopened = open()
+    reopened.recoverStorage()
+    expect(reopened.getScanSnapshot().snapshot?.entries.scanId).toBe(latest.id)
+    const invalid = expect.objectContaining({
+      code: 'SNAPSHOT_UNAVAILABLE',
+      message: 'This saved snapshot failed integrity checks.'
+    })
+    expect(() => reopened.openExplorerSnapshot({ scanId: historical.id })).toThrow(invalid)
+    expect(() => reopened.getScanEntry({ scanId: historical.id, entryId: top.id })).toThrow(invalid)
+    expect(reopened.getPublishedScan()).toEqual(latest)
+    expect(reopened.getScan(historical.id)?.status).toBe('completed')
+    expect(reopened.getEntry(historical.id, 'file')).not.toBeNull()
+  }
+)
+
+test('reuses a successful historical validation, resets it on reopen, and retries failed validation', () => {
+  const db = open()
+  const previous = db.publishScan(readyScan(db, 'previous'), 'root')
+  db.publishScan(readyScan(db, 'latest'), 'root')
+  const request = { scanId: previous.id }
+  const expected = db.openExplorerSnapshot(request)
+  inspectDatabase((sql) =>
+    sql.exec("UPDATE entries SET size_bytes = 21 WHERE scan_id = 'previous' AND id = 'file'")
+  )
+  expect(db.openExplorerSnapshot(request)).toEqual(expected)
+  db.close()
+
+  const reopened = open()
+  reopened.recoverStorage()
+  expect(() => reopened.openExplorerSnapshot(request)).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
+  )
+  inspectDatabase((sql) =>
+    sql.exec("UPDATE entries SET size_bytes = 20 WHERE scan_id = 'previous' AND id = 'file'")
+  )
+  expect(reopened.openExplorerSnapshot(request)).toEqual(expected)
+})
+
+test('invalidates historical validation on deletion before an ID can be reused', () => {
+  const db = open()
+  const request = { scanId: 'reused' }
+  db.publishScan(readyScan(db, request.scanId), 'root')
+  db.publishScan(readyScan(db, 'latest'), 'root')
+  expect(db.openExplorerSnapshot(request).summary.totalBytes).toBe(20)
+  db.deleteSnapshot(request)
+  expect(() => db.openExplorerSnapshot(request)).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
+  )
+  db.publishScan(readyScan(db, request.scanId, 37), 'root')
+  db.publishScan(readyScan(db, 'new-latest'), 'root')
+  expect(db.openExplorerSnapshot(request).summary.totalBytes).toBe(37)
+})
+
+test('evicts the least recently used validation when more than eight historical scans are opened', () => {
+  const db = open()
+  const ids = Array.from({ length: 9 }, (_, i) => `history-${i}`)
+  for (const id of [...ids, 'latest']) db.publishScan(readyScan(db, id), 'root')
+  for (const id of ids.slice(0, 8)) db.openExplorerSnapshot({ scanId: id })
+  db.openExplorerSnapshot({ scanId: ids[0] })
+  db.openExplorerSnapshot({ scanId: ids[8] })
+  inspectDatabase((sql) =>
+    sql.exec(
+      "UPDATE entries SET size_bytes = 21 WHERE scan_id IN ('history-0', 'history-1') AND id = 'file'"
+    )
+  )
+  expect(db.openExplorerSnapshot({ scanId: ids[0] }).summary.totalBytes).toBe(20)
+  expect(() => db.openExplorerSnapshot({ scanId: ids[1] })).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
+  )
+})
+
+test('returns historical metadata and deterministic pages and Treemap for mixed names, types and depths', () => {
   const db = open()
   const pending = building()
   const top = { ...root(), id: 'stored-root' }
@@ -769,6 +880,8 @@ test('returns SQLite metadata and deterministic pages and Treemap for mixed name
     unavailable: null
   })
   expect(db.getScanSnapshot().snapshot?.entryCount).toBe(files.length + 7)
+  db.publishScan(readyScan(db, 'latest'), 'root')
+  expect(db.openExplorerSnapshot({ scanId: pending.id })).toEqual(saved.snapshot)
   for (const entry of [...files, ...otherEntries, leaf]) {
     expect(db.getScanEntry({ scanId: pending.id, entryId: entry.id })).toEqual(entry)
   }
@@ -997,15 +1110,14 @@ test('rejects Treemap access to unavailable, expired, missing and invalid direct
   )
   expect(db.getScanDirectoryTreemap(request).entries).toEqual([file(first.id)])
   db.publishScan(replacement, 'root')
-  expect(() => db.getScanDirectoryTreemap(request)).toThrow(
-    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
-  )
+  expect(db.getScanDirectoryTreemap(request).entries).toEqual([file(first.id)])
   db.close()
   const reopened = open()
   reopened.recoverStorage()
   expect(reopened.getScanDirectoryTreemap({ ...request, scanId: replacement.id }).entries).toEqual([
     file(replacement.id)
   ])
+  expect(reopened.getScanDirectoryTreemap(request).entries).toEqual([file(first.id)])
 })
 
 test('keeps the safe byte boundary exact and rejects both unsafe totals and SQLite integer overflows', () => {

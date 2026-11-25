@@ -22,6 +22,7 @@ import type {
   ScanDirectoryTreemap,
   ScanDirectoryTreemapRequest,
   ScanEntryRequest,
+  ScanSnapshot,
   ScanSnapshotAvailability
 } from '../../shared/snapshot'
 import type {
@@ -199,6 +200,10 @@ export class StorageWorkerClient {
 
   getScanSnapshot(): Promise<ScanSnapshotAvailability> {
     return this.run('getScanSnapshot', null)
+  }
+
+  openExplorerSnapshot(scanId: string): Promise<ScanSnapshot> {
+    return this.run('openExplorerSnapshot', { scanId })
   }
 
   getScanEntry(request: ScanEntryRequest): Promise<FileEntry> {

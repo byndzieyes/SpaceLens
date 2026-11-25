@@ -1,6 +1,6 @@
 import type { FileEntry, ScanEntriesReference, ScanSummary } from './scan'
 
-/** Immutable metadata. Latest-only reads expire when a newer scan becomes Latest. */
+/** Immutable metadata for one completed snapshot. */
 export interface ScanSnapshot {
   readonly entries: ScanEntriesReference
   readonly root: FileEntry

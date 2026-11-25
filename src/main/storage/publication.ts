@@ -2,7 +2,9 @@ import type { DatabaseSync } from 'node:sqlite'
 import type { CompletedScan } from './payloads'
 
 /** Compare the persisted tree with scanner accounting while holding the publication transaction. */
-export function prepareSnapshotValidation(connection: DatabaseSync): (scan: CompletedScan) => void {
+export function prepareSnapshotValidation(
+  connection: DatabaseSync
+): (scan: CompletedScan) => bigint {
   const summary = connection.prepare(`
     WITH RECURSIVE reachable(id, type) AS (
       SELECT id, type FROM entries WHERE scan_id = $scanId AND parent_id IS NULL
@@ -39,7 +41,7 @@ export function prepareSnapshotValidation(connection: DatabaseSync): (scan: Comp
 
   return (scan) => {
     const facts = summary.get({ $scanId: scan.id })
-    if (!facts || facts.entry_count !== facts.reachable_count) {
+    if (typeof facts?.entry_count !== 'bigint' || facts.entry_count !== facts.reachable_count) {
       throw new Error('Persisted entries are not all reachable from the scan root.')
     }
     if (
@@ -58,5 +60,6 @@ export function prepareSnapshotValidation(connection: DatabaseSync): (scan: Comp
     if (directory) {
       throw new Error(`Directory ${directory.id} is unfinished or has an inconsistent aggregate.`)
     }
+    return facts.entry_count
   }
 }

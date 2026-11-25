@@ -23,6 +23,7 @@ import {
   type ScanDirectoryTreemap,
   type ScanDirectoryTreemapRequest,
   type ScanEntryRequest,
+  type ScanSnapshot,
   type ScanSnapshotAvailability
 } from '../../shared/snapshot'
 import {
@@ -77,6 +78,7 @@ const ENTRY_COLUMNS = `entry.scan_id, entry.id, entry.parent_id, entry.name, ent
 `
 const SELECT_ENTRY = `SELECT ${ENTRY_COLUMNS} FROM entries AS entry`
 const DEEP_DIRECTORY_OFFSET = 10_000
+const MAX_VALIDATED_EXPLORER_SNAPSHOTS = 8
 const TREEMAP_BYTES = `CASE type WHEN 'file' THEN size_bytes WHEN 'directory' THEN aggregated_size_bytes END`
 const TREEMAP_CHILDREN = `FROM entries WHERE scan_id = $scanId AND parent_id = $entryId`
 const TREEMAP_TOTALS = `SELECT COUNT(*) AS child_count, COALESCE(SUM(bytes), 0) AS known_bytes,
@@ -172,6 +174,13 @@ function requireCompletedScan(scan: ScanSession): CompletedScan {
   return { ...scan, status: scan.status }
 }
 
+function invalidSavedSnapshot(): SnapshotAccessError {
+  return new SnapshotAccessError(
+    'SNAPSHOT_UNAVAILABLE',
+    'This saved snapshot failed integrity checks.'
+  )
+}
+
 function historyItem(scan: CompletedScan, latestId: string | null): ScanHistoryItem {
   return {
     ...scan,
@@ -216,7 +225,25 @@ function recoverScans(connection: DatabaseSync, published: CompletedScan | null)
   ) {
     throw new Error('The database contains an unexpected persisted scan status.')
   }
-  if (connection.prepare('PRAGMA foreign_key_check').get()) {
+  // Parent faults in a retained historical tree are checked when that tree is opened.
+  // Orphan scan IDs and invalid references in Latest or abandoned builds still fail recovery.
+  if (
+    connection
+      .prepare(
+        `
+    SELECT 1 FROM entries AS child
+    LEFT JOIN scans AS scan ON scan.id = child.scan_id
+    WHERE scan.id IS NULL OR (
+      (scan.status = 'running' OR scan.id = ?) AND child.parent_id IS NOT NULL AND NOT EXISTS (
+        SELECT 1 FROM entries AS parent
+        WHERE parent.scan_id = child.scan_id AND parent.id = child.parent_id AND parent.type = 'directory'
+      )
+    )
+    LIMIT 1
+  `
+      )
+      .get(published?.id ?? null)
+  ) {
     throw new Error('The database contains invalid scan or entry references.')
   }
   if (published) {
@@ -278,7 +305,9 @@ export class ScanDatabase {
   private readonly deleteBuildingScanStatement: StatementSync
   private readonly deleteCompletedScanStatement: StatementSync
   private readonly selectRootIdStatement: StatementSync
-  private readonly validateSnapshot: (scan: CompletedScan) => void
+  private readonly validateSnapshot: (scan: CompletedScan) => bigint
+  private readonly validatedExplorerSnapshots = new Map<string, ScanSnapshot>()
+  private validatedLatestId: string | undefined
   private readonly insertEntryStatement: StatementSync
   private readonly selectEntryStatement: StatementSync
   private readonly countSnapshotEntriesStatement: StatementSync
@@ -498,10 +527,14 @@ export class ScanDatabase {
 
   /** Startup only. SQLite has already resolved any interrupted journal on open. */
   recoverStorage(): void {
+    let latest!: CompletedScan | null
     this.transaction(() => {
       readPublicationCounter(this.connection)
-      recoverScans(this.connection, this.getPublishedScan())
+      latest = this.getPublishedScan()
+      recoverScans(this.connection, latest)
     })
+    this.validatedLatestId = latest?.id
+    this.validatedExplorerSnapshots.clear()
     this.analytics.clear()
   }
 
@@ -547,6 +580,7 @@ export class ScanDatabase {
       if (!stored) throw new Error('Could not read the promoted scan.')
       published = requireCompletedScan(stored)
     })
+    this.validatedLatestId = published.id
     this.analytics.usePublication(published.id)
     return published
   }
@@ -637,7 +671,11 @@ export class ScanDatabase {
       if (latestCompleted) readCompletedScanDuration(latestCompleted)
       deleted = { scanId, latestCompleted, latestCompletedScanId: latestCompleted?.id ?? null }
     })
-    if (deletedLatest) this.analytics.clear()
+    if (deleted) this.validatedExplorerSnapshots.delete(scanId)
+    if (deletedLatest) {
+      this.validatedLatestId = undefined
+      this.analytics.clear()
+    }
     return deleted
   }
 
@@ -705,16 +743,7 @@ export class ScanDatabase {
     inTransaction(
       this.connection,
       () => {
-        const scan = this.getScan(scanId)
-        if (!scan)
-          throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'This saved scan no longer exists.')
-        if (scan.status !== 'completed') {
-          throw new SnapshotAccessError(
-            'SNAPSHOT_UNAVAILABLE',
-            'This scan has no available snapshot.'
-          )
-        }
-        item = historyItem(requireCompletedScan(scan), this.getLatestScanId())
+        item = historyItem(this.requireSavedScan(scanId), this.getLatestScanId())
       },
       'BEGIN'
     )
@@ -730,39 +759,96 @@ export class ScanDatabase {
 
   getScanSnapshot(): ScanSnapshotAvailability {
     const scan = this.getPublishedScan()
-    if (!scan) return { snapshot: null, unavailable: null }
+    return {
+      snapshot: scan ? this.explorerSnapshot(scan) : null,
+      unavailable: null
+    }
+  }
 
+  openExplorerSnapshot(request: unknown): ScanSnapshot {
+    const scan = this.requireExplorerScan(readSnapshotId(request))
+    // An explicit view can outlive this publication's time as Latest.
+    if (scan.id === this.validatedLatestId) {
+      const snapshot = this.readExplorerSnapshot(scan)
+      if (!this.connection.isTransaction) this.rememberExplorerSnapshot(snapshot)
+      return snapshot
+    }
+    return this.explorerSnapshot(scan)
+  }
+
+  private explorerSnapshot(scan: CompletedScan): ScanSnapshot {
+    if (scan.id === this.validatedLatestId) return this.readExplorerSnapshot(scan)
+    const cached = this.validatedExplorerSnapshots.get(scan.id)
+    if (cached) {
+      this.validatedExplorerSnapshots.delete(scan.id)
+      this.validatedExplorerSnapshots.set(scan.id, cached)
+      return cached
+    }
+
+    try {
+      let snapshot!: ScanSnapshot
+      const validate = (): undefined => {
+        snapshot = this.readExplorerSnapshot(scan, true)
+        return undefined
+      }
+      // Internal callers may already have a transaction. Only cache independent committed reads.
+      if (this.connection.isTransaction) {
+        validate()
+        return snapshot
+      }
+      inTransaction(this.connection, validate, 'BEGIN')
+      this.rememberExplorerSnapshot(snapshot)
+      return snapshot
+    } catch {
+      throw invalidSavedSnapshot()
+    }
+  }
+
+  private rememberExplorerSnapshot(snapshot: ScanSnapshot): void {
+    const { scanId } = snapshot.entries
+    this.validatedExplorerSnapshots.delete(scanId)
+    this.validatedExplorerSnapshots.set(scanId, snapshot)
+    if (this.validatedExplorerSnapshots.size > MAX_VALIDATED_EXPLORER_SNAPSHOTS) {
+      const oldest = this.validatedExplorerSnapshots.keys().next().value!
+      this.validatedExplorerSnapshots.delete(oldest)
+    }
+  }
+
+  private readExplorerSnapshot(scan: CompletedScan, fullValidation = false): ScanSnapshot {
     const publication = { scan, rootEntryId: this.selectRootIdStatement.get(scan.id)?.id }
     validateScanPublication(publication)
     const root = this.readPublishedRoot(scan, publication.rootEntryId)
-    const counts = this.countSnapshotEntriesStatement.get(scan.id)
-    if (
-      counts?.file_count !== BigInt(scan.summary.fileCount) ||
-      counts.directory_count !== BigInt(scan.summary.directoryCount)
-    ) {
-      throw new Error('Persisted entry counts differ from the scan summary.')
+    let count: SQLOutputValue
+    if (fullValidation) {
+      count = this.validateSnapshot(scan)
+    } else {
+      const counts = this.countSnapshotEntriesStatement.get(scan.id)
+      if (
+        counts?.file_count !== BigInt(scan.summary.fileCount) ||
+        counts.directory_count !== BigInt(scan.summary.directoryCount)
+      ) {
+        throw new Error('Persisted entry counts differ from the scan summary.')
+      }
+      count = counts.entry_count
     }
     return {
-      snapshot: {
-        entries: { scanId: scan.id, rootEntryId: root.id },
-        root,
-        completedAt: scan.finishedAt,
-        summary: scan.summary,
-        entryCount: readInteger(counts.entry_count, 'entryCount'),
-        incomplete: scan.summary.errorCount > 0
-      },
-      unavailable: null
+      entries: { scanId: scan.id, rootEntryId: root.id },
+      root,
+      completedAt: scan.finishedAt,
+      summary: scan.summary,
+      entryCount: readInteger(count, 'entryCount'),
+      incomplete: scan.summary.errorCount > 0
     }
   }
 
   getScanEntry(request: ScanEntryRequest): FileEntry {
     validateSnapshotRequest(request, false)
-    return this.requirePublishedEntry(request)
+    return this.requireExplorerEntry(request)
   }
 
   listScanDirectory(request: ScanDirectoryRequest): ScanDirectoryPage {
     validateSnapshotRequest(request, true)
-    const directory = this.requirePublishedEntry(request)
+    const directory = this.requireExplorerEntry(request)
     if (directory.type !== 'directory') {
       throw new SnapshotAccessError('NOT_DIRECTORY', 'Entry is not a directory.')
     }
@@ -786,7 +872,7 @@ export class ScanDatabase {
 
   getScanDirectoryTreemap(request: ScanDirectoryTreemapRequest): ScanDirectoryTreemap {
     validateTreemapRequest(request)
-    const directory = this.requirePublishedEntry(request)
+    const directory = this.requireExplorerEntry(request)
     if (directory.type !== 'directory') {
       throw new SnapshotAccessError('NOT_DIRECTORY', 'Entry is not a directory.')
     }
@@ -868,15 +954,35 @@ export class ScanDatabase {
     if (!latest || (requested && requested.status !== 'completed')) {
       throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'This scan has no available snapshot.')
     }
-    // Explorer and Insights currently expose only Latest, even when older scans are retained.
+    // Insights currently exposes only Latest, even when older scans are retained.
     throw new SnapshotAccessError(
       'SNAPSHOT_EXPIRED',
       'This snapshot reference is no longer current.'
     )
   }
 
-  private requirePublishedEntry({ scanId, entryId }: ScanEntryRequest): FileEntry {
-    this.requirePublishedScan(scanId)
+  private requireSavedScan(scanId: string): CompletedScan {
+    const scan = this.getScan(scanId)
+    if (!scan)
+      throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'This saved scan no longer exists.')
+    if (scan.status === 'completed') return requireCompletedScan(scan)
+    throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'This scan has no available snapshot.')
+  }
+
+  private requireExplorerScan(scanId: string): CompletedScan {
+    try {
+      const scan = this.requireSavedScan(scanId)
+      readCompletedScanDuration(scan)
+      return scan
+    } catch (error) {
+      if (error instanceof SnapshotAccessError) throw error
+      throw invalidSavedSnapshot()
+    }
+  }
+
+  private requireExplorerEntry({ scanId, entryId }: ScanEntryRequest): FileEntry {
+    const scan = this.requireExplorerScan(scanId)
+    if (scanId !== this.validatedLatestId) this.explorerSnapshot(scan)
     const entry = this.getEntry(scanId, entryId)
     if (!entry) {
       throw new SnapshotAccessError('ENTRY_NOT_FOUND', 'Entry does not exist in this snapshot.')
@@ -989,6 +1095,7 @@ export class ScanDatabase {
 
   close(): void {
     this.analytics.clear()
+    this.validatedExplorerSnapshots.clear()
     if (!this.connection.isOpen) return
     if (this.connection.isTransaction) throw new Error('Cannot close during a SQLite transaction.')
     this.connection.close()

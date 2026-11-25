@@ -17,6 +17,7 @@ import {
   type StorageWorkerClient
 } from '../src/main/storage/workerClient'
 import { legacyEntries, legacyScan } from './v1-scan-fixture'
+import type { ScanSnapshot } from '../src/shared/snapshot'
 
 function explicit(scanId: string, view: SnapshotView = 'explorer'): SnapshotSelectionRequest {
   return { view, selection: { mode: 'explicit', scanId } }
@@ -30,6 +31,7 @@ interface Fixture {
   prepare: (request: SnapshotSelectionRequest) => Promise<PreparedSnapshotSelection>
   select: (request: SnapshotSelectionRequest) => Promise<SnapshotSelectionResolution>
   metadata: MockedFunction<StorageWorkerClient['getScanHistoryMetadata']>
+  openSnapshot: MockedFunction<StorageWorkerClient['openExplorerSnapshot']>
   batch: MockedFunction<StorageWorkerClient['applyBatch']>
   deletion: MockedFunction<StorageWorkerClient['deleteSnapshot']>
   prune: MockedFunction<StorageWorkerClient['pruneSnapshot']>
@@ -44,23 +46,24 @@ function fixture(): Fixture {
     durationMs: 900000,
     incomplete: true
   }))
-  const discovery = vi.fn<StorageWorkerClient['getScanSnapshot']>(async () => {
-    const scanId = state.latest
-    const root = { ...legacyEntries.root, scanId: scanId ?? '' }
+  const snapshot = (scanId: string): ScanSnapshot => {
+    const root = { ...legacyEntries.root, scanId }
     return {
-      snapshot: scanId
-        ? {
-            entries: { scanId, rootEntryId: root.id },
-            root,
-            completedAt: legacyScan.finishedAt,
-            summary: legacyScan.summary,
-            entryCount: 4,
-            incomplete: true
-          }
-        : null,
-      unavailable: null
+      entries: { scanId, rootEntryId: root.id },
+      root,
+      completedAt: legacyScan.finishedAt,
+      summary: legacyScan.summary,
+      entryCount: 4,
+      incomplete: true
     }
-  })
+  }
+  const discovery = vi.fn<StorageWorkerClient['getScanSnapshot']>(async () => ({
+    snapshot: state.latest ? snapshot(state.latest) : null,
+    unavailable: null
+  }))
+  const openSnapshot = vi.fn<StorageWorkerClient['openExplorerSnapshot']>(async (id) =>
+    snapshot(id)
+  )
   const batch = vi.fn<StorageWorkerClient['applyBatch']>(async () => {})
   const deletion = vi.fn<StorageWorkerClient['deleteSnapshot']>(async ({ scanId }) => ({
     scanId,
@@ -71,6 +74,7 @@ function fixture(): Fixture {
   const worker = Object.assign(state, {
     getScanHistoryMetadata: metadata,
     getScanSnapshot: discovery,
+    openExplorerSnapshot: openSnapshot,
     deleteSnapshot: deletion,
     pruneSnapshot: prune,
     applyBatch: batch
@@ -92,6 +96,7 @@ function fixture(): Fixture {
     prepare,
     select,
     metadata,
+    openSnapshot,
     batch,
     deletion,
     prune
@@ -292,4 +297,26 @@ test('normal handoffs use two owners and leave capacity for two-snapshot consume
     document.abort()
   }
   for (const scanId of ['a', 'b', 'c']) expect(storage.isSnapshotProtected(scanId)).toBe(false)
+})
+
+test('historical validation holds request protection after the document is destroyed', async () => {
+  const { storage, document, prepare, openSnapshot } = fixture()
+  const dispatched = Promise.withResolvers<void>()
+  const finish = Promise.withResolvers<void>()
+  const read = openSnapshot.getMockImplementation()!
+  openSnapshot.mockImplementationOnce(async (scanId) => {
+    dispatched.resolve()
+    await finish.promise
+    return read(scanId)
+  })
+  const pending = expect(prepare(explicit('historical'))).rejects.toThrow('no longer active')
+  await dispatched.promise
+  document.abort()
+  await pending
+  expect(storage.isSnapshotProtected('historical')).toBe(true)
+  await expect(storage.deleteSnapshot({ scanId: 'historical' })).rejects.toMatchObject({
+    code: 'SNAPSHOT_IN_USE'
+  })
+  finish.resolve()
+  await vi.waitFor(() => expect(storage.isSnapshotProtected('historical')).toBe(false))
 })

@@ -91,6 +91,8 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().listInsightsLargest(request.payload, 'directory')
     case 'getScanSnapshot':
       return requireDatabase().getScanSnapshot()
+    case 'openExplorerSnapshot':
+      return requireDatabase().openExplorerSnapshot(request.payload)
     case 'getScanEntry':
       return requireDatabase().getScanEntry(request.payload)
     case 'listScanDirectory':

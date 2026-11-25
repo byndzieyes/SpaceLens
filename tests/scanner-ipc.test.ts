@@ -23,6 +23,7 @@ import type {
   PreparedSnapshotSelection,
   SnapshotSelectionRequest
 } from '../src/shared/snapshotSelection'
+import type { ScanSnapshot } from '../src/shared/snapshot'
 
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events')
@@ -68,6 +69,7 @@ const queries = {
   listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
   listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
+  openExplorerSnapshot: vi.fn<StorageWorkerClient['openExplorerSnapshot']>(),
   listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
   getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
@@ -130,6 +132,34 @@ function ack(revision: number, sender = event()): void {
   ipcMain.emit(IPC_CHANNELS.acknowledgeScanState, sender, revision)
 }
 
+async function prepareExplicit(
+  scanId: string,
+  view: SnapshotSelectionRequest['view'] = 'explorer'
+): Promise<PreparedSnapshotSelection> {
+  queries.getScanHistoryMetadata.mockResolvedValueOnce({
+    ...completed(),
+    id: scanId,
+    durationMs: 1000,
+    isLatest: false,
+    incomplete: false
+  })
+  const result = (await invoke(IPC_CHANNELS.prepareSnapshotSelection, [
+    { view, selection: { mode: 'explicit', scanId } }
+  ])) as ScannerIpcResult<PreparedSnapshotSelection>
+  if (!result.ok) throw new Error(result.error.message)
+  return result.value
+}
+
+async function adoptExplorer(scanId: string): Promise<void> {
+  const { ticket } = await prepareExplicit(scanId)
+  expect(
+    await invoke(IPC_CHANNELS.adoptSnapshotSelection, [{ view: 'explorer', ticket }])
+  ).toMatchObject({
+    ok: true,
+    value: { entries: { scanId } }
+  })
+}
+
 beforeEach(async () => {
   vi.clearAllMocks()
   for (const query of Object.values(queries)) query.mockReset()
@@ -139,6 +169,28 @@ beforeEach(async () => {
     protection.createOwner(signal, (scanId) => queries.getScanHistoryMetadata({ scanId }))
   )
   queries.getScanSnapshot.mockResolvedValue({ snapshot: null, unavailable: null })
+  queries.openExplorerSnapshot.mockImplementation(async (scanId): Promise<ScanSnapshot> => {
+    const scan = completed()
+    return {
+      entries: { scanId, rootEntryId: 'root' },
+      root: {
+        scanId,
+        id: 'root',
+        parentId: null,
+        name: 'root',
+        path: rootPath,
+        type: 'directory',
+        aggregatedSizeBytes: 0,
+        sizeBytes: null,
+        createdAt: null,
+        modifiedAt: null
+      },
+      completedAt: scan.finishedAt,
+      summary: scan.summary,
+      incomplete: false,
+      entryCount: 1
+    }
+  })
   state = null
   renderer = makeRenderer()
   unsubscribe = vi.fn()
@@ -185,6 +237,7 @@ test('retrieval uses fixed, authorized channels and forwards bounded ID-only que
     ok: true,
     value: { snapshot: null, unavailable: null }
   })
+  await adoptExplorer(id)
   const request = { scanId: id, entryId: otherId }
   const value = { id: otherId, scanId: id, type: 'directory' }
   queries.getScanEntry.mockResolvedValue(
@@ -274,13 +327,53 @@ test('authorizes selection calls and rejects malformed, unrecognized and cross-v
     ok: false,
     error: { code: 'UNAVAILABLE' }
   })
-  expect(await invoke(adopt, [adoption])).toEqual({ ok: true, value: null })
+  expect(await invoke(adopt, [adoption])).toMatchObject({
+    ok: true,
+    value: { entries: { scanId: id } }
+  })
   expect(await invoke(release, [{ view: 'insights' }])).toEqual({ ok: true, value: null })
   expect(protection.isProtected(id)).toBe(true)
   for (let call = 0; call < 2; call++) {
     expect(await invoke(release, [{ view: 'explorer' }])).toEqual({ ok: true, value: null })
   }
   expect(protection.isProtected(id)).toBe(false)
+})
+
+test('an unrelated lease and a prepared Explorer selection grant no entry access', async () => {
+  const { ticket: insights } = await prepareExplicit(id, 'insights')
+  await invoke(IPC_CHANNELS.adoptSnapshotSelection, [{ view: 'insights', ticket: insights }])
+  const read = { scanId: id, entryId: 'root' }
+  const { ticket } = await prepareExplicit(id)
+  expect(await invoke(IPC_CHANNELS.getScanEntry, [read])).toMatchObject({
+    ok: false,
+    error: { code: 'SNAPSHOT_UNAVAILABLE' }
+  })
+  expect(queries.getScanEntry).not.toHaveBeenCalled()
+  expect(protection.isProtected(id)).toBe(true)
+  await invoke(IPC_CHANNELS.adoptSnapshotSelection, [{ view: 'explorer', ticket }])
+  const first = Promise.withResolvers<FileEntry>()
+  queries.getScanEntry.mockReturnValueOnce(first.promise)
+  const stale = invoke(IPC_CHANNELS.getScanEntry, [read])
+  await adoptExplorer(otherId)
+  await adoptExplorer(id)
+  first.resolve((await queries.openExplorerSnapshot(id)).root)
+  expect(await stale).toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
+  const oldDocument = event()
+  renderer.emit('did-start-navigation', { isMainFrame: true })
+  expect(await invoke(IPC_CHANNELS.getScanEntry, [read], oldDocument)).toMatchObject({
+    ok: false,
+    error: { code: 'UNAUTHORIZED' }
+  })
+  renderer.mainFrame = { url }
+  renderer.emit('did-finish-load')
+  expect(await invoke(IPC_CHANNELS.getScanEntry, [read], oldDocument)).toMatchObject({
+    ok: false,
+    error: { code: 'UNAUTHORIZED' }
+  })
+  expect(await invoke(IPC_CHANNELS.getScanEntry, [read])).toMatchObject({
+    ok: false,
+    error: { code: 'SNAPSHOT_UNAVAILABLE' }
+  })
 })
 
 test('invalidates active and pending view ownership on document replacement, process loss and shutdown', async () => {
@@ -307,7 +400,10 @@ test('invalidates active and pending view ownership on document replacement, pro
   ])) as ScannerIpcResult<PreparedSnapshotSelection>
   if (!value.ok) throw new Error('Snapshot selection failed.')
   const adoption = { view: 'explorer', ticket: value.value.ticket }
-  expect(await invoke(adopt, [adoption])).toEqual({ ok: true, value: null })
+  expect(await invoke(adopt, [adoption])).toMatchObject({
+    ok: true,
+    value: { entries: { scanId: id } }
+  })
   const pending = Promise.withResolvers<typeof metadata>()
   queries.getScanHistoryMetadata.mockReturnValueOnce(pending.promise)
   const inFlight = invoke(prepare, [request(otherId)])
@@ -539,7 +635,7 @@ test('keeps the acknowledged publication when recovery or later unsuccessful ses
   }
 })
 
-test('restores Latest to Overview and restricts Explorer and Insights to it with retained history', async () => {
+test('restores Latest to Overview, browses the adopted historical Explorer scan, and keeps Insights on Latest', async () => {
   const db = new ScanDatabase(':memory:')
   try {
     const previous = completed()
@@ -581,6 +677,9 @@ test('restores Latest to Overview and restricts Explorer and Insights to it with
     })
 
     queries.getScanEntry.mockImplementation(async (request) => db.getScanEntry(request))
+    queries.openExplorerSnapshot.mockImplementation(async (scanId) =>
+      db.openExplorerSnapshot({ scanId })
+    )
     queries.requirePublishedScan.mockImplementation(async (scanId) =>
       db.requirePublishedScan(scanId)
     )
@@ -595,6 +694,17 @@ test('restores Latest to Overview and restricts Explorer and Insights to it with
       error: { code: 'UNAUTHORIZED' }
     })
     expect(await invoke(IPC_CHANNELS.getScanEntry, [entry])).toMatchObject({
+      ok: false,
+      error: { code: 'SNAPSHOT_UNAVAILABLE' }
+    })
+    await adoptExplorer(previous.id)
+    expect(await invoke(IPC_CHANNELS.getScanEntry, [entry])).toMatchObject({
+      ok: true,
+      value: { scanId: previous.id, id: root.id }
+    })
+    expect(
+      await invoke(IPC_CHANNELS.getScanEntry, [{ ...entry, scanId: latest.id }])
+    ).toMatchObject({
       ok: false,
       error: { code: 'SNAPSHOT_EXPIRED' }
     })
@@ -873,6 +983,7 @@ test('validates Treemap requests before dispatch and preserves structured failur
   }
   expect(queries.getScanEntry).not.toHaveBeenCalled()
   expect(queries.getScanDirectoryTreemap).not.toHaveBeenCalled()
+  await adoptExplorer(id)
   for (const code of [
     'NOT_DIRECTORY',
     'ENTRY_NOT_FOUND',
@@ -896,6 +1007,7 @@ test('validates Treemap requests before dispatch and preserves structured failur
 })
 
 test('discards a pending SQLite Treemap response when its renderer navigates', async () => {
+  await adoptExplorer(id)
   const request = { scanId: id, entryId: otherId }
   const pending =
     Promise.withResolvers<Awaited<ReturnType<StorageWorkerClient['getScanDirectoryTreemap']>>>()
@@ -1211,6 +1323,7 @@ test.each([
 ] as const)(
   'returns the precise storage outcome %s without exposing internal errors',
   async (code) => {
+    await adoptExplorer(id)
     queries.getScanEntry.mockRejectedValueOnce(
       new StorageWorkerError({
         name: 'SnapshotAccessError',

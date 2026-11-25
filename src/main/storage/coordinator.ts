@@ -25,6 +25,7 @@ export type RetentionOpportunity =
 type SnapshotQueries = Pick<
   StorageWorkerClient,
   | 'getScanSnapshot'
+  | 'openExplorerSnapshot'
   | 'getScanEntry'
   | 'listScanDirectory'
   | 'getScanDirectoryTreemap'
