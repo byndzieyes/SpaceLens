@@ -5,6 +5,10 @@ import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { DatabaseSync, StatementSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import {
+  comparisonMetadataForStoredScan,
+  evaluateComparisonCompatibility
+} from '../src/main/comparison/compatibility'
 import { ScanDatabase } from '../src/main/storage/database'
 import type { CompletedScan } from '../src/main/storage/payloads'
 import { parseStorageResponse } from '../src/main/storage/workerProtocol'
@@ -247,6 +251,21 @@ test('rejects invalid queries and looks up migrated historical metadata after re
     expect(() => db.listScanHistory(query)).toThrow(
       expect.objectContaining({ code: 'INVALID_REQUEST' })
     )
+
+  const sameRoot = publish('same-root', { rootPath: legacyScan.rootPath })
+  const storedMetadata = (scanId: string): ReturnType<typeof comparisonMetadataForStoredScan> =>
+    comparisonMetadataForStoredScan(db.getScanHistoryMetadata({ scanId }))
+  expect(
+    evaluateComparisonCompatibility(
+      { baselineScanId: legacyScan.id, targetScanId: sameRoot.id },
+      storedMetadata(legacyScan.id),
+      storedMetadata(sameRoot.id)
+    )
+  ).toMatchObject({
+    status: 'compatible-with-warnings',
+    coverage: { baseline: 'incomplete', target: 'complete' },
+    warnings: [{ code: 'INCOMPLETE_COVERAGE', side: 'baseline' }]
+  })
 })
 
 test.each([

@@ -63,7 +63,39 @@ The global history target defaults to 10 completed snapshots and accepts integer
 
 Automatic retention prunes the oldest eligible snapshot by publication sequence, one transaction per snapshot. It preserves Latest and protected snapshots and can temporarily exceed the target. Maintenance resumes when a relevant lease is released and defers while a scan is building. A confirmed publication stands independently of pruning. The limit controls retained snapshot count. Deleted rows free SQLite pages for later writes, so the database file may stay near its previous peak size.
 
-The full History page, history management controls, comparisons, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
+The full History page, history management controls, Comparison UI, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
+
+## Snapshot comparison contracts
+
+A comparison is an ordered pair of distinct retained completed scan IDs. Baseline and Target stay fixed across publications. Reversing the pair swaps additions and removals and reverses signed deltas. A future default can use publication sequence for the older Baseline and newer Target.
+
+Schema v2 retains the Phase 4 root and entry metadata and adds publication order. The official scanners behind both schemas resolve absolute native paths, use read-only traversal with `lstat`, record symlinks without traversing them, and count logical bytes per regular-file entry. These shared invariants establish the traversal policy for current and migrated snapshots. Neither schema stores per-scan options, source platform, volume or inode identity, per-path coverage, or content hashes. The compatibility helper infers path style from recognizable native path syntax and reports insufficient metadata when style or policy cannot be established.
+
+Compatibility requires the same lexical root and traversal policy. Root normalization handles trailing separators, Windows drive letters, and conventional UNC paths while preserving exact component case, including server and share names. POSIX backslashes are literal. A nested root is a different scope. The same root path can refer to different physical volumes or objects over time. Opening a compatible pair still requires authorization and validation of both stored trees.
+
+### Matching and coverage
+
+The matching key is the root-relative path with slash separators and exact UTF-16 components. The empty key represents the root directory. Descendant keys must be within the root at a component boundary. Reject escaping components, ambiguous path spellings, and duplicate keys within either snapshot. Preserve case, Unicode code units, and literal POSIX backslashes. Entry IDs serve as snapshot-scoped Explorer references.
+
+A file record represents one path with a known regular file on at least one side. A confirmed missing file is Added or Removed. A directory, symlink, or other known non-file at the same path establishes a type replacement with the corresponding file-side event. An observed unknown entry type or unconfirmed absence yields Indeterminate. Two observed files are Modified when known logical size or the stored millisecond modification time differs. The scanner writes UTC ISO timestamps, and unusable stored timestamps count as unknown. Unchanged requires both fields to be known and equal. This establishes metadata equality. Creation time, content equality, and rename or move detection are outside this policy. Renamed or moved paths are classified independently.
+
+The scanner persists a global error count and discards individual traversal error events during ingestion. A missing row can establish absence on a side with zero reported errors. An incomplete or unknown coverage side leaves missing paths indeterminate. An observed file or known replacement remains usable on either side. Scans observe a live tree and can miss concurrent changes even when traversal reports no errors.
+
+If users need more definitive changes from partial snapshots, a future schema could add scan-scoped coverage markers at the smallest reliable subtree. The Scanner Worker would report that scope and whether the entry or its children could be enumerated. Batch ingestion would commit markers with the corresponding scan, and deletion would cascade to them. An explicit per-scan coverage capability would distinguish a scan with no markers from one produced before the feature. Older snapshots would keep the global fallback. This is an optional precision improvement for a later task.
+
+### Byte accounting and queries
+
+Known sizes and counts are non-negative safe integers. Deltas are signed Target minus Baseline safe integers. Confirmed absence of a regular file contributes zero to file accounting, including known type replacements. An unknown size or uncertain presence yields a null delta. A file with known sizes and unknown modification times may have a known byte delta with an Indeterminate classification.
+
+The five file counts are mutually exclusive and sum to the number of distinct file-centric keys. Confirmed byte totals sum known deltas from confirmed classifications and separately count confirmed changes whose deltas are unknown. Indeterminate rows do not contribute to that total. The difference between the two stored known-byte totals measures observed snapshot accounting and can differ from confirmed change totals or actual growth. Directory rows report observed subtree totals and count each descendant file key once per subtree. Nested rows overlap, so the overall summary must aggregate file keys directly. Future SQL should keep exact integer intermediates, reject overflow with `SIZE_OVERFLOW`, and convert only checked values to JavaScript numbers.
+
+Task 5.12 should derive keys inside the existing Storage Worker and preserve the existing UTF-16BE BLOB encoding for binary equality and UTF-16 ordering. Validate a key and its uniqueness per snapshot before joining. Root and path-component boundaries must survive subtree filtering. Delta sorts place unknown values last and break ties by ascending key. Schema v2 has scan, parent, root, and publication indexes but no matching-key index. The next task must choose and measure a bounded on-demand matching strategy with the existing schema. That strategy should account for disagreement between child paths and parent links, since existing tree validation checks reachability and aggregates. Comparison results will be computed on demand from retained snapshots.
+
+### Planned authorization and protection
+
+Task 5.16 will authorize the exact adopted ordered pair and its adoption identity in Main. Use one registry owner for the adopted pair and one for a single prepared replacement. Each owner holds up to two snapshots, so even a disjoint replacement can validate both candidates while the adopted pair stays protected. Swap only after both candidates validate and the renderer adopts their ticket. Failure, expiry, supersession, view exit, document invalidation, and shutdown release the corresponding owners. This uses at most two of the eight owner slots for Comparison.
+
+Comparison reads will independently reserve both scan IDs from bounded queue admission until the Worker settles or exits. A failed second reservation must release the first. The current 16 queued reads plus one active read would hold at most 34 request leases, alongside up to 16 owner leases, within the 64-ID retention exclusion limit. Publication keeps the pair fixed. A changed adoption invalidates outstanding replies, and a handoff to Explorer keeps the source pair protected until the destination acquires the exact selected snapshot or the handoff ends.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 
