@@ -57,6 +57,9 @@ export type ScanSession = ScanSessionDetails &
     | { readonly status: ScanOutcome; readonly finishedAt: string }
   )
 
+/** Metadata for a completed scan, whose known totals may still be partial. */
+export type CompletedScanMetadata = ScanSession & { readonly status: 'completed' }
+
 /** Cumulative observations; the total amount of work is not known in advance. */
 export interface ScanProgress {
   readonly scanId: string
