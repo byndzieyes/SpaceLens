@@ -65,8 +65,8 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return null
     case 'getPublishedScan':
       return requireDatabase().getPublishedScan()
-    case 'requirePublishedScan':
-      return requireDatabase().requirePublishedScan(request.payload.scanId)
+    case 'requireValidatedScan':
+      return requireDatabase().requireValidatedScan(request.payload.scanId)
     case 'listScanHistory':
       return requireDatabase().listScanHistory(request.payload)
     case 'getScanHistoryMetadata':
@@ -91,8 +91,8 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().listInsightsLargest(request.payload, 'directory')
     case 'getScanSnapshot':
       return requireDatabase().getScanSnapshot()
-    case 'openExplorerSnapshot':
-      return requireDatabase().openExplorerSnapshot(request.payload)
+    case 'openSavedSnapshot':
+      return requireDatabase().openSavedSnapshot(request.payload)
     case 'getScanEntry':
       return requireDatabase().getScanEntry(request.payload)
     case 'listScanDirectory':

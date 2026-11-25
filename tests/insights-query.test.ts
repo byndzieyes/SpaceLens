@@ -18,7 +18,7 @@ import {
 import type { ScannerIpcResult, SpaceLensAPI } from '../src/shared/ipc'
 
 const queries = {
-  requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
+  requireValidatedScan: vi.fn<StorageWorkerClient['requireValidatedScan']>(),
   listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
   getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
@@ -28,7 +28,7 @@ const queries = {
   listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
   listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
-  openExplorerSnapshot: vi.fn<StorageWorkerClient['openExplorerSnapshot']>(),
+  openSavedSnapshot: vi.fn<StorageWorkerClient['openSavedSnapshot']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
   getScanDirectoryTreemap: vi.fn<StorageWorkerClient['getScanDirectoryTreemap']>()
@@ -54,7 +54,7 @@ const completed: CompletedScan = {
 
 beforeEach(() => {
   read.mockClear()
-  queries.requirePublishedScan.mockReset()
+  queries.requireValidatedScan.mockReset()
   queries.getInsightsCategories.mockReset()
   queries.getInsightsSizeDistribution.mockReset()
   queries.getInsightsObservations.mockReset()
@@ -75,11 +75,11 @@ test.each([
 ])(
   'projects only the requested publication using its stored totals',
   async ({ summary, incomplete }) => {
-    queries.requirePublishedScan.mockResolvedValueOnce({ ...completed, summary })
+    queries.requireValidatedScan.mockResolvedValueOnce({ ...completed, summary })
     const result = await insights.getSummary(request, signal)
 
     expect(read).toHaveBeenCalledExactlyOnceWith(signal)
-    expect(queries.requirePublishedScan).toHaveBeenCalledExactlyOnceWith(request.scanId)
+    expect(queries.requireValidatedScan).toHaveBeenCalledExactlyOnceWith(request.scanId)
     expect(queries.getScanSnapshot).not.toHaveBeenCalled()
     expect(queries.getScanEntry).not.toHaveBeenCalled()
     expect(queries.listScanDirectory).not.toHaveBeenCalled()
@@ -121,19 +121,19 @@ test.each([
   new SnapshotAccessError('SNAPSHOT_EXPIRED', 'Old publication'),
   new StorageUnavailableError()
 ])('propagates %s without retrying', async (error) => {
-  queries.requirePublishedScan.mockRejectedValueOnce(error)
+  queries.requireValidatedScan.mockRejectedValueOnce(error)
   await expect(insights.getSummary(request, signal)).rejects.toBe(error)
   expect(read).toHaveBeenCalledOnce()
 })
 
 test('rejects a scoped storage reply containing a different scan ID', async () => {
-  queries.requirePublishedScan.mockResolvedValueOnce({ ...completed, id: 'replacement' })
+  queries.requireValidatedScan.mockResolvedValueOnce({ ...completed, id: 'replacement' })
   await expect(insights.getSummary(request, signal)).rejects.toThrow('different publication')
 })
 
 test('scoped Worker replies require a completed scan and exact numeric metadata', () => {
   const reply = { requestId: 1, ok: true, result: completed }
-  expect(parseStorageResponse(reply, 1, 'requirePublishedScan')).toEqual(reply)
+  expect(parseStorageResponse(reply, 1, 'requireValidatedScan')).toEqual(reply)
   for (const result of [
     null,
     { ...completed, status: 'running', finishedAt: null },
@@ -141,7 +141,7 @@ test('scoped Worker replies require a completed scan and exact numeric metadata'
     { ...completed, summary: { ...completed.summary, totalBytes: Number.MAX_SAFE_INTEGER + 1 } },
     { ...completed, summary: { ...completed.summary, fileCount: null } }
   ]) {
-    expect(() => parseStorageResponse({ ...reply, result }, 1, 'requirePublishedScan')).toThrow(
+    expect(() => parseStorageResponse({ ...reply, result }, 1, 'requireValidatedScan')).toThrow(
       'Invalid response'
     )
   }

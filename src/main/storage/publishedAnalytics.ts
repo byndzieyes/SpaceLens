@@ -17,7 +17,7 @@ import { extensionPage, FileTypeAnalytics } from './fileTypeAnalytics'
 import { LargestEntries } from './largestEntries'
 import type { CompletedScan } from './payloads'
 
-/** Analytics run synchronously on the Worker connection after published-scan validation. */
+/** Analytics run synchronously on the Worker connection after saved-snapshot validation. */
 export class PublishedAnalytics {
   private readonly cache = new AnalyticsCache()
   private readonly fileTypes: FileTypeAnalytics
@@ -30,8 +30,8 @@ export class PublishedAnalytics {
     this.distribution = prepareFileSizeDistribution(connection)
   }
 
-  usePublication(scanId: string): void {
-    this.cache.usePublication(scanId)
+  invalidate(scanId: string): void {
+    this.cache.invalidate(scanId)
   }
 
   clear(): void {
@@ -39,12 +39,12 @@ export class PublishedAnalytics {
   }
 
   getCategories(scan: CompletedScan): InsightsCategories {
-    this.usePublication(scan.id)
+    this.cache.useScan(scan.id)
     return this.cache.getOrCompute('categories', () => this.fileTypes.getCategories(scan))
   }
 
   getSizeDistribution(scan: CompletedScan): InsightsSizeDistribution {
-    this.usePublication(scan.id)
+    this.cache.useScan(scan.id)
     return this.cache.getOrCompute('sizeDistribution', () => this.distribution(scan))
   }
 
@@ -52,7 +52,7 @@ export class PublishedAnalytics {
     scan: CompletedScan,
     request: Required<InsightsExtensionRequest>
   ): InsightsExtensionPage {
-    this.usePublication(scan.id)
+    this.cache.useScan(scan.id)
     const cached = this.cache.get('extensions')
     if (cached) return extensionPage(cached, request, true)
     const { data, complete } = this.fileTypes.readExtensions(scan, request)
@@ -73,7 +73,7 @@ export class PublishedAnalytics {
   }
 
   getObservations(scan: CompletedScan): InsightsObservations {
-    this.usePublication(scan.id)
+    this.cache.useScan(scan.id)
     return this.cache.getOrCompute('observations', () =>
       buildObservations(
         { scanId: scan.id, summary: scan.summary },
@@ -91,7 +91,7 @@ export class PublishedAnalytics {
     scan: CompletedScan,
     type: InsightsRankedEntry['type']
   ): InsightsRankingPage {
-    this.usePublication(scan.id)
+    this.cache.useScan(scan.id)
     const key = type === 'file' ? 'largestFiles' : 'largestDirectories'
     return this.cache.getOrCompute(key, () =>
       this.largestEntries.list(scan, type, {

@@ -2,7 +2,7 @@
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
-import { StatementSync, type SQLOutputValue } from 'node:sqlite'
+import { DatabaseSync, StatementSync, type SQLOutputValue } from 'node:sqlite'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import {
   AnalyticsCache,
@@ -177,7 +177,7 @@ test('reuses all computed sources, full ranking pages, and the observation resul
   expect(kinds).toEqual(['extensions', 'sizeDistribution', 'categories', 'files', 'directories'])
 })
 
-test('keeps warm results during building, failure and cancellation, then invalidates on Latest change and restart', () => {
+test('keeps warm selected analytics during building, failed writes, publication, and unrelated deletion', () => {
   const prev = seed('previous', Array(20).fill(0))
   const executed = measureSql().kinds
   const previous = db.getInsightsObservations(prev.id)
@@ -194,18 +194,119 @@ test('keeps warm results during building, failure and cancellation, then invalid
   expect(executed).toEqual(['sizeDistribution'])
   const next = seed('replacement', [0, null])
   expect(db.getScan(prev.id)).toEqual(prev)
-  expect(() => db.getInsightsObservations(prev.id)).toThrow(
-    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
-  )
-  const replacement = db.getInsightsObservations(next.id)
-  expect(replacement).toMatchObject({ scanId: next.id, observations: [{ type: 'incompleteScan' }] })
+  expect(db.getInsightsObservations(prev.id)).toBe(previous)
+  const newer = seed('newer', [])
+  db.deleteSnapshot({ scanId: next.id })
+  db.deleteSnapshot({ scanId: newer.id })
+  expect(db.getInsightsObservations(prev.id)).toBe(previous)
+  expect(executed).toEqual(['sizeDistribution'])
+  const current = seed('current', [0, null])
+  const replacement = db.getInsightsObservations(current.id)
+  expect(replacement).toMatchObject({
+    scanId: current.id,
+    observations: [{ type: 'incompleteScan' }]
+  })
   expect(executed).toEqual(['sizeDistribution', 'sizeDistribution'])
   db.close()
   db = new ScanDatabase(databasePath)
   db.recoverStorage()
   expect(db.getScan(prev.id)).toEqual(prev)
-  expect(db.getInsightsObservations(next.id)).toEqual(replacement)
+  expect(db.getInsightsObservations(current.id)).toEqual(replacement)
   expect(executed).toEqual(['sizeDistribution', 'sizeDistribution', 'sizeDistribution'])
+})
+
+test('scopes every aggregate to one retained scan, reuses Explorer validation, and invalidates the deleted cached ID', () => {
+  const archive = seed('archive', [50, null, 100], ['photo.jpg', 'notes.txt', 'clip.mp4'])
+  const older = seed('older', [9, 8], ['readme.md', 'poster.png'])
+  const latest = seed('latest', [])
+  const get = StatementSync.prototype.get
+  const validated: unknown[] = []
+  vi.spyOn(StatementSync.prototype, 'get').mockImplementation(function (
+    this: StatementSync,
+    ...args: Parameters<StatementSync['get']>
+  ): Record<string, SQLOutputValue> | undefined {
+    if (this.sourceSQL.includes('WITH RECURSIVE reachable')) validated.push(args[0])
+    return Reflect.apply(get, this, args) as ReturnType<StatementSync['get']>
+  })
+
+  expect(db.getInsightsCategories(latest.id)).toMatchObject({ scanId: latest.id, categories: [] })
+  db.openSavedSnapshot({ scanId: archive.id })
+  expect(db.requireValidatedScan(archive.id)).toEqual(archive)
+  const categories = db.getInsightsCategories(archive.id)
+  expect(categories).toMatchObject({
+    scanId: archive.id,
+    incomplete: true,
+    totals: { fileCount: 3, knownBytes: 150, unknownSizeCount: 1 }
+  })
+  expect(db.getInsightsCategories(archive.id)).toBe(categories)
+  expect(db.listInsightsExtensions({ scanId: archive.id, offset: 1, limit: 1 })).toMatchObject({
+    scanId: archive.id,
+    totalCount: 3,
+    nextOffset: 2,
+    extensions: [{ extension: 'jpg' }]
+  })
+  expect(db.listInsightsLargest({ scanId: archive.id }, 'file')).toMatchObject({
+    scanId: archive.id,
+    entries: [
+      { id: 'file-2', name: 'clip.mp4', bytes: 100 },
+      { id: 'file-0', name: 'photo.jpg', bytes: 50 },
+      { id: 'file-1', name: 'notes.txt', bytes: null }
+    ]
+  })
+  expect(db.listInsightsLargest({ scanId: archive.id }, 'directory').entries[0]).toMatchObject({
+    id: 'folder-1',
+    scanId: archive.id,
+    bytes: 100
+  })
+  expect(db.getInsightsSizeDistribution(archive.id)).toMatchObject({
+    scanId: archive.id,
+    knownSizeCount: 2
+  })
+  expect(db.getInsightsObservations(archive.id)).toMatchObject({
+    scanId: archive.id,
+    observations: [{ type: 'incompleteScan' }]
+  })
+  expect(validated).toHaveLength(1)
+
+  expect(db.listInsightsLargest({ scanId: older.id }, 'file').entries[0]).toMatchObject({
+    id: 'file-0',
+    scanId: older.id,
+    name: 'readme.md',
+    bytes: 9
+  })
+  expect(db.getInsightsCategories(archive.id)).toEqual(categories)
+  expect(db.getInsightsCategories(archive.id)).not.toBe(categories)
+  expect(validated).toHaveLength(2)
+  db.deleteSnapshot({ scanId: archive.id })
+  expect(() => db.getInsightsCategories(archive.id)).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
+  )
+  seed(archive.id, [4], ['new.txt'])
+  expect(db.getInsightsCategories(archive.id)).toMatchObject({
+    scanId: archive.id,
+    totals: { fileCount: 1, knownBytes: 4, unknownSizeCount: 0 }
+  })
+  expect(db.getInsightsCategories(latest.id)).toMatchObject({ scanId: latest.id, categories: [] })
+})
+
+test('rejects corrupt retained analytics independently of Latest', () => {
+  const broken = seed('broken', [20])
+  const latest = seed('latest', [88])
+  using sqlite = new DatabaseSync(databasePath)
+  sqlite
+    .prepare("UPDATE entries SET size_bytes = 21 WHERE scan_id = ? AND id = 'file-0'")
+    .run(broken.id)
+  expect(() => db.getInsightsSizeDistribution(broken.id)).toThrow(
+    expect.objectContaining({
+      code: 'SNAPSHOT_UNAVAILABLE',
+      message: 'This saved snapshot failed integrity checks.'
+    })
+  )
+  expect(db.getInsightsSizeDistribution(latest.id)).toMatchObject({
+    scanId: latest.id,
+    totals: { knownBytes: 88 }
+  })
+  expect(db.getScan(broken.id)).toEqual(broken)
 })
 
 test('falls back to exact bounded SQL pages when more extension groups exist than the cache allows', () => {
@@ -277,7 +378,7 @@ function ranked(type: InsightsRankedEntry['type']): InsightsRankingPage {
 
 test('evicts the least recently used aggregate and rejects an oversized value or mismatched scan', () => {
   const cache = new AnalyticsCache()
-  cache.usePublication('saved')
+  cache.useScan('saved')
   const files = ranked('file')
   cache.set('largestFiles', files)
   cache.set('largestDirectories', ranked('directory'))
@@ -301,14 +402,14 @@ test('evicts the least recently used aggregate and rejects an oversized value or
   expect(cache.get('extensions')).toBe(extension)
   cache.set('largestDirectories', { ...ranked('directory'), scanId: 'another' })
   expect(cache.get('largestDirectories')).toBeUndefined()
-  cache.usePublication('replacement')
+  cache.useScan('replacement')
   expect(cache.estimatedBytes).toBe(0)
   expect(cache.get('largestFiles')).toBeUndefined()
 })
 
 test('does not cache a failed aggregate computation', () => {
   const cache = new AnalyticsCache()
-  cache.usePublication('saved')
+  cache.useScan('saved')
   const compute = vi
     .fn<() => InsightsRankingPage>()
     .mockImplementationOnce(() => {

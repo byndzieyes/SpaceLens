@@ -153,9 +153,7 @@ test('distinguishes unavailable explicit selections from failures and empty hist
     status: 'failed',
     error: { code: 'UNAVAILABLE' }
   })
-  expect(
-    await selections.loadForCurrentView('explorer', explicit('other'), () => true)
-  ).toMatchObject({
+  expect(await selections.loadExplorer(explicit('other'), () => true)).toMatchObject({
     ok: false,
     error: { code: 'SNAPSHOT_UNAVAILABLE' }
   })

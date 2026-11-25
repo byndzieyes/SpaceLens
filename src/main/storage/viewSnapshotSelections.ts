@@ -62,14 +62,19 @@ export function readSelectionRequest(value: unknown): SnapshotSelectionRequest {
 }
 
 export function readSelectionAdoption(value: unknown): SnapshotSelectionAdoption {
+  const refresh =
+    hasFields(value, 'view', 'ticket', 'keepCurrent') &&
+    value.view === 'insights' &&
+    value.keepCurrent === true
   if (
-    !hasFields(value, 'view', 'ticket') ||
+    (!refresh && !hasFields(value, 'view', 'ticket')) ||
+    !record(value) ||
     !validView(value.view) ||
     typeof value.ticket !== 'string' ||
     !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/.test(value.ticket)
   )
     return invalidRequest()
-  return { view: value.view, ticket: value.ticket }
+  return { view: value.view, ticket: value.ticket, ...(refresh ? { keepCurrent: true } : {}) }
 }
 
 export function readSelectionView(value: unknown): SnapshotView {
@@ -123,16 +128,14 @@ export class ViewSnapshotSelections {
         const { scanId } = selection
         const metadata = await acquire(scanId)
         requireCurrent()
-        if (view === 'explorer') {
-          const explorerSnapshot = await this.storage.read(
-            signal,
-            (client) => client.openExplorerSnapshot(scanId),
-            scanId
-          )
-          if (explorerSnapshot.entries.scanId !== scanId)
-            throw new Error('Storage returned a different Explorer snapshot.')
-          pending.explorerSnapshot = explorerSnapshot
-        }
+        const snapshot = await this.storage.read(
+          signal,
+          (client) => client.openSavedSnapshot(scanId),
+          scanId
+        )
+        if (snapshot.entries.scanId !== scanId)
+          throw new Error('Storage returned a different saved snapshot.')
+        if (view === 'explorer') pending.explorerSnapshot = snapshot
         resolution = { mode: 'explicit', metadata }
       } else {
         const discover = async (): Promise<SnapshotSelectionResolution> => {
@@ -175,12 +178,12 @@ export class ViewSnapshotSelections {
     }
   }
 
-  adopt({ view, ticket }: SnapshotSelectionAdoption): SnapshotSelectionAdoptionResult {
+  adopt({ view, ticket, keepCurrent }: SnapshotSelectionAdoption): SnapshotSelectionAdoptionResult {
     const slot = this.views.get(view)
     const pending = slot?.pending
     if (!slot || !pending?.expiry || pending.ticket !== ticket) throw inactive()
     const previous = slot.adopted?.scanId
-    if (pending.scanId !== previous)
+    if (pending.scanId !== previous || (view === 'insights' && !keepCurrent))
       slot.adopted = pending.scanId === undefined ? undefined : { scanId: pending.scanId }
     this.cancelPending(slot)
     if (previous !== undefined && previous !== slot.adopted?.scanId) slot.owner.release(previous)
@@ -194,16 +197,17 @@ export class ViewSnapshotSelections {
   }
 
   /** Use the adoption identity to reject replies from a previous selection or visit. */
-  authorizeExplorerRead(scanId: string): () => boolean {
-    const adopted = this.views.get('explorer')?.adopted
+  authorizeRead(view: SnapshotView, scanId: string): () => boolean {
+    const adopted = this.views.get(view)?.adopted
+    const title = view === 'explorer' ? 'Explorer' : 'Insights'
     if (!adopted)
       throw new SnapshotAccessError(
         'SNAPSHOT_UNAVAILABLE',
-        'Open a saved snapshot in Explorer first.'
+        `Open a saved snapshot in ${title} first.`
       )
     if (adopted.scanId !== scanId)
-      throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'Explorer is using a different snapshot.')
-    return () => this.views.get('explorer')?.adopted === adopted
+      throw new SnapshotAccessError('SNAPSHOT_EXPIRED', `${title} is using a different snapshot.`)
+    return () => this.views.get(view)?.adopted === adopted
   }
 
   release(view: SnapshotView): void {

@@ -70,7 +70,7 @@ interface StorageCommands {
   publishScan: { payload: ScanPublication; result: CompletedScan }
   discardBuildingScan: { payload: { scanId: string }; result: null }
   getPublishedScan: { payload: null; result: CompletedScan | null }
-  requirePublishedScan: { payload: { scanId: string }; result: CompletedScan }
+  requireValidatedScan: { payload: { scanId: string }; result: CompletedScan }
   listScanHistory: { payload: ScanHistoryQuery; result: ScanHistoryPage }
   getScanHistoryMetadata: { payload: ScanHistoryMetadataRequest; result: ScanHistoryItem }
   deleteSnapshot: { payload: SnapshotDeletionRequest; result: CommittedSnapshotDeletion }
@@ -92,7 +92,7 @@ interface StorageCommands {
     result: InsightsRankingPage
   }
   getScanSnapshot: { payload: null; result: ScanSnapshotAvailability }
-  openExplorerSnapshot: { payload: { scanId: string }; result: ScanSnapshot }
+  openSavedSnapshot: { payload: { scanId: string }; result: ScanSnapshot }
   getScanEntry: { payload: ScanEntryRequest; result: FileEntry }
   listScanDirectory: { payload: ScanDirectoryRequest; result: ScanDirectoryPage }
   getScanDirectoryTreemap: { payload: ScanDirectoryTreemapRequest; result: ScanDirectoryTreemap }
@@ -166,9 +166,9 @@ export function parseStorageRequest(value: unknown): StorageRequest {
     case 'getScanSnapshot':
       if (payload === null) return { requestId, operation, payload }
       break
-    case 'requirePublishedScan':
+    case 'requireValidatedScan':
     case 'getScanHistoryMetadata':
-    case 'openExplorerSnapshot':
+    case 'openSavedSnapshot':
     case 'deleteSnapshot':
     case 'getInsightsCategories':
     case 'getInsightsSizeDistribution':
@@ -637,7 +637,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     discardBuildingScan: isNull,
     getPublishedScan: (value): value is CompletedScan | null =>
       value === null || isCompletedScan(value),
-    requirePublishedScan: isCompletedScan,
+    requireValidatedScan: isCompletedScan,
     listScanHistory: isHistoryPage,
     getScanHistoryMetadata: isHistoryItem,
     deleteSnapshot: isCommittedDeletion,
@@ -652,7 +652,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     listInsightsLargestDirectories: (value): value is InsightsRankingPage =>
       isRankingPage(value, 'directory'),
     getScanSnapshot: isSnapshotAvailability,
-    openExplorerSnapshot: isSnapshot,
+    openSavedSnapshot: isSnapshot,
     getScanEntry: isStorageEntry,
     listScanDirectory: isDirectoryPage,
     getScanDirectoryTreemap: isDirectoryTreemap,

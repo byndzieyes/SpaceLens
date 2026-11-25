@@ -1,6 +1,7 @@
 import { useRef } from 'react'
 import { CircleAlert, Folder, FolderSearch, LoaderCircle } from 'lucide-react'
 import type { InsightsSummary } from '../../../shared/insights'
+import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 import { InsightsCategoriesSection } from '../features/insights/InsightsCategoriesSection'
@@ -60,27 +61,46 @@ function PublishedScan({ scan }: { scan: InsightsSummary }): React.JSX.Element {
 export function InsightsPage({
   onOpenOverview,
   onOpenExplorer,
-  snapshots
+  snapshots,
+  onFollowLatest
 }: {
   onOpenOverview: () => void
   onOpenExplorer?: (target: ExplorerTarget) => void
   snapshots?: ViewSnapshotOptions
+  onFollowLatest?: () => void
 }): React.JSX.Element {
-  const { state, retry, recheckPublication } = useInsights(snapshots)
+  const { state, historical, retry, recheckPublication } = useInsights(snapshots)
+  const explicit = snapshots?.selection.mode === 'explicit'
   const title = useRef<HTMLHeadingElement>(null)
-  const analyticsScanId =
-    state.status === 'ready'
-      ? state.summary.scanId
-      : state.status !== 'no-snapshot'
-        ? state.analyticsScanId
-        : undefined
+  const analytics = state.status === 'no-snapshot' ? undefined : state.analytics
+  const analyticsScanId = analytics?.scanId
+  const openRankedEntry =
+    onOpenExplorer &&
+    ((entry: ExplorerTarget): void => {
+      if (entry.scanId === analyticsScanId) onOpenExplorer(entry)
+    })
 
   return (
     <div className="min-w-0 space-y-8 sm:space-y-10">
-      <header>
+      <header className="space-y-2">
         <h2 ref={title} tabIndex={-1} className="text-2xl font-semibold tracking-tight sm:text-3xl">
           Storage Insights
         </h2>
+        <div className="flex flex-wrap items-center gap-2">
+          <Badge>{explicit ? 'Explicit snapshot' : 'Following Latest'}</Badge>
+          {analyticsScanId && historical && <Badge>Historical snapshot</Badge>}
+          {explicit && onFollowLatest && (
+            <Button
+              variant="secondary"
+              onClick={(event) => {
+                event.currentTarget.closest('main')?.focus({ preventScroll: true })
+                onFollowLatest()
+              }}
+            >
+              Follow Latest
+            </Button>
+          )}
+        </div>
       </header>
 
       <Card aria-labelledby="insights-scan-title" className="min-w-0 space-y-4">
@@ -88,7 +108,7 @@ export function InsightsPage({
           id="insights-scan-title"
           className="border-b border-separator pb-4 text-sm font-semibold"
         >
-          Published scan
+          {explicit ? 'Selected snapshot' : 'Published scan'}
         </h3>
         {state.status === 'loading' && (
           <p role="status" className="flex items-center gap-2 py-2 text-sm text-text-secondary">
@@ -97,7 +117,7 @@ export function InsightsPage({
               className="shrink-0 text-accent motion-safe:animate-spin"
               aria-hidden="true"
             />
-            {state.refreshing ? 'Loading the latest scan…' : 'Loading saved scan…'}
+            {state.refreshing && !explicit ? 'Loading the latest scan…' : 'Loading saved scan…'}
           </p>
         )}
         {state.status === 'no-snapshot' && (
@@ -123,9 +143,11 @@ export function InsightsPage({
         {state.status === 'error' && (
           <div className="space-y-3">
             <p role="alert" className="text-sm text-error">
-              {state.analyticsScanId
+              {analyticsScanId
                 ? 'SpaceLens couldn’t load the scan summary. Try again.'
-                : errorMessages[state.reason]}
+                : explicit && state.reason !== 'read'
+                  ? 'This saved snapshot is unavailable. Reload to retry this selection.'
+                  : errorMessages[state.reason]}
             </p>
             <Button
               variant="secondary"
@@ -140,40 +162,40 @@ export function InsightsPage({
         )}
         {state.status === 'ready' && <PublishedScan scan={state.summary} />}
       </Card>
-      {analyticsScanId && (
-        <div key={analyticsScanId} className="space-y-6">
+      {analytics && (
+        <div key={analytics.generation} className="space-y-6">
           {state.status === 'ready' && <InsightsSummaryCards summary={state.summary.summary} />}
           <InsightsCategoriesSection
-            scanId={analyticsScanId}
+            scanId={analytics.scanId}
             recheckPublication={recheckPublication}
             pageTitle={title}
           />
           <InsightsSizeDistributionSection
-            scanId={analyticsScanId}
+            scanId={analytics.scanId}
             recheckPublication={recheckPublication}
             pageTitle={title}
           />
           <div className="grid min-w-0 items-start gap-6 xl:grid-cols-2">
             <InsightsLargestFilesSection
-              scanId={analyticsScanId}
+              scanId={analytics.scanId}
               recheckPublication={recheckPublication}
               pageTitle={title}
-              onOpenExplorer={onOpenExplorer}
+              onOpenExplorer={openRankedEntry}
             />
             <InsightsLargestDirectoriesSection
-              scanId={analyticsScanId}
+              scanId={analytics.scanId}
               recheckPublication={recheckPublication}
               pageTitle={title}
-              onOpenExplorer={onOpenExplorer}
+              onOpenExplorer={openRankedEntry}
             />
           </div>
           <InsightsExtensionsSection
-            scanId={analyticsScanId}
+            scanId={analytics.scanId}
             recheckPublication={recheckPublication}
             pageTitle={title}
           />
           <InsightsObservationsSection
-            scanId={analyticsScanId}
+            scanId={analytics.scanId}
             recheckPublication={recheckPublication}
             pageTitle={title}
           />

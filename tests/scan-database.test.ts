@@ -665,7 +665,7 @@ test('reads Explorer metadata across reopen and browses retained scans with iden
   ).toThrow(expect.objectContaining({ code: 'NOT_DIRECTORY' }))
 
   reopened.publishScan(next, 'root')
-  expect(reopened.openExplorerSnapshot({ scanId: old.id })).toEqual(expected.snapshot)
+  expect(reopened.openSavedSnapshot({ scanId: old.id })).toEqual(expected.snapshot)
   expect(reopened.getScanEntry(oldRoot)).toEqual(root(old.id))
   expect(reopened.listScanDirectory({ ...oldRoot, offset: 0, limit: 100 })).toMatchObject({
     scanId: old.id,
@@ -726,7 +726,7 @@ test.each([
       code: 'SNAPSHOT_UNAVAILABLE',
       message: 'This saved snapshot failed integrity checks.'
     })
-    expect(() => reopened.openExplorerSnapshot({ scanId: historical.id })).toThrow(invalid)
+    expect(() => reopened.openSavedSnapshot({ scanId: historical.id })).toThrow(invalid)
     expect(() => reopened.getScanEntry({ scanId: historical.id, entryId: top.id })).toThrow(invalid)
     expect(reopened.getPublishedScan()).toEqual(latest)
     expect(reopened.getScan(historical.id)?.status).toBe('completed')
@@ -739,22 +739,22 @@ test('reuses a successful historical validation, resets it on reopen, and retrie
   const previous = db.publishScan(readyScan(db, 'previous'), 'root')
   db.publishScan(readyScan(db, 'latest'), 'root')
   const request = { scanId: previous.id }
-  const expected = db.openExplorerSnapshot(request)
+  const expected = db.openSavedSnapshot(request)
   inspectDatabase((sql) =>
     sql.exec("UPDATE entries SET size_bytes = 21 WHERE scan_id = 'previous' AND id = 'file'")
   )
-  expect(db.openExplorerSnapshot(request)).toEqual(expected)
+  expect(db.openSavedSnapshot(request)).toEqual(expected)
   db.close()
 
   const reopened = open()
   reopened.recoverStorage()
-  expect(() => reopened.openExplorerSnapshot(request)).toThrow(
+  expect(() => reopened.openSavedSnapshot(request)).toThrow(
     expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
   )
   inspectDatabase((sql) =>
     sql.exec("UPDATE entries SET size_bytes = 20 WHERE scan_id = 'previous' AND id = 'file'")
   )
-  expect(reopened.openExplorerSnapshot(request)).toEqual(expected)
+  expect(reopened.openSavedSnapshot(request)).toEqual(expected)
 })
 
 test('invalidates historical validation on deletion before an ID can be reused', () => {
@@ -762,30 +762,30 @@ test('invalidates historical validation on deletion before an ID can be reused',
   const request = { scanId: 'reused' }
   db.publishScan(readyScan(db, request.scanId), 'root')
   db.publishScan(readyScan(db, 'latest'), 'root')
-  expect(db.openExplorerSnapshot(request).summary.totalBytes).toBe(20)
+  expect(db.openSavedSnapshot(request).summary.totalBytes).toBe(20)
   db.deleteSnapshot(request)
-  expect(() => db.openExplorerSnapshot(request)).toThrow(
+  expect(() => db.openSavedSnapshot(request)).toThrow(
     expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
   )
   db.publishScan(readyScan(db, request.scanId, 37), 'root')
   db.publishScan(readyScan(db, 'new-latest'), 'root')
-  expect(db.openExplorerSnapshot(request).summary.totalBytes).toBe(37)
+  expect(db.openSavedSnapshot(request).summary.totalBytes).toBe(37)
 })
 
 test('evicts the least recently used validation when more than eight historical scans are opened', () => {
   const db = open()
   const ids = Array.from({ length: 9 }, (_, i) => `history-${i}`)
   for (const id of [...ids, 'latest']) db.publishScan(readyScan(db, id), 'root')
-  for (const id of ids.slice(0, 8)) db.openExplorerSnapshot({ scanId: id })
-  db.openExplorerSnapshot({ scanId: ids[0] })
-  db.openExplorerSnapshot({ scanId: ids[8] })
+  for (const id of ids.slice(0, 8)) db.openSavedSnapshot({ scanId: id })
+  db.openSavedSnapshot({ scanId: ids[0] })
+  db.openSavedSnapshot({ scanId: ids[8] })
   inspectDatabase((sql) =>
     sql.exec(
       "UPDATE entries SET size_bytes = 21 WHERE scan_id IN ('history-0', 'history-1') AND id = 'file'"
     )
   )
-  expect(db.openExplorerSnapshot({ scanId: ids[0] }).summary.totalBytes).toBe(20)
-  expect(() => db.openExplorerSnapshot({ scanId: ids[1] })).toThrow(
+  expect(db.openSavedSnapshot({ scanId: ids[0] }).summary.totalBytes).toBe(20)
+  expect(() => db.openSavedSnapshot({ scanId: ids[1] })).toThrow(
     expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
   )
 })
@@ -881,7 +881,7 @@ test('returns historical metadata and deterministic pages and Treemap for mixed 
   })
   expect(db.getScanSnapshot().snapshot?.entryCount).toBe(files.length + 7)
   db.publishScan(readyScan(db, 'latest'), 'root')
-  expect(db.openExplorerSnapshot({ scanId: pending.id })).toEqual(saved.snapshot)
+  expect(db.openSavedSnapshot({ scanId: pending.id })).toEqual(saved.snapshot)
   for (const entry of [...files, ...otherEntries, leaf]) {
     expect(db.getScanEntry({ scanId: pending.id, entryId: entry.id })).toEqual(entry)
   }
@@ -1663,13 +1663,12 @@ test('ignores non-completed rows when discovering Latest and distinguishes their
   expect(db.getScan(running.id)).toEqual(running)
   expect(db.getScan('missing')).toBeNull()
   for (const id of ['failed', 'cancelled', running.id]) {
-    expect(() => db.requirePublishedScan(id)).toThrow(
+    expect(() => db.requireValidatedScan(id)).toThrow(
       expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
     )
   }
-  for (const id of [first.id, 'missing']) {
-    expect(() => db.requirePublishedScan(id)).toThrow(
-      expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
-    )
-  }
+  expect(db.requireValidatedScan(first.id)).toEqual(first)
+  expect(() => db.requireValidatedScan('missing')).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
+  )
 })

@@ -21,7 +21,7 @@ export class InsightsQueryService {
     const scanId = readSnapshotId(request)
     const scan = await this.storage.read(
       signal,
-      (client) => client.requirePublishedScan(scanId),
+      (client) => client.requireValidatedScan(scanId),
       scanId
     )
     assertPublication(scan.id, scanId)

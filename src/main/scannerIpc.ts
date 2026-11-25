@@ -190,7 +190,6 @@ export function registerScannerIpc(
   let readContext = new AbortController()
   let viewSelections = new ViewSnapshotSelections(storage, readContext.signal)
   let documentNavigating = false
-  const insights = new InsightsQueryService(storage)
 
   const clearApproval = (): void => {
     approval = null
@@ -387,6 +386,15 @@ export function registerScannerIpc(
     }
   )
 
+  const insightsChannels = [
+    IPC_CHANNELS.getInsightsSummary,
+    IPC_CHANNELS.getInsightsCategories,
+    IPC_CHANNELS.getInsightsSizeDistribution,
+    IPC_CHANNELS.getInsightsObservations,
+    IPC_CHANNELS.listInsightsExtensions,
+    IPC_CHANNELS.listInsightsLargestFiles,
+    IPC_CHANNELS.listInsightsLargestDirectories
+  ] as const
   const snapshotChannels = [
     IPC_CHANNELS.getScanSnapshot,
     IPC_CHANNELS.listScanHistory,
@@ -397,13 +405,7 @@ export function registerScannerIpc(
     IPC_CHANNELS.getScanEntry,
     IPC_CHANNELS.listScanDirectory,
     IPC_CHANNELS.getScanDirectoryTreemap,
-    IPC_CHANNELS.getInsightsSummary,
-    IPC_CHANNELS.getInsightsCategories,
-    IPC_CHANNELS.getInsightsSizeDistribution,
-    IPC_CHANNELS.getInsightsObservations,
-    IPC_CHANNELS.listInsightsExtensions,
-    IPC_CHANNELS.listInsightsLargestFiles,
-    IPC_CHANNELS.listInsightsLargestDirectories
+    ...insightsChannels
   ] as const
   for (const channel of snapshotChannels) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
@@ -413,9 +415,12 @@ export function registerScannerIpc(
         channel === IPC_CHANNELS.getScanEntry ||
         channel === IPC_CHANNELS.listScanDirectory ||
         channel === IPC_CHANNELS.getScanDirectoryTreemap
-      if (explorerRead && documentNavigating)
-        return failure('UNAUTHORIZED', 'Explorer access is not authorized.')
+      const insightsRead = insightsChannels.some((candidate) => candidate === channel)
+      const viewTitle = insightsRead ? 'Insights' : 'Explorer'
+      if ((explorerRead || insightsRead) && documentNavigating)
+        return failure('UNAUTHORIZED', `${viewTitle} access is not authorized.`)
       const { signal } = readContext
+      const selections = viewSelections
       let stillSelected: (() => boolean) | undefined
       const history =
         channel === IPC_CHANNELS.listScanHistory ||
@@ -427,20 +432,10 @@ export function registerScannerIpc(
         signal.aborted || !authorized(event)
           ? failure(
               'UNAVAILABLE',
-              history
-                ? 'The History context is no longer available.'
-                : channel === IPC_CHANNELS.getInsightsSummary ||
-                    channel === IPC_CHANNELS.getInsightsCategories ||
-                    channel === IPC_CHANNELS.getInsightsSizeDistribution ||
-                    channel === IPC_CHANNELS.getInsightsObservations ||
-                    channel === IPC_CHANNELS.listInsightsExtensions ||
-                    channel === IPC_CHANNELS.listInsightsLargestFiles ||
-                    channel === IPC_CHANNELS.listInsightsLargestDirectories
-                  ? 'The Insights context is no longer available.'
-                  : 'The Explorer context is no longer available.'
+              `The ${history ? 'History' : viewTitle} context is no longer available.`
             )
           : stillSelected && !stillSelected()
-            ? failure('SNAPSHOT_EXPIRED', 'The Explorer selection changed during this request.')
+            ? failure('SNAPSHOT_EXPIRED', `The ${viewTitle} selection changed during this request.`)
             : result
       try {
         if (channel === IPC_CHANNELS.getScanSnapshot) {
@@ -496,30 +491,35 @@ export function registerScannerIpc(
           if (value.id !== scanId) throw new Error('Storage returned a different history scan.')
           return reply({ ok: true, value })
         }
-        if (channel === IPC_CHANNELS.getInsightsSummary) {
-          const value = await insights.getSummary(args[0], signal)
-          return reply({ ok: true, value })
-        }
-        if (channel === IPC_CHANNELS.getInsightsCategories) {
-          const value = await insights.getCategories(args[0], signal)
-          return reply({ ok: true, value })
-        }
-        if (channel === IPC_CHANNELS.getInsightsSizeDistribution) {
-          const value = await insights.getSizeDistribution(args[0], signal)
-          return reply({ ok: true, value })
-        }
-        if (channel === IPC_CHANNELS.getInsightsObservations) {
-          const value = await insights.getObservations(args[0], signal)
-          return reply({ ok: true, value })
-        }
-        if (channel === IPC_CHANNELS.listInsightsExtensions) {
-          const value = await insights.listExtensions(args[0], signal)
-          return reply({ ok: true, value })
-        }
-        if (
-          channel === IPC_CHANNELS.listInsightsLargestFiles ||
-          channel === IPC_CHANNELS.listInsightsLargestDirectories
-        ) {
+        if (insightsRead) {
+          // Request parsing in the service precedes authorization and admission.
+          const insights = new InsightsQueryService({
+            read: (context, query, scanId) => {
+              if (scanId === undefined) throw new Error('Insights requires a scan ID.')
+              stillSelected = selections.authorizeRead('insights', scanId)
+              return storage.read(context, query, scanId)
+            }
+          })
+          if (channel === IPC_CHANNELS.getInsightsSummary) {
+            const value = await insights.getSummary(args[0], signal)
+            return reply({ ok: true, value })
+          }
+          if (channel === IPC_CHANNELS.getInsightsCategories) {
+            const value = await insights.getCategories(args[0], signal)
+            return reply({ ok: true, value })
+          }
+          if (channel === IPC_CHANNELS.getInsightsSizeDistribution) {
+            const value = await insights.getSizeDistribution(args[0], signal)
+            return reply({ ok: true, value })
+          }
+          if (channel === IPC_CHANNELS.getInsightsObservations) {
+            const value = await insights.getObservations(args[0], signal)
+            return reply({ ok: true, value })
+          }
+          if (channel === IPC_CHANNELS.listInsightsExtensions) {
+            const value = await insights.listExtensions(args[0], signal)
+            return reply({ ok: true, value })
+          }
           const type = channel === IPC_CHANNELS.listInsightsLargestFiles ? 'file' : 'directory'
           const value = await insights.listLargest(args[0], type, signal)
           return reply({ ok: true, value })
@@ -527,7 +527,7 @@ export function registerScannerIpc(
         if (channel === IPC_CHANNELS.getScanDirectoryTreemap) {
           const request = args[0]
           validateTreemapRequest(request)
-          stillSelected = viewSelections.authorizeExplorerRead(request.scanId)
+          stillSelected = selections.authorizeRead('explorer', request.scanId)
           const value = await storage.read(
             signal,
             (client) => client.getScanDirectoryTreemap(request),
@@ -537,7 +537,7 @@ export function registerScannerIpc(
         }
         const request = args[0] as ScanEntryRequest | ScanDirectoryRequest
         validateSnapshotRequest(request, channel === IPC_CHANNELS.listScanDirectory)
-        stillSelected = viewSelections.authorizeExplorerRead(request.scanId)
+        stillSelected = selections.authorizeRead('explorer', request.scanId)
         if (channel === IPC_CHANNELS.getScanEntry) {
           const value = await storage.read(
             signal,

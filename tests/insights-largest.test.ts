@@ -288,11 +288,12 @@ test('keeps exact safe sizes and reports structured overflow even on a past-end 
   publish([max, file('largest', Number.MAX_SAFE_INTEGER, max)])
   expect(page('file').entries[0].bytes).toBe(Number.MAX_SAFE_INTEGER)
   expect(page('directory').entries[0].bytes).toBe(Number.MAX_SAFE_INTEGER)
-  updateSize('size_bytes', 'largest', 9_223_372_036_854_775_807n)
-  updateSize('aggregated_size_bytes', max.id, 9_007_199_254_740_992n)
-  // A publication is immutable during normal use. Reopen after deliberate fixture corruption.
+  // Reopen to clear cached analytics, then deliberately corrupt the validated fixture.
   db.close()
   db = new ScanDatabase(databasePath)
+  db.recoverStorage()
+  updateSize('size_bytes', 'largest', 9_223_372_036_854_775_807n)
+  updateSize('aggregated_size_bytes', max.id, 9_007_199_254_740_992n)
   expect(() => page('file', 20)).toThrow(expect.objectContaining({ code: 'SIZE_OVERFLOW' }))
   expect(() => page('directory')).toThrow(expect.objectContaining({ code: 'SIZE_OVERFLOW' }))
 })

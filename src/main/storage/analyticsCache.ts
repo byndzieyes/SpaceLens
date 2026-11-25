@@ -6,7 +6,7 @@ import type {
 } from '../../shared/insights'
 import type { ExtensionAggregate } from './fileTypeAnalytics'
 
-// Six fixed slots for one publication. Weights estimate retained JS values, not process RSS.
+// Six fixed slots for one completed snapshot. Weights estimate retained JS values, not process RSS.
 export const ANALYTICS_CACHE_BYTES = 512 * 1024
 export const MAX_CACHED_EXTENSION_GROUPS = 1024
 export const CACHED_EXTENSION_BASE_BYTES = 512
@@ -46,10 +46,14 @@ export class AnalyticsCache {
     return this.usedBytes
   }
 
-  usePublication(scanId: string): void {
+  useScan(scanId: string): void {
     if (this.scanId === scanId) return
     this.clear()
     this.scanId = scanId
+  }
+
+  invalidate(scanId: string): void {
+    if (this.scanId === scanId) this.clear()
   }
 
   clear(): void {

@@ -89,15 +89,16 @@ test('chooses replacement Latest in sequence order and preserves the high-water 
   expect(db.getInsightsCategories(third.id).scanId).toBe(third.id)
   expect(db.deleteSnapshot({ scanId: third.id }).latestCompleted).toEqual(second)
   expect(db.getInsightsCategories(second.id).scanId).toBe(second.id)
-  expect(() => db.getInsightsCategories(first.id)).toThrow(
-    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
-  )
+  expect(db.getInsightsCategories(first.id).scanId).toBe(first.id)
   expect(db.deleteSnapshot({ scanId: second.id }).latestCompleted).toEqual(first)
   expect(db.deleteSnapshot({ scanId: first.id })).toEqual({
     scanId: first.id,
     latestCompleted: null,
     latestCompletedScanId: null
   })
+  expect(() => db.getInsightsCategories(first.id)).toThrow(
+    expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
+  )
   expect(db.getScanSnapshot()).toEqual({ snapshot: null, unavailable: null })
   expect(db.listScanHistory({})).toMatchObject({
     items: [],

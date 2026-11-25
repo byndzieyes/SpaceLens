@@ -427,26 +427,14 @@ test('coordinates a real Worker after startup and prioritizes publication over E
     )
     const nextSnapshot = storage.read(signal, (db) => db.getScanSnapshot())
     const queuedHistory = storage.read(signal, (db) => db.listScanHistory({}))
-    const expiredSummary = expect(
-      insights.getSummary({ scanId: old.id }, signal)
-    ).rejects.toMatchObject({
-      code: 'SNAPSHOT_EXPIRED'
-    })
+    const oldSummary = insights.getSummary({ scanId: old.id }, signal)
     const nextSummary = insights.getSummary({ scanId: next.id }, signal)
     const observations = insights.getObservations({ scanId: next.id }, signal)
     const nextCategories = insights.getCategories({ scanId: next.id }, signal)
     const distribution = insights.getSizeDistribution({ scanId: next.id }, signal)
-    const expiredExtensions = expect(
-      insights.listExtensions({ scanId: old.id }, signal)
-    ).rejects.toMatchObject({
-      code: 'SNAPSHOT_EXPIRED'
-    })
+    const oldExtensions = insights.listExtensions({ scanId: old.id }, signal)
     const nextExtensions = insights.listExtensions({ scanId: next.id }, signal)
-    const oldRanking = expect(
-      insights.listLargest({ scanId: old.id }, 'file', signal)
-    ).rejects.toMatchObject({
-      code: 'SNAPSHOT_EXPIRED'
-    })
+    const oldRanking = insights.listLargest({ scanId: old.id }, 'file', signal)
     const nextRanking = insights.listLargest({ scanId: next.id }, 'file', signal)
     const page = storage.read(signal, (db) =>
       db.listScanDirectory({ scanId: next.id, entryId: root.id, offset: 0, limit: 100 })
@@ -459,9 +447,15 @@ test('coordinates a real Worker after startup and prioritizes publication over E
     expect(publishRequest.mock.invocationCallOrder[0]).toBeLessThan(
       entryRequest.mock.invocationCallOrder[0]
     )
-    await expiredSummary
-    await expiredExtensions
-    await oldRanking
+    expect(await oldSummary).toMatchObject({ scanId: old.id, summary: old.summary })
+    expect(await oldExtensions).toMatchObject({
+      scanId: old.id,
+      extensions: [{ extension: 'txt' }]
+    })
+    expect(await oldRanking).toMatchObject({
+      scanId: old.id,
+      entries: [{ id: file.id, scanId: old.id }]
+    })
     expect((await nextSnapshot).snapshot?.entries.scanId).toBe(next.id)
     expect(await queuedHistory).toMatchObject({
       items: [
@@ -683,22 +677,22 @@ test('reads exact Insights summaries from published rows across cancellation, re
   const previous = { ...lifecycleScan('previous'), rootPath: join(rootPath, "диск '📁'") }
   const request = { scanId: previous.id }
   await expect(insights.getSizeDistribution(request, signal)).rejects.toMatchObject({
-    code: 'SNAPSHOT_UNAVAILABLE'
+    code: 'SNAPSHOT_EXPIRED'
   })
   await expect(insights.getSummary(request, signal)).rejects.toMatchObject({
-    code: 'SNAPSHOT_UNAVAILABLE'
+    code: 'SNAPSHOT_EXPIRED'
   })
   await expect(insights.getCategories(request, signal)).rejects.toMatchObject({
-    code: 'SNAPSHOT_UNAVAILABLE'
+    code: 'SNAPSHOT_EXPIRED'
   })
   await expect(insights.listLargest(request, 'file', signal)).rejects.toMatchObject({
-    code: 'SNAPSHOT_UNAVAILABLE'
+    code: 'SNAPSHOT_EXPIRED'
   })
   await storage.beginScan(previous)
   await expect(insights.getSummary(request, signal)).rejects.toMatchObject({
     code: 'SNAPSHOT_UNAVAILABLE'
   })
-  await expect(client.requirePublishedScan('wrong/id')).rejects.toMatchObject({
+  await expect(client.requireValidatedScan('wrong/id')).rejects.toMatchObject({
     code: 'INVALID_REQUEST'
   })
   await expect(
@@ -900,9 +894,9 @@ test('reads exact Insights summaries from published rows across cancellation, re
       { type: 'directory-finalized', entry: { ...emptyRoot, aggregatedSizeBytes: 0 } }
     ])
     await restoredStorage.publishScan(empty, emptyRoot.id)
-    await expect(restoredInsights.getObservations(request, signal)).rejects.toMatchObject({
-      code: 'SNAPSHOT_EXPIRED'
-    })
+    await expect(restoredInsights.getObservations(request, signal)).resolves.toEqual(
+      previousObservations
+    )
     await expect(
       restoredInsights.getObservations({ scanId: replacement.id }, signal)
     ).resolves.toEqual({
@@ -910,9 +904,9 @@ test('reads exact Insights summaries from published rows across cancellation, re
       incomplete: false,
       observations: []
     })
-    await expect(restoredInsights.getSizeDistribution(request, signal)).rejects.toMatchObject({
-      code: 'SNAPSHOT_EXPIRED'
-    })
+    await expect(restoredInsights.getSizeDistribution(request, signal)).resolves.toEqual(
+      previousDistribution
+    )
     await expect(
       restoredInsights.getSizeDistribution({ scanId: replacement.id }, signal)
     ).resolves.toMatchObject({
@@ -920,12 +914,12 @@ test('reads exact Insights summaries from published rows across cancellation, re
       knownSizeCount: 0,
       totals: { fileCount: 0, knownBytes: 0, unknownSizeCount: 0 }
     })
-    await expect(restoredInsights.listLargest(request, 'directory', signal)).rejects.toMatchObject({
-      code: 'SNAPSHOT_EXPIRED'
-    })
-    await expect(restoredInsights.getCategories(request, signal)).rejects.toMatchObject({
-      code: 'SNAPSHOT_EXPIRED'
-    })
+    await expect(restoredInsights.listLargest(request, 'directory', signal)).resolves.toEqual(
+      previousDirectories
+    )
+    await expect(restoredInsights.getCategories(request, signal)).resolves.toEqual(
+      expectedCategories
+    )
     await expect(
       restoredInsights.listExtensions({ scanId: replacement.id }, signal)
     ).resolves.toMatchObject({
@@ -934,9 +928,7 @@ test('reads exact Insights summaries from published rows across cancellation, re
       nextOffset: null,
       extensions: []
     })
-    await expect(restoredInsights.getSummary(request, signal)).rejects.toMatchObject({
-      code: 'SNAPSHOT_EXPIRED'
-    })
+    await expect(restoredInsights.getSummary(request, signal)).resolves.toEqual(expected)
     await expect(restoredInsights.getSummary({ scanId: replacement.id }, signal)).resolves.toEqual({
       scanId: replacement.id,
       rootPath: replacement.rootPath,
@@ -956,11 +948,11 @@ test.each([
 ])(
   'returns a Worker error for inconsistent or overflowing distribution metadata ($code)',
   async ({ bytes, code, message }) => {
-    const seed = bundled()
-    await seed.initialize(databasePath)
-    const saved = await preparePublication(seed, lifecycleScan('saved'))
-    await seed.publishScan(saved, root.id)
-    await seed.dispose()
+    const client = bundled()
+    await client.initialize(databasePath)
+    const saved = await preparePublication(client, lifecycleScan('saved'))
+    await client.publishScan(saved, root.id)
+    // Corrupt a disposable snapshot after validation to exercise the distribution's own checks.
     const fixture = new DatabaseSync(databasePath)
     try {
       fixture
@@ -969,9 +961,6 @@ test.each([
     } finally {
       fixture.close()
     }
-    // Reopen without recovery so the test reaches the distribution's own checks.
-    const client = bundled()
-    await client.initialize(databasePath)
     await expect(client.getInsightsSizeDistribution(saved.id)).rejects.toMatchObject({
       code,
       message: expect.stringMatching(message)
@@ -1048,7 +1037,7 @@ test('queries published Explorer snapshots through the Worker and returns struct
     snapshot: { entries: { scanId: previous.id } }
   })
   await client.publishScan(next, root.id)
-  await expect(client.openExplorerSnapshot(previous.id)).resolves.toMatchObject({
+  await expect(client.openSavedSnapshot(previous.id)).resolves.toMatchObject({
     entries: { scanId: previous.id, rootEntryId: root.id },
     entryCount: 2
   })
@@ -1072,7 +1061,7 @@ test('queries published Explorer snapshots through the Worker and returns struct
     ...file,
     scanId: next.id
   })
-  await expect(reopened.openExplorerSnapshot(previous.id)).resolves.toMatchObject({
+  await expect(reopened.openSavedSnapshot(previous.id)).resolves.toMatchObject({
     entries: { scanId: previous.id },
     entryCount: 2
   })
@@ -1554,13 +1543,43 @@ test('reads completed history through the worker and coordinator across publicat
         ok: true,
         value: { scanId: first.id, entries: [{ id: file.id }], totalCount: 1 }
       })
-      await restored.discardBuildingScan(activeBuild.id)
       await expect(
         handlers.get(IPC_CHANNELS.getInsightsSummary)!(event, { scanId: first.id })
       ).resolves.toMatchObject({
         ok: false,
-        error: { code: 'SNAPSHOT_EXPIRED' }
+        error: { code: 'SNAPSHOT_UNAVAILABLE' }
       })
+      const historyInsights = {
+        view: 'insights',
+        selection: { mode: 'explicit', scanId: first.id }
+      } as const
+      const insightsPreparation = await prepareSelection(historyInsights)
+      if (!insightsPreparation.ok) throw new Error(insightsPreparation.error.message)
+      await expect(
+        handlers.get(IPC_CHANNELS.getInsightsSummary)!(event, { scanId: first.id })
+      ).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_UNAVAILABLE' } })
+      await expect(
+        handlers.get(IPC_CHANNELS.adoptSnapshotSelection)!(event, {
+          view: 'insights',
+          ticket: insightsPreparation.value.ticket
+        })
+      ).resolves.toEqual({ ok: true, value: null })
+      await expect(
+        handlers.get(IPC_CHANNELS.getInsightsSummary)!(event, { scanId: first.id })
+      ).resolves.toMatchObject({ ok: true, value: { scanId: first.id, summary: first.summary } })
+      await expect(
+        handlers.get(IPC_CHANNELS.listInsightsLargestFiles)!(event, { scanId: first.id })
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { scanId: first.id, entries: [{ id: file.id, parentId: root.id, scanId: first.id }] }
+      })
+      await expect(
+        handlers.get(IPC_CHANNELS.getInsightsCategories)!(event, { scanId: last.id })
+      ).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
+      await restored.discardBuildingScan(activeBuild.id)
+      await expect(
+        handlers.get(IPC_CHANNELS.releaseSnapshotSelection)!(event, { view: 'insights' })
+      ).resolves.toEqual({ ok: true, value: null })
       const follow = { view: 'explorer', selection: followLatest } as const
       await expect(select(follow)).resolves.toMatchObject({
         availability: { snapshot: { entries: { scanId: last.id } } }
@@ -1615,6 +1634,13 @@ test('reads completed history through the worker and coordinator across publicat
       await expect(select(follow)).resolves.toMatchObject({
         availability: { snapshot: { entries: { scanId: fresh.id } } }
       })
+      const destination = await prepareSelection({
+        view: 'explorer',
+        selection: { mode: 'explicit', scanId: last.id }
+      })
+      if (!destination.ok) throw new Error(destination.error.message)
+      // Retention is already waiting while Insights owns the historical source and Explorer is preparing it.
+      expect(retention.status).toBe('protected')
       expect(restored.isSnapshotProtected(last.id)).toBe(true)
       await expect(
         handlers.get(IPC_CHANNELS.deleteSnapshot)!(event, { scanId: last.id })
@@ -1623,10 +1649,40 @@ test('reads completed history through the worker and coordinator across publicat
         error: { code: 'SNAPSHOT_IN_USE' }
       })
       await expect(
-        handlers.get(IPC_CHANNELS.releaseSnapshotSelection)!(event, { view: 'insights' })
-      ).resolves.toEqual({
-        ok: true,
-        value: null
+        handlers.get(IPC_CHANNELS.adoptSnapshotSelection)!(event, {
+          view: 'explorer',
+          ticket: destination.value.ticket
+        })
+      ).resolves.toMatchObject({ ok: true, value: { entries: { scanId: last.id } } })
+      const started = Promise.withResolvers<void>()
+      const finish = Promise.withResolvers<void>()
+      const categories = reopened.getInsightsCategories.bind(reopened)
+      vi.spyOn(reopened, 'getInsightsCategories').mockImplementationOnce(async (scanId) => {
+        const value = await categories(scanId)
+        started.resolve()
+        await finish.promise
+        return value
+      })
+      const pending = handlers.get(IPC_CHANNELS.getInsightsCategories)!(event, { scanId: last.id })
+      try {
+        await started.promise
+        await expect(
+          handlers.get(IPC_CHANNELS.releaseSnapshotSelection)!(event, { view: 'insights' })
+        ).resolves.toEqual({ ok: true, value: null })
+        // Let the Explorer destination leave as well, so only the unsettled analytics request remains.
+        await expect(
+          handlers.get(IPC_CHANNELS.releaseSnapshotSelection)!(event, { view: 'explorer' })
+        ).resolves.toEqual({ ok: true, value: null })
+        expect(restored.isSnapshotProtected(last.id)).toBe(true)
+        await expect(
+          handlers.get(IPC_CHANNELS.deleteSnapshot)!(event, { scanId: last.id })
+        ).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_IN_USE' } })
+      } finally {
+        finish.resolve()
+      }
+      await expect(pending).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'SNAPSHOT_EXPIRED' }
       })
       await vi.waitFor(() =>
         expect(renderer.send).toHaveBeenCalledWith(
@@ -1649,6 +1705,7 @@ test('reads completed history through the worker and coordinator across publicat
       await expect(new RetentionSettingsStore(settingsPath).get()).resolves.toEqual({
         maxCompletedSnapshots: 1
       })
+      await select(follow)
       expect(restored.isSnapshotProtected(fresh.id)).toBe(true)
     } finally {
       await retention.stop()

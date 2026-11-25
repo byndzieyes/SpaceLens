@@ -127,8 +127,8 @@ export class StorageWorkerClient {
     return this.run('getPublishedScan', null)
   }
 
-  requirePublishedScan(scanId: string): Promise<CompletedScan> {
-    return this.run('requirePublishedScan', { scanId })
+  requireValidatedScan(scanId: string): Promise<CompletedScan> {
+    return this.run('requireValidatedScan', { scanId })
   }
 
   listScanHistory(query: ScanHistoryQuery): Promise<ScanHistoryPage> {
@@ -202,8 +202,8 @@ export class StorageWorkerClient {
     return this.run('getScanSnapshot', null)
   }
 
-  openExplorerSnapshot(scanId: string): Promise<ScanSnapshot> {
-    return this.run('openExplorerSnapshot', { scanId })
+  openSavedSnapshot(scanId: string): Promise<ScanSnapshot> {
+    return this.run('openSavedSnapshot', { scanId })
   }
 
   getScanEntry(request: ScanEntryRequest): Promise<FileEntry> {

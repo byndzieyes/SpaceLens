@@ -122,14 +122,14 @@ export function useExplorer(
     })
     try {
       const result = await resolveExplorerSnapshot(() =>
-        selections.loadForCurrentView('explorer', selection, isCurrent, handoff)
+        selections.loadExplorer(selection, isCurrent, handoff)
       )
       if (!isCurrent()) return
       if (!result.ok) {
         publish({ ...initial, loading: false, error: result.error, targetNotice })
         return
       }
-      setHistorical(selections.isHistoricalExplorerSelection())
+      setHistorical(selections.isHistoricalSelection('explorer'))
       const previous = current.current
       const availability = result.value
       const same =
@@ -241,7 +241,7 @@ export function useExplorer(
       if (update.revision <= revision) return
       revision = update.revision
       if (selection.mode === 'explicit') {
-        setHistorical(selections.isHistoricalExplorerSelection())
+        setHistorical(selections.isHistoricalSelection('explorer'))
         return
       }
       const session = update.state?.session

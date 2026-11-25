@@ -1,3 +1,9 @@
+import {
+  followLatest,
+  type SnapshotSelection,
+  type SnapshotView
+} from '../../shared/snapshotSelection'
+
 export const pageTitles = {
   overview: 'Overview',
   explorer: 'Explorer',
@@ -13,7 +19,6 @@ export interface ExplorerTarget {
   readonly parentId: string
   readonly type: 'file' | 'directory'
 }
-import type { SnapshotSelection, SnapshotView } from '../../shared/snapshotSelection'
 
 export type SnapshotNavigationTarget =
   | {
@@ -25,3 +30,15 @@ export type SnapshotNavigationTarget =
 
 export const isSnapshotView = (page: PageId): page is SnapshotView =>
   page === 'explorer' || page === 'insights'
+
+export function rankedExplorerTarget(
+  selection: SnapshotSelection,
+  entry: ExplorerTarget
+): SnapshotNavigationTarget {
+  return {
+    view: 'explorer',
+    selection:
+      selection.mode === 'explicit' ? { mode: 'explicit', scanId: entry.scanId } : followLatest,
+    entry
+  }
+}

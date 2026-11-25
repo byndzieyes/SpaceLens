@@ -7,9 +7,11 @@ import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
 import type { StorageBatchOperation } from '../src/main/storage/payloads'
 import App from '../src/renderer/src/App'
 import { ExplorerPage } from '../src/renderer/src/pages/ExplorerPage'
+import { InsightsPage } from '../src/renderer/src/pages/InsightsPage'
 import { useSnapshotSelections } from '../src/renderer/src/features/snapshots/selection'
 import { useSnapshotNavigation } from '../src/renderer/src/features/snapshots/useSnapshotNavigation'
-import type { SnapshotNavigationTarget } from '../src/renderer/src/navigation'
+import { rankedExplorerTarget, type SnapshotNavigationTarget } from '../src/renderer/src/navigation'
+import type { InsightsCategories } from '../src/shared/insights'
 import { mockSnapshotSelection } from './snapshot-selection-fixture'
 import type { ScannerIpcResult, ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
 import type { FileEntry, RecentScanSummary, ScanSessionState, ScanStatus } from '../src/shared/scan'
@@ -203,7 +205,7 @@ function mockApp(): {
     getAppInfo: vi.fn<SpaceLensAPI['getAppInfo']>(),
     getInsightsSummary: vi.fn(async ({ scanId }) =>
       read(scanId, (store) => {
-        const { rootPath, summary, finishedAt } = store.requirePublishedScan(scanId)
+        const { rootPath, summary, finishedAt } = store.requireValidatedScan(scanId)
         return {
           scanId,
           rootPath,
@@ -344,9 +346,15 @@ function historicalApp(...saved: SavedFixture[]): ReturnType<typeof mockApp> {
       }
     }
   })
-  api.adoptSnapshotSelection.mockImplementation(async ({ ticket }) => {
+  api.adoptSnapshotSelection.mockImplementation(async ({ view, ticket }) => {
     const fixture = retained.get(ticket)
-    return { ok: true, value: fixture?.database.openExplorerSnapshot({ scanId: ticket }) ?? null }
+    return {
+      ok: true,
+      value:
+        view === 'explorer'
+          ? (fixture?.database.openSavedSnapshot({ scanId: ticket }) ?? null)
+          : null
+    }
   })
   function browse<T>(scanId: string, query: (database: ScanDatabase) => T): ScannerIpcResult<T> {
     const fixture = retained.get(scanId)
@@ -362,6 +370,36 @@ function historicalApp(...saved: SavedFixture[]): ReturnType<typeof mockApp> {
   )
   api.getScanDirectoryTreemap.mockImplementation(async (request) =>
     browse(request.scanId, (db) => db.getScanDirectoryTreemap(request))
+  )
+  api.getInsightsSummary.mockImplementation(async ({ scanId }) =>
+    browse(scanId, (db) => {
+      const { rootPath, finishedAt, summary } = db.requireValidatedScan(scanId)
+      return {
+        scanId,
+        rootPath,
+        completedAt: finishedAt,
+        summary,
+        incomplete: summary.errorCount > 0
+      }
+    })
+  )
+  api.getInsightsCategories.mockImplementation(async ({ scanId }) =>
+    browse(scanId, (db) => db.getInsightsCategories(scanId))
+  )
+  api.getInsightsSizeDistribution.mockImplementation(async ({ scanId }) =>
+    browse(scanId, (db) => db.getInsightsSizeDistribution(scanId))
+  )
+  api.getInsightsObservations.mockImplementation(async ({ scanId }) =>
+    browse(scanId, (db) => db.getInsightsObservations(scanId))
+  )
+  api.listInsightsExtensions.mockImplementation(async (request) =>
+    browse(request.scanId, (db) => db.listInsightsExtensions(request))
+  )
+  api.listInsightsLargestFiles.mockImplementation(async (request) =>
+    browse(request.scanId, (db) => db.listInsightsLargest(request, 'file'))
+  )
+  api.listInsightsLargestDirectories.mockImplementation(async (request) =>
+    browse(request.scanId, (db) => db.listInsightsLargest(request, 'directory'))
   )
   return main
 }
@@ -391,9 +429,30 @@ function HistoricalExplorer({
             onFollowLatest={() => navigate('explorer')}
           />
         )}
+        {destination.page === 'insights' && (
+          <InsightsPage
+            key={destination.activation}
+            snapshots={viewOptions}
+            onOpenOverview={() => navigate('overview')}
+            onFollowLatest={() => navigate('insights')}
+            onOpenExplorer={(entry) =>
+              navigateToSnapshot(rankedExplorerTarget(viewOptions.selection, entry))
+            }
+          />
+        )}
       </main>
     </>
   )
+}
+
+function insightsTarget(
+  label: string,
+  scanId: string
+): {
+  label: string
+  destination: SnapshotNavigationTarget
+} {
+  return { label, destination: { view: 'insights', selection: { mode: 'explicit', scanId } } }
 }
 
 function savedTarget(
@@ -577,6 +636,168 @@ async function rankedAction(kind: 'files' | 'directories', path: string): Promis
   const ranking = await screen.findByRole('region', { name: `Largest ${kind}` })
   return within(ranking).findByRole('button', { name: `Open in Explorer: ${path}` })
 }
+
+test('keeps explicit Insights and its ranking page through publication, then resets on Follow Latest', async () => {
+  const alpha = publishedFixture('scan-a', 'Alpha', 1, 20)
+  const beta = publishedFixture('scan-b', 'Beta')
+  const { api, restore, publish, changeHistory } = historicalApp(alpha, beta)
+  restore(alpha)
+  const adopt = Promise.withResolvers<ScannerIpcResult<null>>()
+  api.adoptSnapshotSelection.mockReturnValueOnce(adopt.promise)
+  render(<HistoricalExplorer targets={[insightsTarget('Analyze Alpha', 'scan-a')]} />)
+  fireEvent.click(button('Analyze Alpha'))
+  expect(await screen.findByRole('status')).toHaveTextContent('Loading saved scan')
+  await waitFor(() => expect(api.adoptSnapshotSelection).toHaveBeenCalledOnce())
+  expect(api.getInsightsSummary).not.toHaveBeenCalled()
+  expect(api.getInsightsCategories).not.toHaveBeenCalled()
+  await act(async () => adopt.resolve({ ok: true, value: null }))
+  const context = panel('Selected snapshot')
+  expect(await context.findByText('/scans/Alpha')).toBeVisible()
+  expect(context.getByText('Some items couldn’t be scanned.')).toBeVisible()
+  expect(
+    screen.getByRole('region', { name: 'Selected snapshot' }).querySelector('time')
+  ).toHaveAttribute('datetime', alpha.snapshot.completedAt)
+  expect(screen.queryByText('Historical snapshot')).not.toBeInTheDocument()
+  const files = panel('Largest files')
+  await files.findByText('1–10 of 20 ranked files')
+  fireEvent.click(files.getByRole('button', { name: 'Next file ranking page' }))
+  await files.findByText('11–20 of 20 ranked files')
+  await act(async () => {
+    publish(beta)
+    changeHistory()
+  })
+  expect(screen.getByText('Historical snapshot')).toBeVisible()
+  expect(context.getByText('/scans/Alpha')).toBeVisible()
+  expect(files.getByText('11–20 of 20 ranked files')).toBeVisible()
+  expect(api.prepareSnapshotSelection).toHaveBeenCalledOnce()
+  expect(api.getInsightsSummary).toHaveBeenCalledExactlyOnceWith({ scanId: 'scan-a' })
+  fireEvent.click(button('Follow Latest'))
+  expect(await panel('Published scan').findByText('/scans/Beta')).toBeVisible()
+  expect(screen.queryByText('Historical snapshot')).not.toBeInTheDocument()
+  expect(await panel('Largest files').findByText('1–2 of 2 ranked files')).toBeVisible()
+  expect(screen.getByRole('main')).toHaveFocus()
+})
+
+test.each(['files', 'directories'] as const)(
+  'hands off historical ranked %s to the exact adopted Explorer snapshot',
+  async (kind) => {
+    const alpha = publishedFixture('scan-a', 'Alpha', 0, kind === 'files' ? 205 : 1, true)
+    const beta = publishedFixture('scan-b', 'Beta')
+    const gamma = publishedFixture('scan-c', 'Gamma')
+    const { api, restore, publish } = historicalApp(alpha, beta, gamma)
+    restore(beta)
+    render(<HistoricalExplorer targets={[insightsTarget('Analyze archive', 'scan-a')]} />)
+    fireEvent.click(button('Analyze archive'))
+    expect(await screen.findByText('Historical snapshot')).toBeVisible()
+    const path = kind === 'files' ? rankedFilePath : rankedDirectoryPath
+    const open = await rankedAction(kind, path)
+    const adopt =
+      Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['adoptSnapshotSelection']>>>()
+    api.adoptSnapshotSelection.mockReturnValueOnce(adopt.promise)
+    open.focus()
+    fireEvent.click(open)
+    expect(screen.getByRole('heading', { name: 'Storage Explorer' })).toHaveFocus()
+    expect(api.releaseSnapshotSelection).not.toHaveBeenCalled()
+    act(() => publish(gamma))
+    expect(api.releaseSnapshotSelection).not.toHaveBeenCalled()
+    expect(api.getScanEntry).not.toHaveBeenCalled()
+    await act(async () => adopt.resolve({ ok: true, value: alpha.snapshot }))
+    await chart('Leaf')
+    expect(api.prepareSnapshotSelection).toHaveBeenLastCalledWith({
+      view: 'explorer',
+      selection: { mode: 'explicit', scanId: 'scan-a' }
+    })
+    expect(api.releaseSnapshotSelection).toHaveBeenCalledExactlyOnceWith({ view: 'insights' })
+    expect(api.getScanEntry.mock.calls.every(([request]) => request.scanId === 'scan-a')).toBe(true)
+    if (kind === 'files') {
+      const contents = panel('Directory Contents')
+      expect(contents.getByText('Page 3 of 3 · 206 entries')).toBeVisible()
+      expect(contents.getByRole('button', { name: 'Ω-target.bin' })).toHaveAttribute(
+        'aria-pressed',
+        'true'
+      )
+      expect(panel('Details').getByText(path)).toBeVisible()
+    } else {
+      const breadcrumbs = within(screen.getByRole('navigation', { name: 'Breadcrumb' }))
+      expect(breadcrumbs.getByText('Leaf')).toHaveAttribute('aria-current', 'page')
+      expect(panel('Directory Tree').getByRole('button', { name: 'Leaf' })).toHaveAttribute(
+        'aria-current',
+        'location'
+      )
+    }
+  }
+)
+
+test('discards a superseded Insights selection and late section data after returning to the same ID', async () => {
+  const alpha = publishedFixture('scan-a', 'Alpha')
+  const beta = publishedFixture('scan-b', 'Beta')
+  const gamma = publishedFixture('scan-c', 'Gamma')
+  const { api, restore } = historicalApp(alpha, beta, gamma)
+  restore(gamma)
+  const late = Promise.withResolvers<ScannerIpcResult<InsightsCategories>>()
+  api.getInsightsCategories.mockReturnValueOnce(late.promise)
+  render(
+    <HistoricalExplorer
+      targets={[
+        insightsTarget('Analyze Alpha', 'scan-a'),
+        insightsTarget('Analyze Beta', 'scan-b'),
+        insightsTarget('Analyze Gamma', 'scan-c')
+      ]}
+    />
+  )
+  fireEvent.click(button('Analyze Alpha'))
+  await panel('Selected snapshot').findByText('/scans/Alpha')
+  await waitFor(() =>
+    expect(api.getInsightsCategories).toHaveBeenCalledExactlyOnceWith({ scanId: 'scan-a' })
+  )
+  const slow = Promise.withResolvers<void>()
+  const prepare = api.prepareSnapshotSelection.getMockImplementation()!
+  api.prepareSnapshotSelection.mockImplementationOnce(async (request) => {
+    const resolution = await prepare(request)
+    await slow.promise
+    return resolution
+  })
+  fireEvent.click(button('Analyze Beta'))
+  expect(panel('Selected snapshot').queryByText('/scans/Alpha')).not.toBeInTheDocument()
+  fireEvent.click(button('Analyze Gamma'))
+  await panel('Selected snapshot').findByText('/scans/Gamma')
+  fireEvent.click(button('Analyze Alpha'))
+  await panel('Selected snapshot').findByText('/scans/Alpha')
+  await panel('File categories').findByRole('figure')
+  await act(async () => {
+    slow.resolve()
+    late.resolve({ ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Previous visit' } })
+  })
+  expect(api.adoptSnapshotSelection.mock.calls.map(([request]) => request.ticket)).toEqual([
+    'scan-a',
+    'scan-c',
+    'scan-a'
+  ])
+  expect(panel('File categories').getByRole('figure')).toBeVisible()
+  expect(panel('File categories').queryByRole('alert')).not.toBeInTheDocument()
+})
+
+test.each(['SNAPSHOT_EXPIRED', 'SNAPSHOT_UNAVAILABLE'] as const)(
+  'keeps a failed explicit Insights selection visible for %s',
+  async (code) => {
+    const alpha = publishedFixture('scan-a', 'Alpha')
+    const { api, restore } = historicalApp(alpha)
+    restore(alpha)
+    api.prepareSnapshotSelection.mockResolvedValueOnce({
+      ok: false,
+      error: { code, message: 'Saved snapshot is unavailable.' }
+    })
+    render(<HistoricalExplorer targets={[insightsTarget('Analyze archive', 'broken')]} />)
+    fireEvent.click(button('Analyze archive'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'This saved snapshot is unavailable.'
+    )
+    expect(api.getInsightsSummary).not.toHaveBeenCalled()
+    expect(api.getScanSnapshot).not.toHaveBeenCalled()
+    fireEvent.click(button('Follow Latest'))
+    expect(await panel('Published scan').findByText('/scans/Alpha')).toBeVisible()
+  }
+)
 
 test('hands off a ranked file once and selects it from its exact Contents page', async () => {
   const { api, restore } = mockApp()

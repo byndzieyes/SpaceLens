@@ -1,6 +1,5 @@
-import { followLatest } from '../../shared/snapshotSelection'
 import { AppShell } from './components/layout/AppShell'
-import type { PageId } from './navigation'
+import { rankedExplorerTarget, type PageId } from './navigation'
 import { useSnapshotSelections } from './features/snapshots/selection'
 import { useSnapshotNavigation } from './features/snapshots/useSnapshotNavigation'
 import { OverviewPage } from './pages/OverviewPage'
@@ -33,8 +32,9 @@ function App(): React.JSX.Element {
         key={activation}
         snapshots={viewOptions}
         onOpenOverview={() => navigate('overview')}
+        onFollowLatest={() => navigate('insights')}
         onOpenExplorer={(entry) =>
-          navigateToSnapshot({ view: 'explorer', selection: followLatest, entry })
+          navigateToSnapshot(rankedExplorerTarget(viewOptions.selection, entry))
         }
       />
     ),

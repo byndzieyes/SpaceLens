@@ -61,7 +61,7 @@ let cancel: ReturnType<typeof vi.fn>
 let dispose: ReturnType<typeof vi.fn>
 let unsubscribe: ReturnType<typeof vi.fn>
 const queries = {
-  requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
+  requireValidatedScan: vi.fn<StorageWorkerClient['requireValidatedScan']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
   getInsightsSizeDistribution: vi.fn<StorageWorkerClient['getInsightsSizeDistribution']>(),
   getInsightsObservations: vi.fn<StorageWorkerClient['getInsightsObservations']>(),
@@ -69,7 +69,7 @@ const queries = {
   listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
   listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
-  openExplorerSnapshot: vi.fn<StorageWorkerClient['openExplorerSnapshot']>(),
+  openSavedSnapshot: vi.fn<StorageWorkerClient['openSavedSnapshot']>(),
   listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
   getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
@@ -160,6 +160,15 @@ async function adoptExplorer(scanId: string): Promise<void> {
   })
 }
 
+async function adoptInsights(scanId: string, keepCurrent = false): Promise<void> {
+  const { ticket } = await prepareExplicit(scanId, 'insights')
+  expect(
+    await invoke(IPC_CHANNELS.adoptSnapshotSelection, [
+      { view: 'insights', ticket, ...(keepCurrent ? { keepCurrent: true } : {}) }
+    ])
+  ).toEqual({ ok: true, value: null })
+}
+
 beforeEach(async () => {
   vi.clearAllMocks()
   for (const query of Object.values(queries)) query.mockReset()
@@ -169,7 +178,7 @@ beforeEach(async () => {
     protection.createOwner(signal, (scanId) => queries.getScanHistoryMetadata({ scanId }))
   )
   queries.getScanSnapshot.mockResolvedValue({ snapshot: null, unavailable: null })
-  queries.openExplorerSnapshot.mockImplementation(async (scanId): Promise<ScanSnapshot> => {
+  queries.openSavedSnapshot.mockImplementation(async (scanId): Promise<ScanSnapshot> => {
     const scan = completed()
     return {
       entries: { scanId, rootEntryId: 'root' },
@@ -356,7 +365,7 @@ test('an unrelated lease and a prepared Explorer selection grant no entry access
   const stale = invoke(IPC_CHANNELS.getScanEntry, [read])
   await adoptExplorer(otherId)
   await adoptExplorer(id)
-  first.resolve((await queries.openExplorerSnapshot(id)).root)
+  first.resolve((await queries.openSavedSnapshot(id)).root)
   expect(await stale).toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
   const oldDocument = event()
   renderer.emit('did-start-navigation', { isMainFrame: true })
@@ -635,7 +644,7 @@ test('keeps the acknowledged publication when recovery or later unsuccessful ses
   }
 })
 
-test('restores Latest to Overview, browses the adopted historical Explorer scan, and keeps Insights on Latest', async () => {
+test('restores Latest to Overview and uses independently adopted historical Explorer and Insights selections', async () => {
   const db = new ScanDatabase(':memory:')
   try {
     const previous = completed()
@@ -677,11 +686,9 @@ test('restores Latest to Overview, browses the adopted historical Explorer scan,
     })
 
     queries.getScanEntry.mockImplementation(async (request) => db.getScanEntry(request))
-    queries.openExplorerSnapshot.mockImplementation(async (scanId) =>
-      db.openExplorerSnapshot({ scanId })
-    )
-    queries.requirePublishedScan.mockImplementation(async (scanId) =>
-      db.requirePublishedScan(scanId)
+    queries.openSavedSnapshot.mockImplementation(async (scanId) => db.openSavedSnapshot({ scanId }))
+    queries.requireValidatedScan.mockImplementation(async (scanId) =>
+      db.requireValidatedScan(scanId)
     )
     const entry = { scanId: previous.id, entryId: root.id }
     expect(db.getEntry(previous.id, root.id)).toEqual({
@@ -710,8 +717,18 @@ test('restores Latest to Overview, browses the adopted historical Explorer scan,
     })
     expect(await invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: previous.id }])).toMatchObject({
       ok: false,
+      error: { code: 'SNAPSHOT_UNAVAILABLE' }
+    })
+    await adoptInsights(previous.id)
+    expect(await invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: previous.id }])).toMatchObject({
+      ok: true,
+      value: { scanId: previous.id, completedAt: previous.finishedAt }
+    })
+    expect(await invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: latest.id }])).toMatchObject({
+      ok: false,
       error: { code: 'SNAPSHOT_EXPIRED' }
     })
+    await adoptInsights(latest.id)
     expect(await invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: latest.id }])).toMatchObject({
       ok: true,
       value: { scanId: latest.id, completedAt: latest.finishedAt }
@@ -920,7 +937,7 @@ test.each([
     expect(queries.getScanEntry).not.toHaveBeenCalled()
     expect(queries.listScanDirectory).not.toHaveBeenCalled()
     expect(queries.getScanDirectoryTreemap).not.toHaveBeenCalled()
-    expect(queries.requirePublishedScan).not.toHaveBeenCalled()
+    expect(queries.requireValidatedScan).not.toHaveBeenCalled()
     expect(queries.getInsightsCategories).not.toHaveBeenCalled()
     expect(queries.listInsightsExtensions).not.toHaveBeenCalled()
     expect(queries.listInsightsLargestFiles).not.toHaveBeenCalled()
@@ -1055,13 +1072,14 @@ test('serves Insights through one authorized ID-only call on the existing read b
       error: { code: 'INVALID_REQUEST' }
     })
   }
-  expect(queries.requirePublishedScan).not.toHaveBeenCalled()
+  expect(queries.requireValidatedScan).not.toHaveBeenCalled()
 
+  await adoptInsights(id)
   const scan = {
     ...completed(),
     summary: { fileCount: 4, directoryCount: 2, totalBytes: 128, errorCount: 1 }
   }
-  queries.requirePublishedScan.mockResolvedValueOnce(scan)
+  queries.requireValidatedScan.mockResolvedValueOnce(scan)
   expect(await invoke(IPC_CHANNELS.getInsightsSummary, [request])).toEqual({
     ok: true,
     value: {
@@ -1072,15 +1090,16 @@ test('serves Insights through one authorized ID-only call on the existing read b
       incomplete: true
     }
   })
-  expect(queries.requirePublishedScan).toHaveBeenCalledExactlyOnceWith(id)
+  expect(queries.requireValidatedScan).toHaveBeenCalledExactlyOnceWith(id)
   expect(queries.getScanSnapshot).not.toHaveBeenCalled()
 })
 
 test('preserves Insights storage errors and hides other database diagnostics', async () => {
+  await adoptInsights(id)
   const query = (): Promise<ScannerIpcResult<unknown>> =>
     Promise.resolve(invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: id }]))
   for (const code of ['SNAPSHOT_UNAVAILABLE', 'SNAPSHOT_EXPIRED'] as const) {
-    queries.requirePublishedScan.mockRejectedValueOnce(
+    queries.requireValidatedScan.mockRejectedValueOnce(
       new StorageWorkerError({
         name: 'SnapshotAccessError',
         code,
@@ -1090,9 +1109,9 @@ test('preserves Insights storage errors and hides other database diagnostics', a
     )
     expect(await query()).toEqual({ ok: false, error: { code, message: 'Publication missing' } })
   }
-  queries.requirePublishedScan.mockRejectedValueOnce(new StorageUnavailableError())
+  queries.requireValidatedScan.mockRejectedValueOnce(new StorageUnavailableError())
   expect(await query()).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
-  queries.requirePublishedScan.mockRejectedValueOnce(new Error('private SQLite diagnostics'))
+  queries.requireValidatedScan.mockRejectedValueOnce(new Error('private SQLite diagnostics'))
   expect(await query()).toEqual({
     ok: false,
     error: { code: 'INTERNAL_ERROR', message: 'The snapshot request could not be processed.' }
@@ -1121,6 +1140,7 @@ test('validates file analytics requests, bounds extension pages and preserves ov
   }
   expect(queries.getInsightsCategories).not.toHaveBeenCalled()
   expect(queries.listInsightsExtensions).not.toHaveBeenCalled()
+  await adoptInsights(id)
   const common = {
     scanId: id,
     incomplete: false,
@@ -1150,12 +1170,105 @@ test('validates file analytics requests, bounds extension pages and preserves ov
 })
 
 test('discards a pending Insights response after the attached document navigates', async () => {
+  await adoptInsights(id)
   const pending = Promise.withResolvers<CompletedScan>()
-  queries.requirePublishedScan.mockReturnValueOnce(pending.promise)
+  queries.requireValidatedScan.mockReturnValueOnce(pending.promise)
   const response = invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: id }])
   renderer.emit('did-start-navigation', { isMainFrame: true })
   pending.resolve(completed())
   expect(await response).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+})
+
+test('requires an adopted Insights selection and rejects replies from earlier generations of the same ID', async () => {
+  const read = { scanId: id }
+  const result = { scanId: id, incomplete: false, observations: [] }
+  await adoptExplorer(id)
+  const prepared = await prepareExplicit(id, 'insights')
+  for (const channel of [
+    IPC_CHANNELS.getInsightsSummary,
+    IPC_CHANNELS.getInsightsCategories,
+    IPC_CHANNELS.getInsightsSizeDistribution,
+    IPC_CHANNELS.getInsightsObservations,
+    IPC_CHANNELS.listInsightsExtensions,
+    IPC_CHANNELS.listInsightsLargestFiles,
+    IPC_CHANNELS.listInsightsLargestDirectories
+  ]) {
+    expect(await invoke(channel, [read])).toMatchObject({
+      ok: false,
+      error: { code: 'SNAPSHOT_UNAVAILABLE' }
+    })
+  }
+  expect(queries.getInsightsObservations).not.toHaveBeenCalled()
+  await invoke(IPC_CHANNELS.adoptSnapshotSelection, [{ view: 'insights', ticket: prepared.ticket }])
+  expect(await invoke(IPC_CHANNELS.getInsightsObservations, [{ scanId: otherId }])).toMatchObject({
+    ok: false,
+    error: { code: 'SNAPSHOT_EXPIRED' }
+  })
+
+  const pending = Promise.withResolvers<typeof result>()
+  queries.getInsightsObservations.mockReturnValueOnce(pending.promise)
+  const old = invoke(IPC_CHANNELS.getInsightsObservations, [read])
+  await adoptInsights(otherId)
+  await adoptInsights(id)
+  pending.resolve(result)
+  expect(await old).toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
+
+  const beforeReadoption = Promise.withResolvers<typeof result>()
+  queries.getInsightsObservations.mockReturnValueOnce(beforeReadoption.promise)
+  const sameId = invoke(IPC_CHANNELS.getInsightsObservations, [read])
+  await adoptInsights(id)
+  beforeReadoption.resolve(result)
+  expect(await sameId).toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
+
+  const beforeRefresh = Promise.withResolvers<typeof result>()
+  queries.getInsightsObservations.mockReturnValueOnce(beforeRefresh.promise)
+  const current = invoke(IPC_CHANNELS.getInsightsObservations, [read])
+  await adoptInsights(id, true)
+  beforeRefresh.resolve(result)
+  expect(await current).toEqual({ ok: true, value: result })
+  const previousDocument = event()
+  renderer.emit('did-start-navigation', { isMainFrame: true })
+  renderer.mainFrame = { url }
+  renderer.emit('did-finish-load')
+  expect(
+    await invoke(IPC_CHANNELS.getInsightsObservations, [read], previousDocument)
+  ).toMatchObject({
+    ok: false,
+    error: { code: 'UNAUTHORIZED' }
+  })
+})
+
+test('does not issue an Insights adoption ticket for a historical snapshot that fails validation', async () => {
+  queries.getScanHistoryMetadata.mockResolvedValueOnce({
+    ...completed(),
+    durationMs: 1000,
+    isLatest: false,
+    incomplete: false
+  })
+  queries.openSavedSnapshot.mockRejectedValueOnce(
+    new StorageWorkerError({
+      name: 'SnapshotAccessError',
+      code: 'SNAPSHOT_UNAVAILABLE',
+      message: 'This saved snapshot failed integrity checks.',
+      sqliteCode: null
+    })
+  )
+  expect(
+    await invoke(IPC_CHANNELS.prepareSnapshotSelection, [
+      { view: 'insights', selection: { mode: 'explicit', scanId: id } }
+    ])
+  ).toEqual({
+    ok: false,
+    error: {
+      code: 'SNAPSHOT_UNAVAILABLE',
+      message: 'This saved snapshot failed integrity checks.'
+    }
+  })
+  expect(protection.isProtected(id)).toBe(false)
+  expect(await invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: id }])).toMatchObject({
+    ok: false,
+    error: { code: 'SNAPSHOT_UNAVAILABLE' }
+  })
 })
 
 test('serves observations on the authorized scan channel and aborts stale document replies', async () => {
@@ -1175,6 +1288,7 @@ test('serves observations on the authorized scan channel and aborts stale docume
     })
   }
   expect(query).not.toHaveBeenCalled()
+  await adoptInsights(id)
   const result = { scanId: id, incomplete: false, observations: [] }
   query.mockResolvedValueOnce(result)
   expect(await invoke(channel, [request])).toEqual({ ok: true, value: result })
@@ -1216,6 +1330,7 @@ test('serves the size distribution over authorized IPC with structured failures 
     })
   }
   expect(query).not.toHaveBeenCalled()
+  await adoptInsights(id)
   const distribution = {
     scanId: id,
     incomplete: false,
@@ -1280,6 +1395,7 @@ test.each([
       })
     }
     expect(query).not.toHaveBeenCalled()
+    await adoptInsights(id)
     const page = {
       scanId: id,
       incomplete: true,

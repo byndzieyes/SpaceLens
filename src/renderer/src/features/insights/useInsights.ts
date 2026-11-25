@@ -8,16 +8,18 @@ type ReadFailure = { code: ScannerIpcErrorCode; message: string }
 type ExpiredReference =
   | { scanId: string; source: 'summary'; error: ReadFailure }
   | { scanId: string; source: 'analytics' }
+type AnalyticsScope = { scanId: string; generation: string }
 type InsightsState =
-  | { status: 'loading'; refreshing: boolean; analyticsScanId?: string }
+  | { status: 'loading'; refreshing: boolean; analytics?: AnalyticsScope }
   | { status: 'no-snapshot' }
-  | { status: 'ready'; summary: InsightsSummary }
-  | { status: 'error'; reason: 'expired' | 'unavailable' | 'read'; analyticsScanId?: string }
+  | { status: 'ready'; summary: InsightsSummary; analytics: AnalyticsScope }
+  | { status: 'error'; reason: 'expired' | 'unavailable' | 'read'; analytics?: AnalyticsScope }
 
 const initialState: InsightsState = { status: 'loading', refreshing: false }
 
 export function useInsights(snapshots?: ViewSnapshotOptions): {
   state: InsightsState
+  historical: boolean
   retry: () => void
   recheckPublication: (scanId: string) => Promise<void>
 } {
@@ -26,6 +28,7 @@ export function useInsights(snapshots?: ViewSnapshotOptions): {
   const handoff = snapshots?.handoff
   const managed = snapshots !== undefined
   const [state, setState] = useState<InsightsState>(initialState)
+  const [historical, setHistorical] = useState(false)
   const retry = useRef<(() => void) | null>(null)
   const recheck = useRef<((scanId: string) => Promise<void>) | null>(null)
   const recheckPublication = useCallback(async (scanId: string) => {
@@ -37,90 +40,108 @@ export function useInsights(snapshots?: ViewSnapshotOptions): {
     let active = true
     let revision = -1
     let announcedScanId: string | null | undefined
-    let resolvedScanId: string | undefined
+    let resolved: AnalyticsScope | undefined
     let resolvedEmpty = false
-    let request: { scanId?: string; visibleScanId?: string } | undefined
+    let request: { target?: AnalyticsScope; visible?: AnalyticsScope } | undefined
     let started = false
 
     const load = async (
       refreshing: boolean,
       expired?: ExpiredReference,
-      retainedScanId?: string,
+      retained?: AnalyticsScope,
       initialHandoff?: ViewSnapshotOptions['handoff']
     ): Promise<void> => {
-      // A section failure stays local unless the read confirms a publication change.
+      // A section failure stays local unless the selected scan changes or becomes unavailable.
       const verifyingAnalytics = expired?.source === 'analytics'
       const pending: NonNullable<typeof request> = {
-        visibleScanId: verifyingAnalytics ? resolvedScanId : retainedScanId
+        visible: verifyingAnalytics ? resolved : retained
       }
       const announcedAtStart = announcedScanId
       started = true
       request = pending
-      const clearSummary = (analyticsScanId?: string): void => {
-        resolvedScanId = undefined
+      const clearSummary = (analytics?: AnalyticsScope): void => {
+        resolved = undefined
         resolvedEmpty = false
-        setState({ status: 'loading', refreshing, analyticsScanId })
+        setState({ status: 'loading', refreshing, analytics })
       }
-      if (!verifyingAnalytics) clearSummary(retainedScanId)
+      if (!verifyingAnalytics) clearSummary(retained)
 
       const isCurrent = (): boolean => active && request === pending
       const fail = (detail: unknown, code?: ScannerIpcErrorCode): void => {
         if (!isCurrent()) return
         if (import.meta.env.DEV)
-          console.warn('Could not load Insights for the published scan.', detail)
-        if (verifyingAnalytics && resolvedScanId !== undefined) return
+          console.warn('Could not load Insights for the selected scan.', detail)
+        if (
+          verifyingAnalytics &&
+          resolved !== undefined &&
+          (selection.mode === 'follow-latest' ||
+            (code !== 'SNAPSHOT_UNAVAILABLE' && code !== 'SNAPSHOT_EXPIRED'))
+        )
+          return
         const reason =
           code === 'SNAPSHOT_EXPIRED'
             ? 'expired'
             : code === 'SNAPSHOT_UNAVAILABLE'
               ? 'unavailable'
               : 'read'
-        resolvedScanId = reason === 'read' ? (pending.scanId ?? pending.visibleScanId) : undefined
-        setState({ status: 'error', reason, analyticsScanId: resolvedScanId })
+        resolved = reason === 'read' ? (pending.target ?? pending.visible) : undefined
+        setState({ status: 'error', reason, analytics: resolved })
       }
 
       try {
-        const result = await selections.loadForCurrentView(
-          'insights',
+        const result = await selections.loadInsights(
           selection,
           isCurrent,
-          initialHandoff
+          initialHandoff,
+          pending.visible !== undefined
         )
         if (!isCurrent()) return
-        const scanId = result.ok ? (result.value.snapshot?.entries.scanId ?? null) : undefined
+        const scanId = result.ok ? result.value.scanId : undefined
         // A publication can be announced while the metadata read is returning an older snapshot.
         if (announcedScanId !== announcedAtStart && scanId !== announcedScanId) {
-          void load(true, expired, pending.visibleScanId)
+          void load(true, expired, pending.visible)
           return
         }
         if (!result.ok) {
           fail(result.error, result.error.code)
           return
         }
+        setHistorical(selections.isHistoricalSelection('insights'))
         if (!scanId) {
           const { unavailable } = result.value
           if (unavailable) fail(unavailable, 'SNAPSHOT_UNAVAILABLE')
           else {
-            resolvedScanId = undefined
+            resolved = undefined
             resolvedEmpty = true
             setState({ status: 'no-snapshot' })
           }
           return
         }
+        const scope = { scanId, generation: result.value.generation }
         if (expired?.scanId === scanId) {
-          if (expired.source === 'summary') fail(expired.error, expired.error.code)
-          else if (!pending.visibleScanId) fail({ scanId, announcedScanId }, 'SNAPSHOT_EXPIRED')
-          return
+          if (expired.source === 'summary') {
+            fail(expired.error, expired.error.code)
+            return
+          }
+          if (!pending.visible) {
+            fail({ scanId, announcedScanId }, 'SNAPSHOT_EXPIRED')
+            return
+          }
+          if (pending.visible.generation === scope.generation) return
         }
 
-        if (pending.visibleScanId && pending.visibleScanId !== scanId) clearSummary()
-        pending.scanId = scanId
+        if (pending.visible && pending.visible.generation !== scope.generation) clearSummary()
+        pending.target = scope
         const resultSummary = await api.getInsightsSummary({ scanId })
         if (!isCurrent()) return
         if (!resultSummary.ok) {
           const { error } = resultSummary
           // The worker may see the replacement before its notification reaches the renderer.
-          if (error.code === 'SNAPSHOT_EXPIRED' && expired?.source !== 'summary') {
+          if (
+            selection.mode === 'follow-latest' &&
+            error.code === 'SNAPSHOT_EXPIRED' &&
+            expired?.source !== 'summary'
+          ) {
             void load(true, { scanId, error, source: 'summary' })
           } else fail(error, error.code)
           return
@@ -129,8 +150,8 @@ export function useInsights(snapshots?: ViewSnapshotOptions): {
           fail({ expectedScanId: scanId, receivedScanId: resultSummary.value.scanId })
           return
         }
-        resolvedScanId = scanId
-        setState({ status: 'ready', summary: resultSummary.value })
+        resolved = scope
+        setState({ status: 'ready', summary: resultSummary.value, analytics: scope })
       } catch (error) {
         fail(error)
       } finally {
@@ -139,42 +160,46 @@ export function useInsights(snapshots?: ViewSnapshotOptions): {
     }
 
     const unsubscribe = selections.subscribeScanState((update: ScanStateSnapshot) => {
-      if (!active || selection.mode !== 'follow-latest' || update.revision <= revision) return
+      if (!active || update.revision <= revision) return
       revision = update.revision
+      if (selection.mode === 'explicit') {
+        setHistorical(selections.isHistoricalSelection('insights'))
+        return
+      }
       const published =
         update.latestCompleted?.id ??
         (update.latestCompleted === null && update.historyRevision !== undefined ? null : undefined)
       if (published === undefined || published === announcedScanId) return
       announcedScanId = published
       if (published === null) {
-        if (resolvedEmpty || (request && !request.scanId && !request.visibleScanId)) return
-        void load(resolvedScanId !== undefined || request !== undefined)
+        if (resolvedEmpty || (request && !request.target && !request.visible)) return
+        void load(resolved !== undefined || request !== undefined)
         return
       }
       if (
-        published === resolvedScanId ||
-        published === request?.scanId ||
-        published === request?.visibleScanId
+        published === resolved?.scanId ||
+        published === request?.target?.scanId ||
+        published === request?.visible?.scanId
       ) {
         return
       }
-      if (request && !request.scanId) {
+      if (request && !request.target) {
         // Keep the pending metadata read, but retire the old view as soon as Main announces a replacement.
-        if (request.visibleScanId) {
-          request.visibleScanId = undefined
-          resolvedScanId = undefined
+        if (request.visible) {
+          request.visible = undefined
+          resolved = undefined
           setState({ status: 'loading', refreshing: true })
         }
         return
       }
-      void load(resolvedScanId !== undefined || request !== undefined)
+      void load(resolved !== undefined || request !== undefined)
     })
 
     retry.current = () => {
-      if (active && !request) void load(false, undefined, resolvedScanId)
+      if (active && !request) void load(false, undefined, resolved)
     }
     recheck.current = async (scanId) => {
-      if (active && !request && resolvedScanId === scanId) {
+      if (active && !request && resolved?.scanId === scanId) {
         await load(true, { scanId, source: 'analytics' })
       }
     }
@@ -191,5 +216,5 @@ export function useInsights(snapshots?: ViewSnapshotOptions): {
     }
   }, [handoff, managed, selection, selections])
 
-  return { state, retry: () => retry.current?.(), recheckPublication }
+  return { state, historical, retry: () => retry.current?.(), recheckPublication }
 }

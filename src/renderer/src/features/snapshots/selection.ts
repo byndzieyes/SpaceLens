@@ -13,14 +13,16 @@ import type {
 } from '../../../../shared/snapshotSelection'
 
 type SelectionError = Extract<ScannerIpcResult<never>, { ok: false }>['error']
+type AdoptedSelection = {
+  readonly status: 'resolved' | 'empty'
+  readonly selection: SnapshotSelection
+  readonly resolution: SnapshotSelectionResolution
+  readonly explorerSnapshot: ScanSnapshot | null
+  readonly latestVersion: number
+  readonly generation: string
+}
 type SettledSelection =
-  | {
-      readonly status: 'resolved' | 'empty'
-      readonly selection: SnapshotSelection
-      readonly resolution: SnapshotSelectionResolution
-      readonly explorerSnapshot: ScanSnapshot | null
-      readonly latestVersion: number
-    }
+  | AdoptedSelection
   | {
       readonly status: 'unavailable' | 'failed'
       readonly selection: SnapshotSelection
@@ -34,6 +36,12 @@ const selectionError = (code: ScannerIpcErrorCode, message: string): SelectionEr
   code,
   message
 })
+
+function resolvedScanId(resolution: SnapshotSelectionResolution): string | null {
+  return resolution.mode === 'explicit'
+    ? resolution.metadata.id
+    : (resolution.availability.snapshot?.entries.scanId ?? null)
+}
 
 type SelectionAPI = Pick<
   SpaceLensAPI,
@@ -83,8 +91,10 @@ export class SnapshotSelections {
 
   async select(
     view: SnapshotView,
-    selection: SnapshotSelection
+    selection: SnapshotSelection,
+    keepCurrent = false
   ): Promise<SettledSelection | undefined> {
+    const previous = this.get(view)
     const pending: SnapshotSelectionState = { status: 'pending', selection }
     this.views.set(view, pending)
     const latestVersion = this.latestVersion
@@ -104,9 +114,27 @@ export class SnapshotSelections {
       if (!current()) return undefined
       if (!prepared.ok) return fail(prepared.error)
       const { ticket, resolution } = prepared.value
-      const adopted = await this.api.adoptSnapshotSelection({ view, ticket })
+      if (
+        resolution.mode !== selection.mode ||
+        (selection.mode === 'explicit' &&
+          resolution.mode === 'explicit' &&
+          selection.scanId !== resolution.metadata.id)
+      )
+        return fail(selectionError('INTERNAL_ERROR', 'Storage resolved a different selection.'))
+      const adopted = await this.api.adoptSnapshotSelection({
+        view,
+        ticket,
+        ...(keepCurrent ? { keepCurrent: true } : {})
+      })
       if (!current()) return undefined
       if (!adopted.ok) return fail(adopted.error)
+      const scanId = resolvedScanId(resolution)
+      const generation =
+        keepCurrent &&
+        previous?.status === 'resolved' &&
+        scanId === resolvedScanId(previous.resolution)
+          ? previous.generation
+          : ticket
       const outcome = {
         status:
           resolution.mode === 'follow-latest' && !resolution.availability.snapshot
@@ -115,7 +143,8 @@ export class SnapshotSelections {
         selection,
         resolution,
         explorerSnapshot: adopted.value,
-        latestVersion
+        latestVersion,
+        generation
       } as const
       this.views.set(view, outcome)
       return outcome
@@ -125,46 +154,73 @@ export class SnapshotSelections {
     }
   }
 
-  async loadForCurrentView(
+  async loadExplorer(
+    selection: SnapshotSelection,
+    current: () => boolean,
+    handoff?: ViewSnapshotOptions['handoff']
+  ): Promise<ScannerIpcResult<ScanSnapshotAvailability>> {
+    const result = await this.resolve('explorer', selection, current, handoff)
+    if (!result.ok) return result
+    const { resolution, explorerSnapshot } = result.value
+    if (resolution.mode === 'follow-latest') return { ok: true, value: resolution.availability }
+    if (explorerSnapshot?.entries.scanId === resolution.metadata.id)
+      return { ok: true, value: { snapshot: explorerSnapshot, unavailable: null } }
+    return {
+      ok: false,
+      error: selectionError(
+        'SNAPSHOT_UNAVAILABLE',
+        'The saved snapshot has no validated Explorer root.'
+      )
+    }
+  }
+
+  async loadInsights(
+    selection: SnapshotSelection,
+    current: () => boolean,
+    handoff: ViewSnapshotOptions['handoff'],
+    keepCurrent: boolean
+  ): Promise<
+    ScannerIpcResult<{
+      scanId: string | null
+      unavailable: ScanSnapshotAvailability['unavailable']
+      generation: string
+    }>
+  > {
+    const result = await this.resolve('insights', selection, current, handoff, keepCurrent)
+    if (!result.ok) return result
+    const { resolution, generation } = result.value
+    return {
+      ok: true,
+      value: {
+        scanId: resolvedScanId(resolution),
+        unavailable: resolution.mode === 'explicit' ? null : resolution.availability.unavailable,
+        generation
+      }
+    }
+  }
+
+  private async resolve(
     view: SnapshotView,
     selection: SnapshotSelection,
     current: () => boolean,
-    handoff?: Promise<SettledSelection | undefined>
-  ): Promise<ScannerIpcResult<ScanSnapshotAvailability>> {
+    handoff?: ViewSnapshotOptions['handoff'],
+    keepCurrent = false
+  ): Promise<ScannerIpcResult<AdoptedSelection>> {
     const prepared = handoff && (await handoff)
     if (!current())
       return { ok: false, error: selectionError('UNAVAILABLE', 'The snapshot selection changed.') }
     const outcome =
       prepared && prepared === this.get(view) && this.usableHandoff(prepared)
         ? prepared
-        : await this.select(view, selection)
+        : await this.select(view, selection, keepCurrent)
     if (!outcome || !current())
       return { ok: false, error: selectionError('UNAVAILABLE', 'The snapshot selection changed.') }
     if ('error' in outcome) return { ok: false, error: outcome.error }
-    if (outcome.resolution.mode === 'explicit') {
-      const { explorerSnapshot } = outcome
-      const { metadata } = outcome.resolution
-      if (
-        view === 'explorer' &&
-        selection.mode === 'explicit' &&
-        metadata.id === selection.scanId &&
-        explorerSnapshot?.entries.scanId === selection.scanId
-      ) {
-        return { ok: true, value: { snapshot: explorerSnapshot, unavailable: null } }
-      }
-      return {
-        ok: false,
-        error: selectionError(
-          'SNAPSHOT_UNAVAILABLE',
-          'Historical snapshots cannot be opened in this view yet.'
-        )
-      }
-    }
-    return { ok: true, value: outcome.resolution.availability }
+    return { ok: true, value: outcome }
   }
 
-  isHistoricalExplorerSelection(): boolean {
-    const state = this.get('explorer')
+  isHistoricalSelection(view: SnapshotView): boolean {
+    const state = this.get(view)
     if (state?.status !== 'resolved' || state.resolution.mode !== 'explicit') return false
     const { metadata } = state.resolution
     return this.latestVersion === state.latestVersion

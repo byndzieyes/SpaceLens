@@ -264,9 +264,9 @@ test('returns valid zero totals for empty scans and exact bytes at the safe inte
 test.each([2, 1025])(
   'returns SIZE_OVERFLOW for unsafe and SQLite-overflowing sums of %i entries',
   (count) => {
-    database.insertScan({ ...pending, status: 'completed', finishedAt: timestamp })
+    publish([])
+    // Inject inconsistent data after validation so the aggregate's own guards are exercised.
     database.transaction(() => {
-      database.insertEntry(root)
       for (let i = 0; i < count; i++)
         database.insertEntry(
           entry(i % 2 ? 'huge.jpg' : 'huge.mp3', Number.MAX_SAFE_INTEGER, `file-${i}`)
@@ -281,8 +281,7 @@ test.each([2, 1025])(
 )
 
 test('rejects totals inconsistent with a stored scan summary', () => {
-  database.insertScan({ ...pending, status: 'completed', finishedAt: timestamp })
-  database.insertEntry(root)
+  publish([])
   database.insertEntry(entry('inconsistent.txt', 1, 'inconsistent'))
   expect(() => database.getInsightsCategories(pending.id)).toThrow('published scan summary')
   expect(() => page()).toThrow('published scan summary')

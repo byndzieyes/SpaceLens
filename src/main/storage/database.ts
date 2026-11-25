@@ -78,7 +78,7 @@ const ENTRY_COLUMNS = `entry.scan_id, entry.id, entry.parent_id, entry.name, ent
 `
 const SELECT_ENTRY = `SELECT ${ENTRY_COLUMNS} FROM entries AS entry`
 const DEEP_DIRECTORY_OFFSET = 10_000
-const MAX_VALIDATED_EXPLORER_SNAPSHOTS = 8
+const MAX_VALIDATED_SNAPSHOTS = 8
 const TREEMAP_BYTES = `CASE type WHEN 'file' THEN size_bytes WHEN 'directory' THEN aggregated_size_bytes END`
 const TREEMAP_CHILDREN = `FROM entries WHERE scan_id = $scanId AND parent_id = $entryId`
 const TREEMAP_TOTALS = `SELECT COUNT(*) AS child_count, COALESCE(SUM(bytes), 0) AS known_bytes,
@@ -306,7 +306,7 @@ export class ScanDatabase {
   private readonly deleteCompletedScanStatement: StatementSync
   private readonly selectRootIdStatement: StatementSync
   private readonly validateSnapshot: (scan: CompletedScan) => bigint
-  private readonly validatedExplorerSnapshots = new Map<string, ScanSnapshot>()
+  private readonly validatedSnapshots = new Map<string, ScanSnapshot>()
   private validatedLatestId: string | undefined
   private readonly insertEntryStatement: StatementSync
   private readonly selectEntryStatement: StatementSync
@@ -534,7 +534,7 @@ export class ScanDatabase {
       recoverScans(this.connection, latest)
     })
     this.validatedLatestId = latest?.id
-    this.validatedExplorerSnapshots.clear()
+    this.validatedSnapshots.clear()
     this.analytics.clear()
   }
 
@@ -581,7 +581,6 @@ export class ScanDatabase {
       published = requireCompletedScan(stored)
     })
     this.validatedLatestId = published.id
-    this.analytics.usePublication(published.id)
     return published
   }
 
@@ -671,11 +670,11 @@ export class ScanDatabase {
       if (latestCompleted) readCompletedScanDuration(latestCompleted)
       deleted = { scanId, latestCompleted, latestCompletedScanId: latestCompleted?.id ?? null }
     })
-    if (deleted) this.validatedExplorerSnapshots.delete(scanId)
-    if (deletedLatest) {
-      this.validatedLatestId = undefined
-      this.analytics.clear()
+    if (deleted) {
+      this.validatedSnapshots.delete(scanId)
+      this.analytics.invalidate(scanId)
     }
+    if (deletedLatest) this.validatedLatestId = undefined
     return deleted
   }
 
@@ -760,35 +759,35 @@ export class ScanDatabase {
   getScanSnapshot(): ScanSnapshotAvailability {
     const scan = this.getPublishedScan()
     return {
-      snapshot: scan ? this.explorerSnapshot(scan) : null,
+      snapshot: scan ? this.resolveSavedSnapshot(scan) : null,
       unavailable: null
     }
   }
 
-  openExplorerSnapshot(request: unknown): ScanSnapshot {
-    const scan = this.requireExplorerScan(readSnapshotId(request))
+  openSavedSnapshot(request: unknown): ScanSnapshot {
+    const scan = this.requireCompletedMetadata(readSnapshotId(request))
     // An explicit view can outlive this publication's time as Latest.
     if (scan.id === this.validatedLatestId) {
-      const snapshot = this.readExplorerSnapshot(scan)
-      if (!this.connection.isTransaction) this.rememberExplorerSnapshot(snapshot)
+      const snapshot = this.readSavedSnapshot(scan)
+      if (!this.connection.isTransaction) this.rememberValidatedSnapshot(snapshot)
       return snapshot
     }
-    return this.explorerSnapshot(scan)
+    return this.resolveSavedSnapshot(scan)
   }
 
-  private explorerSnapshot(scan: CompletedScan): ScanSnapshot {
-    if (scan.id === this.validatedLatestId) return this.readExplorerSnapshot(scan)
-    const cached = this.validatedExplorerSnapshots.get(scan.id)
+  private resolveSavedSnapshot(scan: CompletedScan): ScanSnapshot {
+    if (scan.id === this.validatedLatestId) return this.readSavedSnapshot(scan)
+    const cached = this.validatedSnapshots.get(scan.id)
     if (cached) {
-      this.validatedExplorerSnapshots.delete(scan.id)
-      this.validatedExplorerSnapshots.set(scan.id, cached)
+      this.validatedSnapshots.delete(scan.id)
+      this.validatedSnapshots.set(scan.id, cached)
       return cached
     }
 
     try {
       let snapshot!: ScanSnapshot
       const validate = (): undefined => {
-        snapshot = this.readExplorerSnapshot(scan, true)
+        snapshot = this.readSavedSnapshot(scan, true)
         return undefined
       }
       // Internal callers may already have a transaction. Only cache independent committed reads.
@@ -797,24 +796,24 @@ export class ScanDatabase {
         return snapshot
       }
       inTransaction(this.connection, validate, 'BEGIN')
-      this.rememberExplorerSnapshot(snapshot)
+      this.rememberValidatedSnapshot(snapshot)
       return snapshot
     } catch {
       throw invalidSavedSnapshot()
     }
   }
 
-  private rememberExplorerSnapshot(snapshot: ScanSnapshot): void {
+  private rememberValidatedSnapshot(snapshot: ScanSnapshot): void {
     const { scanId } = snapshot.entries
-    this.validatedExplorerSnapshots.delete(scanId)
-    this.validatedExplorerSnapshots.set(scanId, snapshot)
-    if (this.validatedExplorerSnapshots.size > MAX_VALIDATED_EXPLORER_SNAPSHOTS) {
-      const oldest = this.validatedExplorerSnapshots.keys().next().value!
-      this.validatedExplorerSnapshots.delete(oldest)
+    this.validatedSnapshots.delete(scanId)
+    this.validatedSnapshots.set(scanId, snapshot)
+    if (this.validatedSnapshots.size > MAX_VALIDATED_SNAPSHOTS) {
+      const oldest = this.validatedSnapshots.keys().next().value!
+      this.validatedSnapshots.delete(oldest)
     }
   }
 
-  private readExplorerSnapshot(scan: CompletedScan, fullValidation = false): ScanSnapshot {
+  private readSavedSnapshot(scan: CompletedScan, fullValidation = false): ScanSnapshot {
     const publication = { scan, rootEntryId: this.selectRootIdStatement.get(scan.id)?.id }
     validateScanPublication(publication)
     const root = this.readPublishedRoot(scan, publication.rootEntryId)
@@ -922,20 +921,20 @@ export class ScanDatabase {
   }
 
   getInsightsCategories(scanId: string): InsightsCategories {
-    return this.analytics.getCategories(this.requirePublishedScan(scanId))
+    return this.analytics.getCategories(this.requireValidatedScan(scanId))
   }
 
   getInsightsSizeDistribution(scanId: string): InsightsSizeDistribution {
-    return this.analytics.getSizeDistribution(this.requirePublishedScan(scanId))
+    return this.analytics.getSizeDistribution(this.requireValidatedScan(scanId))
   }
 
   getInsightsObservations(scanId: string): InsightsObservations {
-    return this.analytics.getObservations(this.requirePublishedScan(scanId))
+    return this.analytics.getObservations(this.requireValidatedScan(scanId))
   }
 
   listInsightsExtensions(request: InsightsExtensionRequest): InsightsExtensionPage {
     const page = readExtensionRequest(request)
-    return this.analytics.listExtensions(this.requirePublishedScan(page.scanId), page)
+    return this.analytics.listExtensions(this.requireValidatedScan(page.scanId), page)
   }
 
   listInsightsLargest(
@@ -943,22 +942,13 @@ export class ScanDatabase {
     type: InsightsRankedEntry['type']
   ): InsightsRankingPage {
     const page = readRankingRequest(request)
-    return this.analytics.listLargest(this.requirePublishedScan(page.scanId), type, page)
+    return this.analytics.listLargest(this.requireValidatedScan(page.scanId), type, page)
   }
 
-  requirePublishedScan(scanId: string): CompletedScan {
-    const latest = this.getPublishedScan()
-    if (latest?.id === scanId) return latest
-
-    const requested = latest ? this.getScan(scanId) : null
-    if (!latest || (requested && requested.status !== 'completed')) {
-      throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'This scan has no available snapshot.')
-    }
-    // Insights currently exposes only Latest, even when older scans are retained.
-    throw new SnapshotAccessError(
-      'SNAPSHOT_EXPIRED',
-      'This snapshot reference is no longer current.'
-    )
+  requireValidatedScan(scanId: string): CompletedScan {
+    const scan = this.requireCompletedMetadata(scanId)
+    if (scanId !== this.validatedLatestId) this.resolveSavedSnapshot(scan)
+    return scan
   }
 
   private requireSavedScan(scanId: string): CompletedScan {
@@ -969,7 +959,7 @@ export class ScanDatabase {
     throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'This scan has no available snapshot.')
   }
 
-  private requireExplorerScan(scanId: string): CompletedScan {
+  private requireCompletedMetadata(scanId: string): CompletedScan {
     try {
       const scan = this.requireSavedScan(scanId)
       readCompletedScanDuration(scan)
@@ -981,8 +971,7 @@ export class ScanDatabase {
   }
 
   private requireExplorerEntry({ scanId, entryId }: ScanEntryRequest): FileEntry {
-    const scan = this.requireExplorerScan(scanId)
-    if (scanId !== this.validatedLatestId) this.explorerSnapshot(scan)
+    this.requireValidatedScan(scanId)
     const entry = this.getEntry(scanId, entryId)
     if (!entry) {
       throw new SnapshotAccessError('ENTRY_NOT_FOUND', 'Entry does not exist in this snapshot.')
@@ -1095,7 +1084,7 @@ export class ScanDatabase {
 
   close(): void {
     this.analytics.clear()
-    this.validatedExplorerSnapshots.clear()
+    this.validatedSnapshots.clear()
     if (!this.connection.isOpen) return
     if (this.connection.isTransaction) throw new Error('Cannot close during a SQLite transaction.')
     this.connection.close()

@@ -24,6 +24,8 @@ export interface PreparedSnapshotSelection {
 
 export interface SnapshotSelectionAdoption extends SnapshotViewRequest {
   readonly ticket: string
+  /** Keep Insights section requests active during a refresh of its current scan. */
+  readonly keepCurrent?: true
 }
 
 /** Only explicit Explorer adoption returns the validated snapshot. */
