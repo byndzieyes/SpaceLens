@@ -6,10 +6,13 @@ import type { ScanSessionState, ScanStatus } from '../src/shared/scan'
 import { OverviewPage } from '../src/renderer/src/pages/OverviewPage'
 import App from '../src/renderer/src/App'
 import { mockSnapshotSelection } from './snapshot-selection-fixture'
+import { recentHistoryPage, recentScanItem } from './recent-scans-fixture'
+import type { ScanHistoryPage } from '../src/shared/history'
 
 let api: SpaceLensAPI
 let latest: ScanStateSnapshot
 let listeners: Set<(snapshot: ScanStateSnapshot) => void>
+let history: ScanHistoryPage
 const rootPath = 'C:\\Test folders\\Україна & notes'
 
 function snapshot(
@@ -71,11 +74,15 @@ function panel(): HTMLElement {
 beforeEach(() => {
   latest = { revision: 0, state: null }
   listeners = new Set()
+  history = recentHistoryPage()
   api = {
     ...mockSnapshotSelection(() => api.getScanSnapshot()),
     getAppInfo: vi.fn(),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: latest })),
-    listScanHistory: vi.fn(),
+    listScanHistory: vi.fn<SpaceLensAPI['listScanHistory']>(async () => ({
+      ok: true,
+      value: history
+    })),
     getScanHistoryMetadata: vi.fn(),
     deleteSnapshot: vi.fn(),
     getRetentionSettings: vi.fn(),
@@ -436,7 +443,7 @@ test('coalesces progress bursts and flushes terminal state without delayed stale
   }
 })
 
-test('Recent Scans uses Main summaries, survives navigation and ignores stale replacement', async () => {
+test('Recent Scans uses retained metadata, survives navigation and ignores a stale history revision', async () => {
   const completed = {
     id: 'completed-a',
     path: '/completed directory',
@@ -447,26 +454,39 @@ test('Recent Scans uses Main summaries, survives navigation and ignores stale re
   }
   render(<App />)
   await screen.findByText('Ready to scan')
-  emit({ ...snapshot(1, 'completed'), latestCompleted: completed })
+  history = recentHistoryPage([recentScanItem(completed)])
+  emit({ ...snapshot(1, 'completed'), latestCompleted: completed, historyRevision: 1 })
   const recent = (): ReturnType<typeof within> =>
     within(screen.getByRole('region', { name: 'Recent Scans' }))
-  expect(recent().getByText(completed.path)).toBeVisible()
+  expect(await recent().findByText(completed.path)).toBeVisible()
   expect(recent().getByText('300 bytes')).toBeVisible()
   expect(recent().getByText(/Incomplete result/)).toBeVisible()
+  const historyReads = vi.mocked(api.listScanHistory).mock.calls.length
   for (const status of ['running', 'cancelled', 'failed'] as const) {
-    emit({ ...snapshot(latest.revision + 1, status, 'next'), latestCompleted: completed })
+    emit({
+      ...snapshot(latest.revision + 1, status, 'next'),
+      latestCompleted: completed,
+      historyRevision: 1
+    })
     expect(recent().getByText(completed.path)).toBeVisible()
   }
+  await act(async () => {})
+  expect(api.listScanHistory).toHaveBeenCalledTimes(historyReads)
   fireEvent.click(screen.getByRole('button', { name: 'Explorer' }))
   fireEvent.click(screen.getByRole('button', { name: 'Overview' }))
   await screen.findByText(completed.path)
+  const replacement = { ...completed, id: 'new', path: '/new', errorCount: 0 }
+  history = recentHistoryPage([recentScanItem(replacement), recentScanItem(completed)])
   emit({
     ...snapshot(10, 'completed', 'new'),
-    latestCompleted: { ...completed, id: 'new', path: '/new', errorCount: 0 }
+    latestCompleted: replacement,
+    historyRevision: 2
   })
-  emit({ ...snapshot(2, 'completed'), latestCompleted: completed })
-  expect(recent().getByText('/new')).toBeVisible()
-  expect(recent().queryByText(completed.path)).not.toBeInTheDocument()
+  emit({ ...snapshot(2, 'completed'), latestCompleted: completed, historyRevision: 1 })
+  expect(await recent().findByText('/new')).toBeVisible()
+  const [newest, previous] = recent().getAllByRole('listitem')
+  expect(within(newest).getByText('Latest')).toBeVisible()
+  expect(within(previous).getByText(completed.path)).toBeVisible()
 })
 
 test('restores saved metadata with an idle scanner and preserves it through a failed or cancelled replacement', async () => {
@@ -479,12 +499,13 @@ test('restores saved metadata with an idle scanner and preserves it through a fa
     directoryCount: 2,
     errorCount: 0
   }
+  history = recentHistoryPage([recentScanItem(completed)])
   latest = { revision: 1, state: null, latestCompleted: completed, publicationStatus: 'ready' }
   render(<App />)
   await within(panel()).findByText('Ready to scan')
   const recent = (): ReturnType<typeof within> =>
     within(screen.getByRole('region', { name: 'Recent Scans' }))
-  expect(recent().getByText(completed.path)).toBeVisible()
+  expect(await recent().findByText(completed.path)).toBeVisible()
   expect(within(panel()).queryByText('Scan completed')).not.toBeInTheDocument()
   for (const status of ['running', 'cancelled', 'failed'] as const) {
     emit({ ...snapshot(latest.revision + 1, status, 'next'), latestCompleted: completed })
@@ -507,10 +528,13 @@ test('a late startup query cannot overwrite a new publication notification', asy
     fileCount: 1,
     directoryCount: 1
   }
+  const published = { ...saved, id: 'new', path: '/new' }
+  history = recentHistoryPage([recentScanItem(published)])
   emit({
     ...snapshot(4, 'completed', 'new'),
-    latestCompleted: { ...saved, id: 'new', path: '/new' },
-    publicationStatus: 'ready'
+    latestCompleted: published,
+    publicationStatus: 'ready',
+    historyRevision: 1
   })
   await act(async () =>
     recovery.resolve({
@@ -519,6 +543,6 @@ test('a late startup query cannot overwrite a new publication notification', asy
     })
   )
   const recent = within(screen.getByRole('region', { name: 'Recent Scans' }))
-  expect(recent.getByText('/new')).toBeVisible()
+  expect(await recent.findByText('/new')).toBeVisible()
   expect(recent.queryByText('/old')).not.toBeInTheDocument()
 })

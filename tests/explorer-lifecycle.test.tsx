@@ -13,6 +13,7 @@ import { useSnapshotNavigation } from '../src/renderer/src/features/snapshots/us
 import { rankedExplorerTarget, type SnapshotNavigationTarget } from '../src/renderer/src/navigation'
 import type { InsightsCategories } from '../src/shared/insights'
 import { mockSnapshotSelection } from './snapshot-selection-fixture'
+import { recentHistoryPage } from './recent-scans-fixture'
 import type { ScannerIpcResult, ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
 import type { FileEntry, RecentScanSummary, ScanSessionState, ScanStatus } from '../src/shared/scan'
 import type { ScanSnapshot, ScanSnapshotAvailability } from '../src/shared/snapshot'
@@ -133,6 +134,7 @@ function mockApp(): {
   runNext: (id: string) => void
 } {
   let published: SavedFixture | null = null
+  let retained: SavedFixture[] = []
   let state: ScanStateSnapshot = { revision: 0, state: null, publicationStatus: 'ready' }
   const listeners = new Set<(snapshot: ScanStateSnapshot) => void>()
   const activeScan = (id: string, status: ScanStatus, rootPath: string): ScanSessionState => {
@@ -172,12 +174,18 @@ function mockApp(): {
     completedAt: snapshot.completedAt,
     ...snapshot.summary
   })
+  const remember = (storage: SavedFixture): void => {
+    const id = storage.snapshot.entries.scanId
+    retained = [storage, ...retained.filter(({ snapshot }) => snapshot.entries.scanId !== id)]
+  }
   const publish = (storage: SavedFixture, { notify = true } = {}): void => {
     published = storage
+    remember(storage)
     const { root, entries } = storage.snapshot
     const patch = {
       state: activeScan(entries.scanId, 'completed', root.path),
-      latestCompleted: summaryOf(storage)
+      latestCompleted: summaryOf(storage),
+      historyRevision: (state.historyRevision ?? 0) + 1
     }
     if (notify) emit(patch)
     else state = { ...state, ...patch, revision: state.revision + 1 }
@@ -234,7 +242,14 @@ function mockApp(): {
       read(scanId, (store) => store.listInsightsLargest({ scanId, offset, limit }, 'directory'))
     ),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: state })),
-    listScanHistory: vi.fn(),
+    listScanHistory: vi.fn(async () => ({
+      ok: true,
+      value: recentHistoryPage(
+        retained.map(({ database, snapshot }) =>
+          database.getScanHistoryMetadata({ scanId: snapshot.entries.scanId })
+        )
+      )
+    })),
     getScanHistoryMetadata: vi.fn(),
     deleteSnapshot: vi.fn(),
     getRetentionSettings: vi.fn(),
@@ -281,10 +296,16 @@ function mockApp(): {
     publish,
     restore: (storage) => {
       published = storage
+      remember(storage)
       state = { ...state, state: null, latestCompleted: summaryOf(storage) }
     },
     deleteLatest: (replacement) => {
+      retained = retained.filter(
+        ({ snapshot }) => snapshot.entries.scanId !== published?.snapshot.entries.scanId
+      )
       published = replacement ?? null
+      if (replacement) remember(replacement)
+      else retained = []
       emit({
         latestCompleted: replacement ? summaryOf(replacement) : null,
         historyRevision: (state.historyRevision ?? 0) + 1
@@ -636,6 +657,164 @@ async function rankedAction(kind: 'files' | 'directories', path: string): Promis
   const ranking = await screen.findByRole('region', { name: `Largest ${kind}` })
   return within(ranking).findByRole('button', { name: `Open in Explorer: ${path}` })
 }
+
+async function recentAction(view: 'Explorer' | 'Insights', path: string): Promise<HTMLElement> {
+  const metadata = await panel('Recent Scans').findByText(path)
+  return within(metadata.closest('li')!).getByRole('button', {
+    name: new RegExp(`^Open in ${view} for`)
+  })
+}
+
+test('opens an older Recent Scans row at its Explorer root and releases it on exit', async () => {
+  const alpha = publishedFixture('scan-a', 'Alpha')
+  const beta = publishedFixture('scan-b', 'Beta')
+  const { api, restore } = historicalApp(alpha, beta)
+  restore(alpha)
+  restore(beta)
+  render(<App />)
+  const action = await recentAction('Explorer', '/scans/Alpha')
+  expect(api.prepareSnapshotSelection).not.toHaveBeenCalled()
+  expect(api.getScanSnapshot).not.toHaveBeenCalled()
+  action.focus()
+  fireEvent.click(action)
+  await chart('Alpha')
+  expect(screen.getByRole('heading', { name: 'Storage Explorer' })).toHaveFocus()
+  expect(api.prepareSnapshotSelection).toHaveBeenCalledExactlyOnceWith({
+    view: 'explorer',
+    selection: { mode: 'explicit', scanId: 'scan-a' }
+  })
+  open('Overview')
+  await recentAction('Explorer', '/scans/Alpha')
+  expect(api.releaseSnapshotSelection).toHaveBeenCalledExactlyOnceWith({ view: 'explorer' })
+  expect(api.listScanHistory).toHaveBeenCalledTimes(2)
+  open('Explorer')
+  await chart('Beta')
+  expect(api.prepareSnapshotSelection).toHaveBeenLastCalledWith({
+    view: 'explorer',
+    selection: { mode: 'follow-latest' }
+  })
+})
+
+test.each(['Explorer', 'Insights'] as const)(
+  'opens Latest from Recent Scans in explicit %s even if a publication arrives during adoption',
+  async (view) => {
+    const beta = publishedFixture('scan-b', 'Beta')
+    const gamma = publishedFixture('scan-c', 'Gamma')
+    const { api, restore, publish } = historicalApp(beta, gamma)
+    restore(beta)
+    const adopt =
+      Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['adoptSnapshotSelection']>>>()
+    api.adoptSnapshotSelection.mockReturnValueOnce(adopt.promise)
+    render(<App />)
+    const action = await recentAction(view, '/scans/Beta')
+    expect(within(action.closest('li')!).getByText('Latest')).toBeVisible()
+    fireEvent.click(action)
+    await waitFor(() => expect(api.adoptSnapshotSelection).toHaveBeenCalledOnce())
+    act(() => publish(gamma))
+    expect(api.listScanDirectory).not.toHaveBeenCalled()
+    expect(api.getInsightsSummary).not.toHaveBeenCalled()
+    await act(async () =>
+      adopt.resolve({ ok: true, value: view === 'Explorer' ? beta.snapshot : null })
+    )
+    if (view === 'Explorer') await chart('Beta')
+    else expect(await panel('Selected snapshot').findByText('/scans/Beta')).toBeVisible()
+    expect(screen.getByText('Historical snapshot')).toBeVisible()
+    expect(api.prepareSnapshotSelection).toHaveBeenCalledExactlyOnceWith({
+      view: view.toLowerCase(),
+      selection: { mode: 'explicit', scanId: 'scan-b' }
+    })
+    fireEvent.click(button('Follow Latest'))
+    if (view === 'Explorer') await chart('Gamma')
+    else expect(await panel('Published scan').findByText('/scans/Gamma')).toBeVisible()
+  }
+)
+
+test.each(['files', 'directories'] as const)(
+  'opens older Insights from Recent Scans and hands off ranked %s to the exact Explorer snapshot',
+  async (kind) => {
+    const alpha = publishedFixture('scan-a', 'Alpha', 0, kind === 'files' ? 101 : 1, true)
+    const beta = publishedFixture('scan-b', 'Beta')
+    const { api, restore } = historicalApp(alpha, beta)
+    restore(alpha)
+    restore(beta)
+    render(<App />)
+    fireEvent.click(await recentAction('Insights', '/scans/Alpha'))
+    expect(await panel('Selected snapshot').findByText('/scans/Alpha')).toBeVisible()
+    expect(screen.getByText('Historical snapshot')).toBeVisible()
+    expect(api.getInsightsSummary).toHaveBeenCalledExactlyOnceWith({ scanId: 'scan-a' })
+    const path = kind === 'files' ? rankedFilePath : rankedDirectoryPath
+    fireEvent.click(await rankedAction(kind, path))
+    await chart('Leaf')
+    expect(api.prepareSnapshotSelection.mock.calls).toEqual([
+      [{ view: 'insights', selection: { mode: 'explicit', scanId: 'scan-a' } }],
+      [{ view: 'explorer', selection: { mode: 'explicit', scanId: 'scan-a' } }]
+    ])
+    expect(api.releaseSnapshotSelection).toHaveBeenCalledExactlyOnceWith({ view: 'insights' })
+    if (kind === 'files') {
+      expect(panel('Directory Contents').getByText(/Page 2 of 2.*102 entries/)).toBeVisible()
+      expect(panel('Details').getByText(path)).toBeVisible()
+    } else {
+      expect(panel('Directory Tree').getByRole('button', { name: 'Leaf' })).toHaveAttribute(
+        'aria-current',
+        'location'
+      )
+    }
+  }
+)
+
+test.each(['Explorer', 'Insights'] as const)(
+  'shows the missing explicit %s selection when a Recent Scans row is pruned before opening',
+  async (view) => {
+    const alpha = publishedFixture('scan-a', 'Alpha')
+    const beta = publishedFixture('scan-b', 'Beta')
+    const { api, restore } = historicalApp(alpha, beta)
+    restore(alpha)
+    restore(beta)
+    api.prepareSnapshotSelection.mockResolvedValueOnce({
+      ok: false,
+      error: { code: 'SNAPSHOT_EXPIRED', message: 'This saved scan no longer exists.' }
+    })
+    render(<App />)
+    fireEvent.click(await recentAction(view, '/scans/Alpha'))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      /no longer exists|snapshot is unavailable/
+    )
+    expect(api.adoptSnapshotSelection).not.toHaveBeenCalled()
+    expect(api.getScanSnapshot).not.toHaveBeenCalled()
+    expect(api.listScanDirectory).not.toHaveBeenCalled()
+    expect(api.getInsightsSummary).not.toHaveBeenCalled()
+    expect(button('Follow Latest')).toBeVisible()
+  }
+)
+
+test('ignores a superseded Recent Scans navigation when its preparation arrives late', async () => {
+  const alpha = publishedFixture('scan-a', 'Alpha')
+  const beta = publishedFixture('scan-b', 'Beta')
+  const { api, restore } = historicalApp(alpha, beta)
+  restore(alpha)
+  restore(beta)
+  const slow = Promise.withResolvers<void>()
+  const prepare = api.prepareSnapshotSelection.getMockImplementation()!
+  api.prepareSnapshotSelection.mockImplementationOnce(async (request) => {
+    const result = await prepare(request)
+    await slow.promise
+    return result
+  })
+  render(<App />)
+  fireEvent.click(await recentAction('Insights', '/scans/Alpha'))
+  await waitFor(() => expect(api.prepareSnapshotSelection).toHaveBeenCalledOnce())
+  open('Overview')
+  fireEvent.click(await recentAction('Explorer', '/scans/Beta'))
+  await chart('Beta')
+  await act(async () => slow.resolve())
+  expect(api.adoptSnapshotSelection).toHaveBeenCalledExactlyOnceWith({
+    view: 'explorer',
+    ticket: 'scan-b'
+  })
+  expect(api.releaseSnapshotSelection).toHaveBeenCalledWith({ view: 'insights' })
+  expect(api.getInsightsSummary).not.toHaveBeenCalled()
+  expect(screen.getByRole('heading', { name: 'Storage Explorer' })).toBeVisible()
+})
 
 test('keeps explicit Insights and its ranking page through publication, then resets on Follow Latest', async () => {
   const alpha = publishedFixture('scan-a', 'Alpha', 1, 20)

@@ -23,7 +23,7 @@ The installer is generated in `dist/`. The installed app uses the bundled runtim
 
 ## Scan storage
 
-SpaceLens streams scanner batches into `scans.sqlite` in Electron's `userData` directory. Overview restores the latest published scan after startup recovery and displays its folder, completion time, logical size, file and directory counts, and filesystem errors. The Folder scan panel starts idle. Recent Scans displays an empty state until the first successful scan.
+SpaceLens streams scanner batches into `scans.sqlite` in Electron's `userData` directory. Overview's Recent Scans loads up to five retained completed snapshots across all roots, newest publication first. Each row shows the folder, completion time, logical size, file and directory counts, scan duration, and incomplete coverage when some items could not be scanned. The Folder scan panel starts idle and retains its action to open the latest published scan.
 
 At startup, Electron's single-instance lock protects the application profile while the Storage Worker checks publication sequences and foreign keys, validates the latest completed scan, and removes interrupted scans in a transaction. New scans wait for recovery. If recovery fails, a write outcome is unknown, or a building scan cannot be discarded, SpaceLens blocks further scans for that session. Restarting runs recovery against the committed SQLite state.
 
@@ -33,13 +33,13 @@ Storage requests have a 10-second deadline. On normal shutdown Main waits for sc
 
 SQLite uses its default `DELETE` rollback journal. Recovery and cancellation free pages from interrupted or discarded scans for future writes. A rollback journal may be present during a write or after an interruption. SQLite handles journal recovery when the database is reopened.
 
-Overview uses the latest completed scan. Explorer and Insights follow Latest by default and can open an explicit retained snapshot through a snapshot-specific navigation target. Both views show the selected root, completion time, selection mode, and whether the snapshot is historical. Their Follow Latest actions return explicit views to the current publication. SpaceLens retains completed snapshots under the history retention policy and allows at most one building scan. Known logical sizes can be partial when some items are unreadable. The UI reports scan errors and incomplete coverage.
+Explorer and Insights follow Latest by default. Each Recent Scans row opens that exact snapshot in either view, including the row marked Latest. Both views show the selected root, completion time, selection mode, and whether the snapshot is historical. Their Follow Latest actions return explicit views to the current publication. SpaceLens retains completed snapshots under the history retention policy and allows at most one building scan. Known logical sizes can be partial when some items are unreadable. The UI reports scan errors and incomplete coverage.
 
 Directory pages contain at most 100 direct children, sorted by name then ID in UTF-16 order. Explorer and Insights queries use their own adopted scan IDs. Treemap ranks up to 100 direct children by known size and groups the remaining entries into Other. It uses logical file sizes and the scanner's stored directory totals.
 
 Main serializes reads and scanner writes through one Storage Worker. Scanner writes take priority over queued reads. Up to 16 reads may wait for a turn, each with a 10-second queue deadline. Document changes and shutdown drop queued snapshot reads. An active SQLite query can delay the next write. Cold analytics and targeting a file in a wide or deeply nested directory can take noticeable time on large scans. Cancellation remains available through traversal and batch persistence and closes when the final publication request is sent.
 
-The internal History API reads completed scan metadata in pages of 20 by default, with at most 100 scans per request. Root filters match stored paths case-sensitively, with literal substring search available. Offset-based pages reflect the current history on each read. Future consumers need to refresh pagination after publication, deletion, or pruning because a mutation can shift later pages.
+The History API reads completed scan metadata in pages of 20 by default, with at most 100 scans per request. Root filters match stored paths case-sensitively, with literal substring search available. Offset-based pages reflect the current history on each read. Overview refreshes its first five rows after committed publication, deletion, or pruning, using the history revision on the scanner-state channel. A listed row can expire before it is opened. Selecting a row acquires protection through the destination view.
 
 The History deletion API removes one completed snapshot and its stored entries in a SQLite transaction. Deleting Latest selects the next publication by sequence, or clears Latest when history is empty. Confirmed publications, manual deletions, and automatic pruning advance a history revision on the scanner-state channel. The deletion queue admits one request at a time. Queued scanner writes take priority, and an active cascade can delay the next batch because SQLite executes it synchronously.
 
@@ -63,7 +63,7 @@ The global history target defaults to 10 completed snapshots and accepts integer
 
 Automatic retention prunes the oldest eligible snapshot by publication sequence, one transaction per snapshot. It preserves Latest and protected snapshots and can temporarily exceed the target. Maintenance resumes when a relevant lease is released and defers while a scan is building. A confirmed publication stands independently of pruning. The limit controls retained snapshot count. Deleted rows free SQLite pages for later writes, so the database file may stay near its previous peak size.
 
-Scan history and comparisons, duplicate detection, file cleanup, and background monitoring are deferred beyond Phase 4.
+The full History page, history management controls, comparisons, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 

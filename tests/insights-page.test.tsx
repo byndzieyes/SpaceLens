@@ -3,6 +3,7 @@ import { act, fireEvent, render, screen, waitFor, within } from '@testing-librar
 import { afterEach, beforeEach, expect, test, vi, type Mocked } from 'vitest'
 import App from '../src/renderer/src/App'
 import { mockSnapshotSelection } from './snapshot-selection-fixture'
+import { recentHistoryPage } from './recent-scans-fixture'
 import { CategoryDonut } from '../src/renderer/src/features/insights/CategoryDonut'
 import { InsightsPage } from '../src/renderer/src/pages/InsightsPage'
 import {
@@ -259,7 +260,7 @@ beforeEach(() => {
     ...mockSnapshotSelection(() => api.getScanSnapshot()),
     getAppInfo: vi.fn(),
     getScanState: vi.fn(async () => success(update(0))),
-    listScanHistory: vi.fn(),
+    listScanHistory: vi.fn(async () => ({ ok: true, value: recentHistoryPage() })),
     getScanHistoryMetadata: vi.fn(),
     deleteSnapshot: vi.fn(),
     getRetentionSettings: vi.fn(),

@@ -6,6 +6,7 @@ import { treemapSummary } from './treemap-fixtures'
 import { DirectoryContentsTable } from '../src/renderer/src/features/explorer/DirectoryContentsTable'
 import App from '../src/renderer/src/App'
 import { mockSnapshotSelection } from './snapshot-selection-fixture'
+import { recentHistoryPage } from './recent-scans-fixture'
 const list = vi.fn<SpaceLensAPI['listScanDirectory']>()
 const select = vi.fn<(id: string | null) => void>()
 const navigate = vi.fn<(id: string) => Promise<void>>()
@@ -233,6 +234,7 @@ test('table navigation synchronizes breadcrumbs, history and visible tree highli
       })
     }),
     getScanState: vi.fn(async () => ({ ok: true, value: { revision: 0, state: null } })),
+    listScanHistory: vi.fn(async () => ({ ok: true, value: recentHistoryPage() })),
     onScanStateChanged: vi.fn(() => () => {}),
     getScanSnapshot,
     ...mockSnapshotSelection(getScanSnapshot),

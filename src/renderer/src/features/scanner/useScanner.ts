@@ -45,7 +45,10 @@ function requestError(code: ScannerIpcErrorCode): string {
 }
 
 /** Metadata only. Main owns the scan and continues working when Overview unmounts. */
-export function useScanner(snapshots?: SnapshotSelections): ScanView & {
+export function useScanner(
+  snapshots?: SnapshotSelections,
+  onHistoryRevision?: (revision: number) => void
+): ScanView & {
   select: () => void
   cancel: () => void
   refresh: () => void
@@ -85,6 +88,7 @@ export function useScanner(snapshots?: SnapshotSelections): ScanView & {
       if (scan && scan.progress.scanId !== scan.session.id) return
       revision = snapshot.revision
       snapshots?.observeScanState(snapshot)
+      onHistoryRevision?.(snapshot.historyRevision ?? 0)
       const progressOnly =
         scan?.session.status === 'running' &&
         current.scan?.session.status === 'running' &&
@@ -224,7 +228,7 @@ export function useScanner(snapshots?: SnapshotSelections): ScanView & {
       actions.current = null
       unsubscribe?.()
     }
-  }, [snapshots])
+  }, [onHistoryRevision, snapshots])
 
   return {
     ...view,

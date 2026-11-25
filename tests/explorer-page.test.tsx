@@ -3,13 +3,17 @@ import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { SpaceLensAPI } from '../src/shared/ipc'
 import App from '../src/renderer/src/App'
 import { mockSnapshotSelection } from './snapshot-selection-fixture'
+import { recentHistoryPage } from './recent-scans-fixture'
 import { ExplorerPage } from '../src/renderer/src/pages/ExplorerPage'
 
 const api: SpaceLensAPI = {
   ...mockSnapshotSelection(() => api.getScanSnapshot()),
   getAppInfo: vi.fn(),
   getScanState: vi.fn(),
-  listScanHistory: vi.fn(),
+  listScanHistory: vi.fn<SpaceLensAPI['listScanHistory']>(async () => ({
+    ok: true,
+    value: recentHistoryPage()
+  })),
   getScanHistoryMetadata: vi.fn(),
   deleteSnapshot: vi.fn(),
   getRetentionSettings: vi.fn(),

@@ -37,6 +37,7 @@ import type { FileEntry, ScanSession } from '../src/shared/scan'
 import { IPC_CHANNELS, type ScannerIpcResult, type ScanStateSnapshot } from '../src/shared/ipc'
 import type { ScanSessionSubscriber } from '../src/main/scanner/sessionManager'
 import type { ScanHistoryItem, ScanHistoryPage } from '../src/shared/history'
+import type { InsightsRankingPage } from '../src/shared/insights'
 import {
   followLatest,
   type PreparedSnapshotSelection,
@@ -1375,7 +1376,9 @@ test('reads completed history through the worker and coordinator across publicat
   await client.recoverStorage()
   const { signal } = new AbortController()
   const storage = new ScanStorageCoordinator(Promise.resolve(client))
-  const list = (): Promise<ScanHistoryPage> => storage.read(signal, (db) => db.listScanHistory({}))
+  const overviewQuery = { offset: 0, limit: 5, sort: 'newest' } as const
+  const list = (): Promise<ScanHistoryPage> =>
+    storage.read(signal, (db) => db.listScanHistory(overviewQuery))
   const metadata = (scanId: string): Promise<ScanHistoryItem> =>
     storage.read(signal, (db) => db.getScanHistoryMetadata({ scanId }))
   expect(await list()).toMatchObject({ totalCount: 0, latestCompletedScanId: null })
@@ -1392,7 +1395,13 @@ test('reads completed history through the worker and coordinator across publicat
   const last = await preparePublication(client, lifecycleScan('last'))
   await storage.publishScan(last, root.id)
   const saved = await list()
+  expect((await storage.read(signal, (db) => db.listScanHistory({}))).items).toEqual(saved.items)
   expect(saved.items.map(({ id }) => id)).toEqual([last.id, first.id])
+  expect(saved).toMatchObject({
+    limit: 5,
+    latestCompletedScanId: last.id,
+    items: [{ isLatest: true }, { isLatest: false }]
+  })
   await expect(metadata(first.id)).resolves.toEqual(saved.items[1])
   await expect(client.listScanHistory({ limit: 101 })).rejects.toMatchObject({
     code: 'INVALID_REQUEST'
@@ -1411,7 +1420,9 @@ test('reads completed history through the worker and coordinator across publicat
   await reopened.initialize(databasePath)
   await reopened.recoverStorage()
   const restored = new ScanStorageCoordinator(Promise.resolve(reopened))
-  await expect(restored.read(signal, (db) => db.listScanHistory({}))).resolves.toEqual(saved)
+  await expect(restored.read(signal, (db) => db.listScanHistory(overviewQuery))).resolves.toEqual(
+    saved
+  )
   await expect(
     restored.read(signal, (db) => db.getScanHistoryMetadata({ scanId: last.id }))
   ).resolves.toEqual(saved.items[0])
@@ -1477,7 +1488,9 @@ test('reads completed history through the worker and coordinator across publicat
         queueMicrotask(() => ack(snapshot))
       )
       ack(renderer.send.mock.calls[0][1] as ScanStateSnapshot)
-      await expect(handlers.get(IPC_CHANNELS.listScanHistory)!(event, {})).resolves.toEqual({
+      await expect(
+        handlers.get(IPC_CHANNELS.listScanHistory)!(event, overviewQuery)
+      ).resolves.toEqual({
         ok: true,
         value: saved
       })
@@ -1601,6 +1614,20 @@ test('reads completed history through the worker and coordinator across publicat
         ok: true,
         value: { maxCompletedSnapshots: 1 }
       })
+      await expect(
+        select({ view: 'insights', selection: { mode: 'explicit', scanId: last.id } })
+      ).resolves.toMatchObject({ metadata: { id: last.id, isLatest: true } })
+      const listRankedFiles = (): Promise<ScannerIpcResult<InsightsRankingPage>> =>
+        handlers.get(IPC_CHANNELS.listInsightsLargestFiles)!(event, { scanId: last.id }) as Promise<
+          ScannerIpcResult<InsightsRankingPage>
+        >
+      const files = await listRankedFiles()
+      expect(files).toMatchObject({
+        ok: true,
+        value: { scanId: last.id, entries: [{ id: file.id, parentId: root.id, scanId: last.id }] }
+      })
+      if (!files.ok) throw new Error(files.error.message)
+      const ranked = files.value.entries[0]
       const fresh = await preparePublication(restored, lifecycleScan('fresh'))
       await expect(
         prepareSelection({
@@ -1621,22 +1648,29 @@ test('reads completed history through the worker and coordinator across publicat
         failure: null
       })
       await vi.waitFor(() => expect(retention.status).toBe('protected'))
-      await expect(handlers.get(IPC_CHANNELS.listScanHistory)!(event, {})).resolves.toMatchObject({
+      await expect(
+        handlers.get(IPC_CHANNELS.listScanHistory)!(event, overviewQuery)
+      ).resolves.toMatchObject({
         ok: true,
-        value: { totalCount: 2, latestCompletedScanId: fresh.id }
+        value: {
+          totalCount: 2,
+          latestCompletedScanId: fresh.id,
+          items: [
+            { id: fresh.id, isLatest: true },
+            { id: last.id, isLatest: false }
+          ]
+        }
       })
       await expect(
-        select({
-          view: 'insights',
-          selection: { mode: 'explicit', scanId: last.id }
-        })
-      ).resolves.toMatchObject({ metadata: { id: last.id, isLatest: false } })
+        handlers.get(IPC_CHANNELS.getInsightsSummary)!(event, { scanId: last.id })
+      ).resolves.toMatchObject({ ok: true, value: { scanId: last.id, summary: last.summary } })
+      await expect(listRankedFiles()).resolves.toEqual(files)
       await expect(select(follow)).resolves.toMatchObject({
         availability: { snapshot: { entries: { scanId: fresh.id } } }
       })
       const destination = await prepareSelection({
         view: 'explorer',
-        selection: { mode: 'explicit', scanId: last.id }
+        selection: { mode: 'explicit', scanId: ranked.scanId }
       })
       if (!destination.ok) throw new Error(destination.error.message)
       // Retention is already waiting while Insights owns the historical source and Explorer is preparing it.
@@ -1654,6 +1688,15 @@ test('reads completed history through the worker and coordinator across publicat
           ticket: destination.value.ticket
         })
       ).resolves.toMatchObject({ ok: true, value: { entries: { scanId: last.id } } })
+      await expect(
+        handlers.get(IPC_CHANNELS.getScanEntry)!(event, {
+          scanId: ranked.scanId,
+          entryId: ranked.id
+        })
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { scanId: last.id, id: file.id, parentId: root.id, name: file.name }
+      })
       const started = Promise.withResolvers<void>()
       const finish = Promise.withResolvers<void>()
       const categories = reopened.getInsightsCategories.bind(reopened)
@@ -1694,6 +1737,16 @@ test('reads completed history through the worker and coordinator across publicat
         )
       )
       await expect(
+        handlers.get(IPC_CHANNELS.listScanHistory)!(event, overviewQuery)
+      ).resolves.toMatchObject({
+        ok: true,
+        value: {
+          items: [{ id: fresh.id, isLatest: true }],
+          totalCount: 1,
+          latestCompletedScanId: fresh.id
+        }
+      })
+      await expect(
         handlers.get(IPC_CHANNELS.listScanHistory)!(event, { offset: 0, limit: 1 })
       ).resolves.toMatchObject({
         ok: true,
@@ -1716,6 +1769,20 @@ test('reads completed history through the worker and coordinator across publicat
   } finally {
     vi.doUnmock('electron')
   }
+  await reopened.dispose()
+  const restarted = bundled()
+  await restarted.initialize(databasePath)
+  await restarted.recoverStorage()
+  await expect(restarted.listScanHistory(overviewQuery)).resolves.toMatchObject({
+    items: [{ id: 'fresh', isLatest: true }],
+    totalCount: 1,
+    limit: 5,
+    latestCompletedScanId: 'fresh'
+  })
+  await expect(restarted.getPublishedScan()).resolves.toMatchObject({
+    id: 'fresh',
+    status: 'completed'
+  })
 })
 
 test('makes a failed startup recovery terminal without removing persisted rows', async () => {

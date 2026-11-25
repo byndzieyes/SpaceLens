@@ -17,7 +17,15 @@ function App(): React.JSX.Element {
     consumeTarget
   } = useSnapshotNavigation(selections)
   const pages: Record<PageId, React.JSX.Element> = {
-    overview: <OverviewPage snapshots={selections} onOpenExplorer={() => navigate('explorer')} />,
+    overview: (
+      <OverviewPage
+        snapshots={selections}
+        onOpenExplorer={() => navigate('explorer')}
+        onOpenSnapshot={(view, scanId) =>
+          navigateToSnapshot({ view, selection: { mode: 'explicit', scanId } })
+        }
+      />
+    ),
     explorer: (
       <ExplorerPage
         key={activation}

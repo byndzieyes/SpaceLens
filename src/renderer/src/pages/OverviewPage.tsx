@@ -4,18 +4,23 @@ import { Button } from '../components/ui/Button'
 import { DiskCard } from '../features/overview/DiskCard'
 import { demoDevices } from '../features/overview/demoDevices'
 import { RecentScans } from '../features/overview/RecentScans'
+import { useRecentScans } from '../features/overview/useRecentScans'
 import { ScanPanel } from '../features/scanner/ScanPanel'
 import { useScanner } from '../features/scanner/useScanner'
 import type { SnapshotSelections } from '../features/snapshots/selection'
+import type { SnapshotView } from '../../../shared/snapshotSelection'
 
 export function OverviewPage({
   onOpenExplorer,
+  onOpenSnapshot,
   snapshots
 }: {
   onOpenExplorer?: () => void
+  onOpenSnapshot?: (view: SnapshotView, scanId: string) => void
   snapshots?: SnapshotSelections
 }): React.JSX.Element {
-  const scanner = useScanner(snapshots)
+  const recent = useRecentScans()
+  const scanner = useScanner(snapshots, recent.observeRevision)
   return (
     <div className="space-y-8 sm:space-y-10">
       <header className="flex flex-wrap items-center justify-between gap-5">
@@ -55,7 +60,7 @@ export function OverviewPage({
         </div>
       </section>
 
-      <RecentScans scan={scanner.latestCompleted} status={scanner.publicationStatus} />
+      <RecentScans state={recent.state} onRetry={recent.retry} onOpenSnapshot={onOpenSnapshot} />
     </div>
   )
 }
