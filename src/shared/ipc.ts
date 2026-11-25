@@ -1,4 +1,13 @@
 import type {
+  ScanHistoryErrorCode,
+  ScanHistoryItem,
+  ScanHistoryMetadataRequest,
+  ScanHistoryPage,
+  ScanHistoryQuery,
+  SnapshotDeletionRequest,
+  SnapshotDeletionResult
+} from './history'
+import type {
   InsightsCategories,
   InsightsExtensionPage,
   InsightsExtensionRequest,
@@ -38,6 +47,9 @@ export interface SpaceLensAPI {
   getScanHistoryMetadata: (
     request: ScanHistoryMetadataRequest
   ) => Promise<ScannerIpcResult<ScanHistoryItem, ScanHistoryErrorCode>>
+  deleteSnapshot: (
+    request: SnapshotDeletionRequest
+  ) => Promise<ScannerIpcResult<SnapshotDeletionResult, ScanHistoryErrorCode>>
   getScanEntry: (request: ScanEntryRequest) => Promise<ScannerIpcResult<FileEntry>>
   listScanDirectory: (request: ScanDirectoryRequest) => Promise<ScannerIpcResult<ScanDirectoryPage>>
   getScanDirectoryTreemap: (
@@ -72,6 +84,7 @@ export const IPC_CHANNELS = {
   getScanSnapshot: 'spacelens:get-scan-snapshot',
   listScanHistory: 'spacelens:list-scan-history',
   getScanHistoryMetadata: 'spacelens:get-scan-history-metadata',
+  deleteSnapshot: 'spacelens:delete-snapshot',
   getScanEntry: 'spacelens:get-scan-entry',
   listScanDirectory: 'spacelens:list-scan-directory',
   getScanDirectoryTreemap: 'spacelens:get-scan-directory-treemap',
@@ -100,6 +113,7 @@ export interface CancelScanRequest {
 
 export type ScannerIpcErrorCode =
   | SnapshotAccessErrorCode
+  | ScanHistoryErrorCode
   | 'UNAUTHORIZED'
   | 'INVALID_REQUEST'
   | 'PATH_NOT_AUTHORIZED'
@@ -127,6 +141,8 @@ export interface ScanStateSnapshot {
   readonly latestCompleted?: RecentScanSummary | null
   /** Startup state of the publication summary, independent of active scanner progress. */
   readonly publicationStatus?: 'loading' | 'ready' | 'unavailable'
+  /** Increases only after a confirmed mutation of completed history. */
+  readonly historyRevision?: number
   readonly revision: number
   readonly state: ScanSessionState | null
 }
@@ -134,10 +150,3 @@ export interface ScanStateSnapshot {
 export interface ScanAccepted {
   readonly scanId: string
 }
-import type {
-  ScanHistoryErrorCode,
-  ScanHistoryItem,
-  ScanHistoryMetadataRequest,
-  ScanHistoryPage,
-  ScanHistoryQuery
-} from './history'

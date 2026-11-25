@@ -1,3 +1,5 @@
+import { resolveScanHistoryQuery, type ResolvedScanHistoryQuery } from '../../shared/history'
+import type { ScanHistoryErrorCode } from '../../shared/history'
 import {
   DEFAULT_INSIGHTS_EXTENSION_PAGE_SIZE,
   DEFAULT_INSIGHTS_RANKING_PAGE_SIZE,
@@ -18,7 +20,9 @@ import { integer, isSnapshotId, record } from './payloads'
 
 export class SnapshotAccessError extends Error {
   constructor(
-    readonly code: SnapshotAccessErrorCode,
+    readonly code:
+      | SnapshotAccessErrorCode
+      | Extract<ScanHistoryErrorCode, 'SNAPSHOT_IN_USE' | 'SNAPSHOT_DELETE_UNCERTAIN'>,
     message: string
   ) {
     super(message)
@@ -127,4 +131,3 @@ export function validateTreemapRequest(
     `Valid snapshot IDs and an optional Treemap limit from 1 to ${MAX_SCAN_TREEMAP_ENTRIES} are required.`
   )
 }
-import { resolveScanHistoryQuery, type ResolvedScanHistoryQuery } from '../../shared/history'

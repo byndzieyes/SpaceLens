@@ -9,6 +9,7 @@ const api: SpaceLensAPI = {
   getScanState: vi.fn(),
   listScanHistory: vi.fn(),
   getScanHistoryMetadata: vi.fn(),
+  deleteSnapshot: vi.fn(),
   getScanSnapshot: vi.fn(),
   getScanEntry: vi.fn(),
   listScanDirectory: vi.fn(),

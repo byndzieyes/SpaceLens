@@ -34,6 +34,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   expect(contextBridge.exposeInMainWorld).toHaveBeenCalledWith('spaceLens', api)
   expect(Object.keys(api).sort()).toEqual([
     'cancelScan',
+    'deleteSnapshot',
     'getAppInfo',
     'getInsightsCategories',
     'getInsightsObservations',
@@ -130,6 +131,10 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(17, IPC_CHANNELS.listScanHistory, query)
   expect(await api.getScanHistoryMetadata({ scanId: 'scan' })).toBe(response)
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(18, IPC_CHANNELS.getScanHistoryMetadata, {
+    scanId: 'scan'
+  })
+  expect(await api.deleteSnapshot({ scanId: 'scan' })).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(19, IPC_CHANNELS.deleteSnapshot, {
     scanId: 'scan'
   })
 })

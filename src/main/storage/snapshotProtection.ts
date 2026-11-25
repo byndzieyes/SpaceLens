@@ -1,0 +1,110 @@
+import { readSnapshotId, SnapshotAccessError } from './snapshotAccess'
+
+const MAX_OWNERS = 8
+const MAX_SNAPSHOTS_PER_OWNER = 2
+
+export interface SnapshotProtectionOwner {
+  acquire(scanId: string): Promise<void>
+  release(scanId: string): void
+  dispose(): void
+}
+
+/** Main-owned reservations shared by view leases, admitted reads, and deletion. */
+export class SnapshotProtection {
+  private readonly leases = new Map<string, number>()
+  private owners = 0
+  private deleting: string | undefined
+
+  isProtected(scanId: string): boolean {
+    return this.leases.has(scanId)
+  }
+
+  get deletionPending(): boolean {
+    return this.deleting !== undefined
+  }
+
+  reserve(scanId: string): () => void {
+    readSnapshotId({ scanId })
+    if (this.deleting === scanId)
+      throw new SnapshotAccessError('SNAPSHOT_IN_USE', 'This snapshot is being deleted.')
+    this.leases.set(scanId, (this.leases.get(scanId) ?? 0) + 1)
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      const count = this.leases.get(scanId)!
+      if (count === 1) this.leases.delete(scanId)
+      else this.leases.set(scanId, count - 1)
+    }
+  }
+
+  assertDeletable(scanId: string): void {
+    if (this.isProtected(scanId) || this.deleting === scanId)
+      throw new SnapshotAccessError('SNAPSHOT_IN_USE', 'This snapshot is in use.')
+  }
+
+  admitDeletion(scanId: string): () => void {
+    this.assertDeletable(scanId)
+    if (this.deletionPending) throw new Error('A snapshot deletion is already pending.')
+    this.deleting = scanId
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.deleting = undefined
+    }
+  }
+
+  createOwner(
+    signal: AbortSignal,
+    validate: (scanId: string) => Promise<unknown>
+  ): SnapshotProtectionOwner {
+    if (signal.aborted || this.owners >= MAX_OWNERS)
+      throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'Snapshot protection is unavailable.')
+    this.owners++
+    const owned = new Map<string, { release: () => void; ready: Promise<void> }>()
+    let disposed = false
+    const inactive = (): SnapshotAccessError =>
+      new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'The snapshot owner is no longer active.')
+    const release = (scanId: string): void => {
+      owned.get(scanId)?.release()
+      owned.delete(scanId)
+    }
+    const dispose = (): void => {
+      if (disposed) return
+      disposed = true
+      signal.removeEventListener('abort', dispose)
+      for (const scanId of owned.keys()) release(scanId)
+      this.owners--
+    }
+    signal.addEventListener('abort', dispose, { once: true })
+    return {
+      acquire: async (scanId) => {
+        if (disposed) throw inactive()
+        const existing = owned.get(scanId)
+        if (existing) return existing.ready
+        if (owned.size >= MAX_SNAPSHOTS_PER_OWNER)
+          throw new SnapshotAccessError(
+            'SNAPSHOT_UNAVAILABLE',
+            'The snapshot owner is at capacity.'
+          )
+        const releaseLease = this.reserve(scanId)
+        const current = (): boolean => owned.get(scanId)?.release === releaseLease
+        const ready = Promise.resolve()
+          .then(async () => {
+            if (!current()) throw inactive()
+            await validate(scanId)
+            if (!current()) throw inactive()
+          })
+          .catch((error: unknown) => {
+            if (current()) release(scanId)
+            throw error
+          })
+        owned.set(scanId, { release: releaseLease, ready })
+        return ready
+      },
+      release,
+      dispose
+    }
+  }
+}

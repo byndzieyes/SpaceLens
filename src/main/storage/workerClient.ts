@@ -3,7 +3,8 @@ import type {
   ScanHistoryItem,
   ScanHistoryMetadataRequest,
   ScanHistoryPage,
-  ScanHistoryQuery
+  ScanHistoryQuery,
+  SnapshotDeletionRequest
 } from '../../shared/history'
 import type {
   InsightsCategories,
@@ -23,7 +24,12 @@ import type {
   ScanEntryRequest,
   ScanSnapshotAvailability
 } from '../../shared/snapshot'
-import type { BuildingScan, CompletedScan, StorageBatchOperation } from './payloads'
+import type {
+  BuildingScan,
+  CompletedScan,
+  CommittedSnapshotDeletion,
+  StorageBatchOperation
+} from './payloads'
 import {
   parseStorageResponse,
   RECOVERY_CLOSED_CODE,
@@ -55,6 +61,10 @@ export class StorageWorkerError extends Error {
   }
 }
 
+export function isUncertainStorageWrite(error: unknown): boolean {
+  return !(error instanceof StorageWorkerError) || error.name === 'AggregateError'
+}
+
 /** Owns a worker and at most one in-flight request. Callers must await each operation. */
 export class StorageWorkerClient {
   private state: 'idle' | 'initializing' | 'ready' | 'closing' | 'closed' | 'failed' = 'idle'
@@ -65,6 +75,7 @@ export class StorageWorkerClient {
   private closeAcknowledged = false
   private lifecycleTimer: ReturnType<typeof setTimeout> | undefined
   private readonly released = Promise.withResolvers<void>()
+  private readonly exitedWorker = Promise.withResolvers<void>()
   private disposal: Promise<void> | undefined
 
   constructor(private readonly worker: Worker) {
@@ -122,6 +133,21 @@ export class StorageWorkerClient {
 
   getScanHistoryMetadata(request: ScanHistoryMetadataRequest): Promise<ScanHistoryItem> {
     return this.run('getScanHistoryMetadata', request)
+  }
+
+  async deleteSnapshot(request: SnapshotDeletionRequest): Promise<CommittedSnapshotDeletion> {
+    const result = await this.run('deleteSnapshot', request)
+    if (result.scanId !== request.scanId) {
+      const error = new Error('Storage returned a different deleted scan.')
+      this.fail(error)
+      throw error
+    }
+    return result
+  }
+
+  /** Unlike dispose(), this settles only when the worker has actually exited. */
+  waitForExit(): Promise<void> {
+    return this.exitedWorker.promise
   }
 
   getInsightsCategories(scanId: string): Promise<InsightsCategories> {
@@ -312,6 +338,7 @@ export class StorageWorkerClient {
     this.worker.off('error', this.onError)
     this.worker.off('exit', this.onExit)
     this.released.resolve()
+    this.exitedWorker.resolve()
   }
 
   private readonly fail = (error: Error): void => {

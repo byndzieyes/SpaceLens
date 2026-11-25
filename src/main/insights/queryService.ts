@@ -19,7 +19,11 @@ export class InsightsQueryService {
 
   async getSummary(request: unknown, signal: AbortSignal): Promise<InsightsSummary> {
     const scanId = readSnapshotId(request)
-    const scan = await this.storage.read(signal, (client) => client.requirePublishedScan(scanId))
+    const scan = await this.storage.read(
+      signal,
+      (client) => client.requirePublishedScan(scanId),
+      scanId
+    )
     assertPublication(scan.id, scanId)
     return {
       scanId: scan.id,
@@ -32,7 +36,11 @@ export class InsightsQueryService {
 
   async getCategories(request: unknown, signal: AbortSignal): Promise<InsightsCategories> {
     const scanId = readSnapshotId(request)
-    const result = await this.storage.read(signal, (client) => client.getInsightsCategories(scanId))
+    const result = await this.storage.read(
+      signal,
+      (client) => client.getInsightsCategories(scanId),
+      scanId
+    )
     assertPublication(result.scanId, scanId)
     return result
   }
@@ -42,8 +50,10 @@ export class InsightsQueryService {
     signal: AbortSignal
   ): Promise<InsightsSizeDistribution> {
     const scanId = readSnapshotId(request)
-    const result = await this.storage.read(signal, (client) =>
-      client.getInsightsSizeDistribution(scanId)
+    const result = await this.storage.read(
+      signal,
+      (client) => client.getInsightsSizeDistribution(scanId),
+      scanId
     )
     assertPublication(result.scanId, scanId)
     return result
@@ -51,8 +61,10 @@ export class InsightsQueryService {
 
   async getObservations(request: unknown, signal: AbortSignal): Promise<InsightsObservations> {
     const scanId = readSnapshotId(request)
-    const result = await this.storage.read(signal, (client) =>
-      client.getInsightsObservations(scanId)
+    const result = await this.storage.read(
+      signal,
+      (client) => client.getInsightsObservations(scanId),
+      scanId
     )
     assertPublication(result.scanId, scanId)
     return result
@@ -60,7 +72,11 @@ export class InsightsQueryService {
 
   async listExtensions(request: unknown, signal: AbortSignal): Promise<InsightsExtensionPage> {
     const page = readExtensionRequest(request)
-    const result = await this.storage.read(signal, (client) => client.listInsightsExtensions(page))
+    const result = await this.storage.read(
+      signal,
+      (client) => client.listInsightsExtensions(page),
+      page.scanId
+    )
     assertPublication(result.scanId, page.scanId)
     return result
   }
@@ -71,10 +87,13 @@ export class InsightsQueryService {
     signal: AbortSignal
   ): Promise<InsightsRankingPage> {
     const page = readRankingRequest(request)
-    const result = await this.storage.read(signal, (client) =>
-      type === 'file'
-        ? client.listInsightsLargestFiles(page)
-        : client.listInsightsLargestDirectories(page)
+    const result = await this.storage.read(
+      signal,
+      (client) =>
+        type === 'file'
+          ? client.listInsightsLargestFiles(page)
+          : client.listInsightsLargestDirectories(page),
+      page.scanId
     )
     assertPublication(result.scanId, page.scanId)
     if (result.offset !== page.offset || result.limit !== page.limit) {

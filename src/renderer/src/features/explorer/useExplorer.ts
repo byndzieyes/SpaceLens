@@ -224,17 +224,22 @@ export function useExplorer(
     mounted.current = true
     const ticket = requests.current
     let revision = -1
-    let latestPublished: string | undefined
+    let latestPublished: string | null | undefined
     let waitingTarget = target
     const unsubscribe = window.spaceLens.onScanStateChanged((update) => {
       if (update.revision <= revision) return
       revision = update.revision
       const session = update.state?.session
       // Recovery metadata arrives with an idle scanner. The initial SQLite read already waits for it.
-      if (!session) return
+      if (!session && update.historyRevision === undefined) return
       const published =
-        update.latestCompleted?.id ?? (session.status === 'completed' ? session.id : undefined)
-      if (!published || latestPublished === published) return
+        update.latestCompleted?.id ??
+        (update.latestCompleted === null
+          ? null
+          : session?.status === 'completed'
+            ? session.id
+            : undefined)
+      if (published === undefined || latestPublished === published) return
       latestPublished = published
       if (waitingTarget) return
       if (openingTarget.current) {

@@ -1,5 +1,5 @@
 import type { StorageBatchOperation } from '../storage/payloads'
-import { StorageWorkerError, type StorageWorkerClient } from '../storage/workerClient'
+import { isUncertainStorageWrite, type StorageWorkerClient } from '../storage/workerClient'
 import type { ScanOutputEvent } from './summary'
 
 export type ScanPersistence = Pick<
@@ -32,7 +32,7 @@ export async function writeScan<T>(action: string, write: () => Promise<T>): Pro
   } catch (error) {
     // A worker reply establishes rollback unless SQLite itself could not roll back.
     // Transport failures and timeouts can lose the reply after a commit.
-    const uncertain = !(error instanceof StorageWorkerError) || error.name === 'AggregateError'
+    const uncertain = isUncertainStorageWrite(error)
     throw new ScanStorageError(action, error, uncertain)
   }
 }

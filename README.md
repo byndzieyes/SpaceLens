@@ -41,6 +41,10 @@ Main serializes reads and scanner writes through one Storage Worker. Scanner wri
 
 The internal History API reads completed scan metadata in pages of 20 by default, with at most 100 scans per request. Root filters match stored paths case-sensitively, with literal substring search available. Offset-based pages reflect the current history on each read. Future consumers need to refresh pagination after publication, deletion, or pruning because a mutation can shift later pages.
 
+The History deletion API removes one completed snapshot and its stored entries in a SQLite transaction. Deleting Latest selects the next publication by sequence, or clears Latest when history is empty. Confirmed publications and deletions advance a history revision on the scanner-state channel. The deletion queue admits one request at a time. Queued scanner writes take priority, and an active cascade can delay the next batch because SQLite executes it synchronously.
+
+Main owns process-local protection. ID-based Explorer and Insights requests hold their snapshot from queue admission until the worker operation settles. A dispatched request keeps protection after renderer navigation or timeout until the worker replies or exits. Argument-free Latest discovery selects and reads Latest within one serialized worker request. History metadata reads use their own read transactions. Task 5.7 will attach the owner leases to view selection and renderer-document lifetimes.
+
 Scan history and comparisons, duplicate detection, file cleanup, and background monitoring are deferred beyond Phase 4.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).

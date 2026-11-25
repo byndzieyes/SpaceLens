@@ -1,4 +1,5 @@
 import { isAbsolute } from 'node:path'
+import type { SnapshotDeletionResult } from '../../shared/history'
 import type { FileEntry, ScanSession, ScanSummary } from '../../shared/scan'
 import { SCANNER_BATCH_SIZE } from '../scanner/workerProtocol'
 
@@ -18,6 +19,10 @@ export interface StorageBatch {
 
 export type BuildingScan = ScanSession & { readonly status: 'running' }
 export type CompletedScan = ScanSession & { readonly status: 'completed' }
+
+export interface CommittedSnapshotDeletion extends SnapshotDeletionResult {
+  readonly latestCompleted: CompletedScan | null
+}
 
 export interface ScanPublication {
   readonly scan: CompletedScan

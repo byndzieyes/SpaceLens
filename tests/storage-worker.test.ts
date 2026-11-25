@@ -1426,6 +1426,13 @@ test('reads completed history through the worker and coordinator across publicat
       await expect(
         handlers.get(IPC_CHANNELS.getScanHistoryMetadata)!(event, { scanId: next.id })
       ).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
+      await expect(
+        handlers.get(IPC_CHANNELS.deleteSnapshot)!(event, { scanId: first.id })
+      ).resolves.toEqual({ ok: true, value: { scanId: first.id, latestCompletedScanId: last.id } })
+      await expect(handlers.get(IPC_CHANNELS.listScanHistory)!(event, {})).resolves.toMatchObject({
+        ok: true,
+        value: { items: [{ id: last.id }], totalCount: 1 }
+      })
     } finally {
       await boundary.dispose()
     }
@@ -1463,6 +1470,120 @@ test('makes a failed startup recovery terminal without removing persisted rows',
   ])
   expect(observer.prepare('SELECT COUNT(*) AS count FROM entries').get()?.count).toBe(6)
 })
+
+test('deletes snapshots through the bundled worker while preserving an active scan and publication order', async () => {
+  const client = wrap(start())
+  await client.initialize(databasePath)
+  await client.recoverStorage()
+  const storage = new ScanStorageCoordinator(Promise.resolve(client))
+  const context = new AbortController()
+  const older = await preparePublication(client, lifecycleScan('older'))
+  await storage.publishScan(older, root.id)
+  const latest = await preparePublication(client, lifecycleScan('latest'))
+  await storage.publishScan(latest, root.id)
+  const held = storage.createSnapshotOwner(context.signal)
+  await held.acquire(latest.id)
+  await expect(storage.deleteSnapshot({ scanId: latest.id })).rejects.toMatchObject({
+    code: 'SNAPSHOT_IN_USE'
+  })
+  context.abort()
+  const pending = await preparePublication(client, lifecycleScan('building'))
+  await expect(storage.deleteSnapshot({ scanId: pending.id })).rejects.toMatchObject({
+    code: 'SNAPSHOT_UNAVAILABLE'
+  })
+
+  const deletion = storage.deleteSnapshot({ scanId: latest.id })
+  const replacement = storage.read(new AbortController().signal, (worker) =>
+    worker.getScanSnapshot()
+  )
+  await expect(deletion).resolves.toEqual({
+    scanId: latest.id,
+    latestCompletedScanId: older.id,
+    latestCompleted: older
+  })
+  await expect(replacement).resolves.toMatchObject({ snapshot: { entries: { scanId: older.id } } })
+  await expect(client.getScan(pending.id)).resolves.toMatchObject({ status: 'running' })
+  await expect(client.getEntry(pending.id, file.id)).resolves.toEqual({
+    ...file,
+    scanId: pending.id
+  })
+  await storage.publishScan(pending, root.id)
+  await expect(client.getInsightsCategories(pending.id)).resolves.toMatchObject({
+    scanId: pending.id
+  })
+  await expect(storage.deleteSnapshot({ scanId: older.id })).resolves.toMatchObject({
+    latestCompletedScanId: pending.id
+  })
+  await client.dispose()
+
+  const reopened = bundled()
+  await reopened.initialize(databasePath)
+  await reopened.recoverStorage()
+  await expect(reopened.listScanHistory({})).resolves.toMatchObject({
+    items: [{ id: pending.id, isLatest: true }],
+    totalCount: 1,
+    latestCompletedScanId: pending.id
+  })
+  await expect(reopened.getEntry(latest.id, file.id)).resolves.toBeNull()
+  await expect(reopened.getEntry(older.id, root.id)).resolves.toBeNull()
+  using observer = new DatabaseSync(databasePath, { readOnly: true })
+  expect(
+    observer.prepare('SELECT last_sequence FROM scan_publication_counter').get()?.last_sequence
+  ).toBe(3)
+})
+
+test.each(['before commit', 'before acknowledgment'])(
+  'recovers an uncertain deletion after worker exit %s',
+  async (point) => {
+    const worker = start(`
+    const { parentPort } = require('node:worker_threads')
+    const { DatabaseSync } = require('node:sqlite')
+    let deleting = false
+    parentPort.on('message', request => {
+      deleting = request.operation === 'deleteSnapshot'
+    })
+    if (${JSON.stringify(point)} === 'before commit') {
+      const exec = DatabaseSync.prototype.exec
+      DatabaseSync.prototype.exec = function (sql) {
+        if (deleting && sql === 'COMMIT') process.exit(81)
+        return exec.call(this, sql)
+      }
+    } else {
+      const send = parentPort.postMessage.bind(parentPort)
+      parentPort.postMessage = response => {
+        if (deleting && response.ok) process.exit(81)
+        return send(response)
+      }
+    }
+    require(${JSON.stringify(workerPath)})
+  `)
+    const client = wrap(worker)
+    await client.initialize(databasePath)
+    const saved = await preparePublication(client, lifecycleScan('saved'))
+    await client.publishScan(saved, root.id)
+    const unrelated = await preparePublication(client, lifecycleScan('latest'))
+    await client.publishScan(unrelated, root.id)
+    const storage = new ScanStorageCoordinator(Promise.resolve(client))
+    await expect(storage.deleteSnapshot({ scanId: saved.id })).rejects.toMatchObject({
+      code: 'SNAPSHOT_DELETE_UNCERTAIN'
+    })
+    await expect(storage.beginScan(lifecycleScan('blocked'))).rejects.toThrow(
+      'storage is unavailable'
+    )
+    await client.waitForExit()
+
+    const reopened = bundled()
+    await reopened.initialize(databasePath)
+    await reopened.recoverStorage()
+    await expect(reopened.getPublishedScan()).resolves.toEqual(unrelated)
+    await expect(reopened.getScan(saved.id)).resolves.toEqual(
+      point === 'before commit' ? saved : null
+    )
+    await expect(reopened.getEntry(saved.id, root.id)).resolves.toEqual(
+      point === 'before commit' ? { ...root, scanId: saved.id, aggregatedSizeBytes: 0 } : null
+    )
+  }
+)
 
 test.each(['before commit', 'before acknowledgment'])(
   'recovers after worker exit %s',

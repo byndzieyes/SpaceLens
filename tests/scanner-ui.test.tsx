@@ -75,6 +75,7 @@ beforeEach(() => {
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: latest })),
     listScanHistory: vi.fn(),
     getScanHistoryMetadata: vi.fn(),
+    deleteSnapshot: vi.fn(),
     getScanSnapshot: vi.fn(),
     getScanEntry: vi.fn(),
     listScanDirectory: vi.fn(),

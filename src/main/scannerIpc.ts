@@ -49,6 +49,8 @@ function snapshotFailure(error: unknown, history: boolean): ScannerIpcResult<nev
       case 'INVALID_REQUEST':
       case 'SNAPSHOT_UNAVAILABLE':
       case 'SNAPSHOT_EXPIRED':
+      case 'SNAPSHOT_IN_USE':
+      case 'SNAPSHOT_DELETE_UNCERTAIN':
       case 'ENTRY_NOT_FOUND':
       case 'NOT_DIRECTORY':
       case 'SIZE_OVERFLOW':
@@ -152,13 +154,14 @@ function publicationSummary(
 export function registerScannerIpc(
   manager: ScanSessionManager,
   rendererUrl: string,
-  storage: Pick<ScanStorageCoordinator, 'read'>,
+  storage: Pick<ScanStorageCoordinator, 'read' | 'deleteSnapshot'>,
   restoredPublication: Promise<CompletedScan | null>
 ): { attachRenderer: (renderer: WebContents) => void; dispose: () => Promise<void> } {
   let renderer: WebContents | null = null
   let disposed = false
   let disposal: Promise<void> | undefined
   let revision = 0
+  let historyRevision = 0
   let latestCompleted: RecentScanSummary | null = null
   let publicationStatus: NonNullable<ScanStateSnapshot['publicationStatus']> = 'loading'
   let latest: ScanStateSnapshot = {
@@ -205,7 +208,8 @@ export function registerScannerIpc(
       state: publicState(state),
       snapshotUnavailable: null,
       latestCompleted,
-      publicationStatus
+      publicationStatus,
+      ...(historyRevision > 0 ? { historyRevision } : {})
     }
     return latest
   }
@@ -219,10 +223,14 @@ export function registerScannerIpc(
       inFlight = null
     }
   }
+  const historyCommitted = (scan: CompletedScan | null): void => {
+    historyRevision++
+    latestCompleted = publicationSummary(scan)
+    publicationStatus = 'ready'
+  }
   const unsubscribe = manager.subscribe((state) => {
     if (state.session.status === 'completed') {
-      latestCompleted = publicationSummary(state.session)
-      publicationStatus = 'ready'
+      historyCommitted({ ...state.session, status: state.session.status })
     }
     capture(state)
     sendLatest()
@@ -316,10 +324,11 @@ export function registerScannerIpc(
     }
   )
 
-  const readChannels = [
+  const snapshotChannels = [
     IPC_CHANNELS.getScanSnapshot,
     IPC_CHANNELS.listScanHistory,
     IPC_CHANNELS.getScanHistoryMetadata,
+    IPC_CHANNELS.deleteSnapshot,
     IPC_CHANNELS.getScanEntry,
     IPC_CHANNELS.listScanDirectory,
     IPC_CHANNELS.getScanDirectoryTreemap,
@@ -331,13 +340,15 @@ export function registerScannerIpc(
     IPC_CHANNELS.listInsightsLargestFiles,
     IPC_CHANNELS.listInsightsLargestDirectories
   ] as const
-  for (const channel of readChannels) {
+  for (const channel of snapshotChannels) {
     ipcMain.handle(channel, async (event, ...args: unknown[]) => {
       if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
       if (!authorized(event)) return failure('UNAUTHORIZED', 'Scanner access is not authorized.')
       const { signal } = readContext
       const history =
-        channel === IPC_CHANNELS.listScanHistory || channel === IPC_CHANNELS.getScanHistoryMetadata
+        channel === IPC_CHANNELS.listScanHistory ||
+        channel === IPC_CHANNELS.getScanHistoryMetadata ||
+        channel === IPC_CHANNELS.deleteSnapshot
       const reply = <T>(result: ScannerIpcResult<T>): ScannerIpcResult<T> =>
         signal.aborted || !authorized(event)
           ? failure(
@@ -367,6 +378,18 @@ export function registerScannerIpc(
             'INVALID_REQUEST',
             history ? 'One scan history request is required.' : 'One snapshot request is required.'
           )
+        }
+        if (channel === IPC_CHANNELS.deleteSnapshot) {
+          const scanId = readSnapshotId(args[0])
+          const { latestCompleted: replacement, latestCompletedScanId } =
+            await storage.deleteSnapshot({
+              scanId
+            })
+          // The committed mutation outlives the requesting document.
+          historyCommitted(replacement)
+          capture(manager.getState())
+          sendLatest()
+          return reply({ ok: true, value: { scanId, latestCompletedScanId } })
         }
         if (channel === IPC_CHANNELS.listScanHistory) {
           const query = readScanHistoryQuery(args[0])
@@ -414,19 +437,27 @@ export function registerScannerIpc(
         if (channel === IPC_CHANNELS.getScanDirectoryTreemap) {
           const request = args[0]
           validateTreemapRequest(request)
-          const value = await storage.read(signal, (client) =>
-            client.getScanDirectoryTreemap(request)
+          const value = await storage.read(
+            signal,
+            (client) => client.getScanDirectoryTreemap(request),
+            request.scanId
           )
           return reply({ ok: true, value })
         }
         const request = args[0] as ScanEntryRequest | ScanDirectoryRequest
         validateSnapshotRequest(request, channel === IPC_CHANNELS.listScanDirectory)
         if (channel === IPC_CHANNELS.getScanEntry) {
-          const value = await storage.read(signal, (client) => client.getScanEntry(request))
+          const value = await storage.read(
+            signal,
+            (client) => client.getScanEntry(request),
+            request.scanId
+          )
           return reply({ ok: true, value })
         }
-        const value = await storage.read(signal, (client) =>
-          client.listScanDirectory(request as ScanDirectoryRequest)
+        const value = await storage.read(
+          signal,
+          (client) => client.listScanDirectory(request as ScanDirectoryRequest),
+          request.scanId
         )
         return reply({ ok: true, value })
       } catch (error) {
@@ -568,7 +599,7 @@ export function registerScannerIpc(
       unsubscribe()
       detachRenderer()
       for (const channel of channels) ipcMain.removeHandler(channel)
-      for (const channel of readChannels) ipcMain.removeHandler(channel)
+      for (const channel of snapshotChannels) ipcMain.removeHandler(channel)
       ipcMain.removeHandler(IPC_CHANNELS.selectScanDirectory)
       ipcMain.removeListener(IPC_CHANNELS.acknowledgeScanState, onAck)
       disposal = manager.dispose()

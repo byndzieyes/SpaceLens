@@ -30,7 +30,7 @@ export function useInsights(): {
     const api = window.spaceLens
     let active = true
     let revision = -1
-    let announcedScanId: string | undefined
+    let announcedScanId: string | null | undefined
     let resolvedScanId: string | undefined
     let request: { scanId?: string; visibleScanId?: string } | undefined
     let started = false
@@ -126,9 +126,18 @@ export function useInsights(): {
     const unsubscribe = api.onScanStateChanged((update: ScanStateSnapshot) => {
       if (!active || update.revision <= revision) return
       revision = update.revision
-      const published = update.latestCompleted?.id
-      if (!published || published === announcedScanId) return
+      const published =
+        update.latestCompleted?.id ??
+        (update.latestCompleted === null && update.historyRevision !== undefined ? null : undefined)
+      if (published === undefined || published === announcedScanId) return
       announcedScanId = published
+      if (published === null) {
+        request = undefined
+        resolvedScanId = undefined
+        started = true
+        setState({ status: 'no-snapshot' })
+        return
+      }
       if (
         published === resolvedScanId ||
         published === request?.scanId ||

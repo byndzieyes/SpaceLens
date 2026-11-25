@@ -68,8 +68,9 @@ const queries = {
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
   getScanDirectoryTreemap: vi.fn<StorageWorkerClient['getScanDirectoryTreemap']>()
 }
-const storage: Pick<ScanStorageCoordinator, 'read'> = {
-  read: async (_signal, query) => query(queries)
+const storage = {
+  read: (async (_signal, query) => query(queries)) as ScanStorageCoordinator['read'],
+  deleteSnapshot: vi.fn<ScanStorageCoordinator['deleteSnapshot']>()
 }
 
 function makeRenderer(): EventEmitter & {
@@ -125,6 +126,7 @@ function ack(revision: number, sender = event()): void {
 beforeEach(async () => {
   vi.clearAllMocks()
   for (const query of Object.values(queries)) query.mockReset()
+  storage.deleteSnapshot.mockReset()
   queries.getScanSnapshot.mockResolvedValue({ snapshot: null, unavailable: null })
   state = null
   renderer = makeRenderer()
@@ -447,6 +449,113 @@ test('reports startup recovery failure without inventing a publication', async (
     })
   )
 })
+
+test('authorizes explicit deletion and publishes a new history revision for each confirmed deletion', async () => {
+  const latest = completed()
+  const previous = { ...latest, id: otherId }
+  await attachWithRecovery(Promise.resolve(latest))
+  ack((renderer.send.mock.calls.at(-1)![1] as ScanStateSnapshot).revision)
+  renderer.send.mockClear()
+  const channel = IPC_CHANNELS.deleteSnapshot
+  expect(await invoke(channel, [{ scanId: id }], event(makeRenderer()))).toMatchObject({
+    ok: false,
+    error: { code: 'UNAUTHORIZED' }
+  })
+  expect(await invoke(channel, [{ scanId: id, path: rootPath }])).toMatchObject({
+    ok: false,
+    error: { code: 'INVALID_REQUEST' }
+  })
+  expect(storage.deleteSnapshot).not.toHaveBeenCalled()
+  for (const code of ['SNAPSHOT_IN_USE', 'SNAPSHOT_DELETE_UNCERTAIN']) {
+    storage.deleteSnapshot.mockRejectedValueOnce(
+      new StorageWorkerError({
+        code,
+        name: 'SnapshotAccessError',
+        message: 'Deletion was not confirmed.',
+        sqliteCode: null
+      })
+    )
+    expect(await invoke(channel, [{ scanId: id }])).toMatchObject({ ok: false, error: { code } })
+  }
+  storage.deleteSnapshot.mockRejectedValueOnce(new Error('SQLite commit failed with private path'))
+  expect(await invoke(channel, [{ scanId: id }])).toMatchObject({
+    ok: false,
+    error: { code: 'INTERNAL_ERROR', message: 'The scan history request could not be processed.' }
+  })
+  expect(renderer.send).not.toHaveBeenCalled()
+
+  storage.deleteSnapshot.mockResolvedValueOnce({
+    scanId: 'historical',
+    latestCompletedScanId: id,
+    latestCompleted: latest
+  })
+  expect(await invoke(channel, [{ scanId: 'historical' }])).toEqual({
+    ok: true,
+    value: { scanId: 'historical', latestCompletedScanId: id }
+  })
+  expect(renderer.send).toHaveBeenLastCalledWith(
+    IPC_CHANNELS.scanStateChanged,
+    expect.objectContaining({
+      historyRevision: 1,
+      latestCompleted: expect.objectContaining({ id })
+    })
+  )
+  ack((renderer.send.mock.calls.at(-1)![1] as ScanStateSnapshot).revision)
+
+  storage.deleteSnapshot.mockResolvedValueOnce({
+    scanId: id,
+    latestCompletedScanId: previous.id,
+    latestCompleted: previous
+  })
+  await invoke(channel, [{ scanId: id }])
+  expect(renderer.send).toHaveBeenLastCalledWith(
+    IPC_CHANNELS.scanStateChanged,
+    expect.objectContaining({
+      historyRevision: 2,
+      latestCompleted: expect.objectContaining({ id: previous.id })
+    })
+  )
+})
+
+test.each(['navigation', 'destroyed'])(
+  'reconciles an admitted deletion after renderer %s',
+  async (change) => {
+    const saved = completed()
+    await attachWithRecovery(Promise.resolve(saved))
+    const active = running()
+    state = {
+      ...active,
+      session: { ...active.session, id: 'building' },
+      progress: { ...active.progress, scanId: 'building' }
+    }
+    const pending =
+      Promise.withResolvers<Awaited<ReturnType<ScanStorageCoordinator['deleteSnapshot']>>>()
+    storage.deleteSnapshot.mockReturnValueOnce(pending.promise)
+    const reply = invoke(IPC_CHANNELS.deleteSnapshot, [{ scanId: saved.id }])
+    if (change === 'navigation') renderer.emit('did-start-navigation', { isMainFrame: true })
+    else renderer.emit('destroyed')
+    pending.resolve({ scanId: saved.id, latestCompletedScanId: null, latestCompleted: null })
+    expect(await reply).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+
+    renderer = makeRenderer()
+    boundary.attachRenderer(renderer as unknown as WebContents)
+    expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
+      ok: true,
+      value: {
+        historyRevision: 1,
+        latestCompleted: null,
+        publicationStatus: 'ready',
+        state: { session: { id: 'building', status: 'running' } }
+      }
+    })
+    state = { ...running(), session: { ...saved, id: otherId } }
+    subscriber(state)
+    expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
+      ok: true,
+      value: { historyRevision: 2, latestCompleted: { id: otherId } }
+    })
+  }
+)
 
 test.each([
   IPC_CHANNELS.getScanSnapshot,
@@ -1220,7 +1329,8 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsObservations)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listScanHistory)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getScanHistoryMetadata)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(17)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.deleteSnapshot)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(18)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

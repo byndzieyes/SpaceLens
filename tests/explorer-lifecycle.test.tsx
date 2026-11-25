@@ -121,6 +121,7 @@ function mockApp(): {
   listeners: Set<(snapshot: ScanStateSnapshot) => void>
   publish: (storage: SavedFixture, options?: { notify?: boolean }) => void
   restore: (storage: SavedFixture) => void
+  deleteLatest: (replacement?: SavedFixture) => void
   runNext: (id: string) => void
 } {
   let published: SavedFixture | null = null
@@ -226,6 +227,7 @@ function mockApp(): {
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: state })),
     listScanHistory: vi.fn(),
     getScanHistoryMetadata: vi.fn(),
+    deleteSnapshot: vi.fn(),
     getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
       ok: true,
       value: {
@@ -269,6 +271,13 @@ function mockApp(): {
     restore: (storage) => {
       published = storage
       state = { ...state, state: null, latestCompleted: summaryOf(storage) }
+    },
+    deleteLatest: (replacement) => {
+      published = replacement ?? null
+      emit({
+        latestCompleted: replacement ? summaryOf(replacement) : null,
+        historyRevision: (state.historyRevision ?? 0) + 1
+      })
     },
     runNext: (id: string) => {
       nextId = id
@@ -716,6 +725,26 @@ test('restores the same publication in Overview and Explorer with the scanner id
     entryId: 'root'
   })
 })
+
+test.each(['Explorer', 'Insights'] as const)(
+  'refreshes %s when deleting Latest and clears it after the final deletion',
+  async (page) => {
+    const main = mockApp()
+    const previous = publishedFixture('previous', 'Previous')
+    main.restore(publishedFixture('latest', 'Latest'))
+    render(<App />)
+    open(page)
+    if (page === 'Explorer') await chart('Latest')
+    else await screen.findByText('/scans/Latest')
+    act(() => main.deleteLatest(previous))
+    if (page === 'Explorer') await chart('Previous')
+    else await screen.findByText('/scans/Previous')
+    act(() => main.deleteLatest())
+    await screen.findByText(page === 'Explorer' ? /No published snapshot yet/ : /No completed scan/)
+    open('Overview')
+    await panel('Recent Scans').findByText('No scans yet')
+  }
+)
 
 test('Top-N and inert Other coexist with independent Contents pagination and selection resets', async () => {
   const main = mockApp()

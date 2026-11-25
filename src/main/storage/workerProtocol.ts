@@ -1,3 +1,4 @@
+import type { SnapshotDeletionRequest } from '../../shared/history'
 import {
   INSIGHTS_FILE_CATEGORIES,
   INSIGHTS_OBSERVATION_TYPES,
@@ -51,6 +52,7 @@ import {
   validateStorageBatch,
   type BuildingScan,
   type CompletedScan,
+  type CommittedSnapshotDeletion,
   type ScanPublication,
   type StorageBatch
 } from './payloads'
@@ -66,6 +68,7 @@ interface StorageCommands {
   requirePublishedScan: { payload: { scanId: string }; result: CompletedScan }
   listScanHistory: { payload: ScanHistoryQuery; result: ScanHistoryPage }
   getScanHistoryMetadata: { payload: ScanHistoryMetadataRequest; result: ScanHistoryItem }
+  deleteSnapshot: { payload: SnapshotDeletionRequest; result: CommittedSnapshotDeletion }
   getInsightsCategories: { payload: { scanId: string }; result: InsightsCategories }
   getInsightsSizeDistribution: { payload: { scanId: string }; result: InsightsSizeDistribution }
   getInsightsObservations: { payload: { scanId: string }; result: InsightsObservations }
@@ -157,6 +160,7 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       break
     case 'requirePublishedScan':
     case 'getScanHistoryMetadata':
+    case 'deleteSnapshot':
     case 'getInsightsCategories':
     case 'getInsightsSizeDistribution':
     case 'getInsightsObservations':
@@ -212,6 +216,17 @@ function isNull(value: unknown): value is null {
 
 function isCompletedScan(value: unknown): value is CompletedScan {
   return isStorageScan(value) && value.status === 'completed'
+}
+
+function isCommittedDeletion(value: unknown): value is CommittedSnapshotDeletion {
+  if (!record(value) || Object.keys(value).length !== 3 || !isSnapshotId(value.scanId)) return false
+  const { latestCompleted, latestCompletedScanId } = value
+  return latestCompleted === null
+    ? latestCompletedScanId === null
+    : isCompletedScan(latestCompleted) &&
+        isSnapshotId(latestCompleted.id) &&
+        latestCompleted.id === latestCompletedScanId &&
+        latestCompleted.id !== value.scanId
 }
 
 function isHistoryItem(value: unknown): value is ScanHistoryItem {
@@ -575,6 +590,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     requirePublishedScan: isCompletedScan,
     listScanHistory: isHistoryPage,
     getScanHistoryMetadata: isHistoryItem,
+    deleteSnapshot: isCommittedDeletion,
     getInsightsCategories: isInsightsCategories,
     getInsightsSizeDistribution: isSizeDistribution,
     getInsightsObservations: isObservations,

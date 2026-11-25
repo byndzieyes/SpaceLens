@@ -42,6 +42,7 @@ import {
   validateStorageBatch,
   type BuildingScan,
   type CompletedScan,
+  type CommittedSnapshotDeletion,
   type FinalizedDirectory,
   type StorageBatchOperation
 } from './payloads'
@@ -272,6 +273,7 @@ export class ScanDatabase {
   private readonly selectOtherBuildingStatement: StatementSync
   private readonly completeScanStatement: StatementSync
   private readonly deleteBuildingScanStatement: StatementSync
+  private readonly deleteCompletedScanStatement: StatementSync
   private readonly selectRootIdStatement: StatementSync
   private readonly validateSnapshot: (scan: CompletedScan) => void
   private readonly insertEntryStatement: StatementSync
@@ -343,6 +345,9 @@ export class ScanDatabase {
       `)
       this.deleteBuildingScanStatement = this.connection.prepare(
         "DELETE FROM scans WHERE id = ? AND status = 'running'"
+      )
+      this.deleteCompletedScanStatement = this.connection.prepare(
+        "DELETE FROM scans WHERE id = ? AND status = 'completed'"
       )
       this.selectRootIdStatement = this.connection.prepare(
         'SELECT id FROM entries WHERE scan_id = ? AND parent_id IS NULL'
@@ -550,6 +555,33 @@ export class ScanDatabase {
         throw new Error(`Scan ${scanId} is not a building scan.`)
       }
     })
+  }
+
+  deleteSnapshot(request: unknown): CommittedSnapshotDeletion {
+    const scanId = readSnapshotId(request)
+    let deleted!: CommittedSnapshotDeletion
+    let deletedLatest = false
+    this.transaction(() => {
+      const scan = this.getScan(scanId)
+      if (!scan)
+        throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'This saved scan no longer exists.')
+      if (scan.status !== 'completed') {
+        throw new SnapshotAccessError(
+          'SNAPSHOT_UNAVAILABLE',
+          'Only completed snapshots can be deleted.'
+        )
+      }
+      readCompletedScanDuration(requireCompletedScan(scan))
+      readPublicationCounter(this.connection)
+      deletedLatest = this.getLatestScanId() === scanId
+      if (this.deleteCompletedScanStatement.run(scanId).changes !== 1)
+        throw new Error('Could not delete the completed snapshot.')
+      const latestCompleted = this.getPublishedScan()
+      if (latestCompleted) readCompletedScanDuration(latestCompleted)
+      deleted = { scanId, latestCompleted, latestCompletedScanId: latestCompleted?.id ?? null }
+    })
+    if (deletedLatest) this.analytics.clear()
+    return deleted
   }
 
   /** Latest completed scan by committed publication order. */
