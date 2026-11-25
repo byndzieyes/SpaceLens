@@ -6,6 +6,7 @@ import { SnapshotAccessError } from '../src/main/storage/snapshotAccess'
 import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
 import type { StorageBatchOperation } from '../src/main/storage/payloads'
 import App from '../src/renderer/src/App'
+import { mockSnapshotSelection } from './snapshot-selection-fixture'
 import type { ScannerIpcResult, ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
 import type { FileEntry, RecentScanSummary, ScanSessionState, ScanStatus } from '../src/shared/scan'
 import type { ScanSnapshot, ScanSnapshotAvailability } from '../src/shared/snapshot'
@@ -122,6 +123,7 @@ function mockApp(): {
   publish: (storage: SavedFixture, options?: { notify?: boolean }) => void
   restore: (storage: SavedFixture) => void
   deleteLatest: (replacement?: SavedFixture) => void
+  changeHistory: () => void
   runNext: (id: string) => void
 } {
   let published: SavedFixture | null = null
@@ -193,6 +195,7 @@ function mockApp(): {
   }
   let nextId = 'scan-a'
   const api: Mocked<SpaceLensAPI> = {
+    ...mockSnapshotSelection(() => api.getScanSnapshot()),
     getAppInfo: vi.fn<SpaceLensAPI['getAppInfo']>(),
     getInsightsSummary: vi.fn(async ({ scanId }) =>
       read(scanId, (store) => {
@@ -281,6 +284,7 @@ function mockApp(): {
         historyRevision: (state.historyRevision ?? 0) + 1
       })
     },
+    changeHistory: () => emit({ historyRevision: (state.historyRevision ?? 0) + 1 }),
     runNext: (id: string) => {
       nextId = id
     }
@@ -571,6 +575,28 @@ test('a settled scan opens Explorer with one published identity across all four 
   expect(button('Expand Alpha')).toHaveAttribute('aria-expanded', 'false')
   expect(api.getScanSnapshot).toHaveBeenCalledTimes(2)
   expect(api.cancelScan).not.toHaveBeenCalled()
+})
+
+test('Explorer waits for Main adoption, retains the same lease across history-only changes, and releases on exit', async () => {
+  const { api, restore, changeHistory } = mockApp()
+  restore(publishedFixture('scan-a', 'Alpha'))
+  const adoption = Promise.withResolvers<ScannerIpcResult<null>>()
+  api.adoptSnapshotSelection.mockReturnValueOnce(adoption.promise)
+  render(<App />)
+  open('Explorer')
+  expect(screen.getByRole('heading', { name: 'Storage Explorer' })).toBeVisible()
+  await waitFor(() => expect(api.adoptSnapshotSelection).toHaveBeenCalledOnce())
+  expect(api.listScanDirectory).not.toHaveBeenCalled()
+  expect(api.getScanDirectoryTreemap).not.toHaveBeenCalled()
+  await act(async () => adoption.resolve({ ok: true, value: null }))
+  await chart('Alpha')
+  await act(async () => changeHistory())
+  expect(api.prepareSnapshotSelection).toHaveBeenCalledExactlyOnceWith({
+    view: 'explorer',
+    selection: { mode: 'follow-latest' }
+  })
+  open('Overview')
+  expect(api.releaseSnapshotSelection).toHaveBeenCalledExactlyOnceWith({ view: 'explorer' })
 })
 
 test('preserves the prior Treemap during a scan and cancellation, then renders a replacement', async () => {

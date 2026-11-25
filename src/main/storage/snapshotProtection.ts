@@ -3,8 +3,8 @@ import { readSnapshotId, SnapshotAccessError } from './snapshotAccess'
 const MAX_OWNERS = 8
 const MAX_SNAPSHOTS_PER_OWNER = 2
 
-export interface SnapshotProtectionOwner {
-  acquire(scanId: string): Promise<void>
+export interface SnapshotProtectionOwner<T> {
+  acquire(scanId: string, attempt?: AbortSignal): Promise<T>
   release(scanId: string): void
   dispose(): void
 }
@@ -63,14 +63,14 @@ export class SnapshotProtection {
     }
   }
 
-  createOwner(
+  createOwner<T>(
     signal: AbortSignal,
-    validate: (scanId: string) => Promise<unknown>
-  ): SnapshotProtectionOwner {
+    validate: (scanId: string, signal: AbortSignal) => Promise<T>
+  ): SnapshotProtectionOwner<T> {
     if (signal.aborted || this.owners >= MAX_OWNERS)
       throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'Snapshot protection is unavailable.')
     this.owners++
-    const owned = new Map<string, { release: () => void; ready: Promise<void> }>()
+    const owned = new Map<string, { release: () => void; ready: Promise<T> }>()
     let disposed = false
     const inactive = (): SnapshotAccessError =>
       new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'The snapshot owner is no longer active.')
@@ -87,8 +87,8 @@ export class SnapshotProtection {
     }
     signal.addEventListener('abort', dispose, { once: true })
     return {
-      acquire: async (scanId) => {
-        if (disposed) throw inactive()
+      acquire: async (scanId, attempt) => {
+        if (disposed || attempt?.aborted) throw inactive()
         const existing = owned.get(scanId)
         if (existing) return existing.ready
         if (owned.size >= MAX_SNAPSHOTS_PER_OWNER)
@@ -100,9 +100,13 @@ export class SnapshotProtection {
         const current = (): boolean => owned.get(scanId)?.release === releaseLease
         const ready = Promise.resolve()
           .then(async () => {
-            if (!current()) throw inactive()
-            await validate(scanId)
-            if (!current()) throw inactive()
+            if (!current() || attempt?.aborted) throw inactive()
+            const metadata = await validate(
+              scanId,
+              attempt ? AbortSignal.any([signal, attempt]) : signal
+            )
+            if (!current() || attempt?.aborted) throw inactive()
+            return metadata
           })
           .catch((error: unknown) => {
             if (current()) release(scanId)

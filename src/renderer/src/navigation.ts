@@ -13,3 +13,15 @@ export interface ExplorerTarget {
   readonly parentId: string
   readonly type: 'file' | 'directory'
 }
+import type { SnapshotSelection, SnapshotView } from '../../shared/snapshotSelection'
+
+export type SnapshotNavigationTarget =
+  | {
+      readonly view: 'explorer'
+      readonly selection: SnapshotSelection
+      readonly entry?: ExplorerTarget
+    }
+  | { readonly view: 'insights'; readonly selection: SnapshotSelection }
+
+export const isSnapshotView = (page: PageId): page is SnapshotView =>
+  page === 'explorer' || page === 'insights'

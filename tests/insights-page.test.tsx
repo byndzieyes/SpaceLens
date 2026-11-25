@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi, type Mocked } from 'vitest'
 import App from '../src/renderer/src/App'
+import { mockSnapshotSelection } from './snapshot-selection-fixture'
 import { CategoryDonut } from '../src/renderer/src/features/insights/CategoryDonut'
 import { InsightsPage } from '../src/renderer/src/pages/InsightsPage'
 import {
@@ -255,6 +256,7 @@ beforeEach(() => {
   listeners = new Set()
   emit = (notification) => act(() => listeners.forEach((listener) => listener(notification)))
   api = {
+    ...mockSnapshotSelection(() => api.getScanSnapshot()),
     getAppInfo: vi.fn(),
     getScanState: vi.fn(async () => success(update(0))),
     listScanHistory: vi.fn(),

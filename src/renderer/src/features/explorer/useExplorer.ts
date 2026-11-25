@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from 'react'
 import type { FileEntry } from '../../../../shared/scan'
+import { followLatest } from '../../../../shared/snapshotSelection'
 import type { ExplorerTarget } from '../../navigation'
+import { useSnapshotSelections, type ViewSnapshotOptions } from '../snapshots/selection'
 import {
   invalidExplorerEntry,
   isStaleSnapshotError,
@@ -76,7 +78,8 @@ function enterDirectory(
 
 export function useExplorer(
   target?: ExplorerTarget,
-  onTargetConsumed?: (target: ExplorerTarget) => void
+  onTargetConsumed?: (target: ExplorerTarget) => void,
+  snapshots?: ViewSnapshotOptions
 ): ExplorerState & {
   currentDirectoryId: string | null
   navigateToDirectory: (id: string) => Promise<void>
@@ -86,6 +89,8 @@ export function useExplorer(
   selectEntry: (id: string | null) => void
   refreshSnapshot: () => Promise<void>
 } {
+  const selections = useSnapshotSelections(snapshots?.controller)
+  const selection = snapshots?.selection ?? followLatest
   const [state, setState] = useState<ExplorerState>(initial)
   const current = useRef(state)
   const sequence = useRef(0)
@@ -99,7 +104,8 @@ export function useExplorer(
   const refreshSnapshot = async (
     replacing = false,
     intent?: ExplorerTarget,
-    targetNotice = replacing ? current.current.targetNotice : null
+    targetNotice = replacing ? current.current.targetNotice : null,
+    handoff?: ViewSnapshotOptions['handoff']
   ): Promise<void> => {
     if (!mounted.current) return
     const ticket = ++sequence.current
@@ -113,7 +119,9 @@ export function useExplorer(
       targetNotice
     })
     try {
-      const result = await resolveExplorerSnapshot()
+      const result = await resolveExplorerSnapshot(() =>
+        selections.loadForCurrentView('explorer', selection, isCurrent, handoff)
+      )
       if (!isCurrent()) return
       if (!result.ok) {
         publish({ ...initial, loading: false, error: result.error, targetNotice })
@@ -226,8 +234,8 @@ export function useExplorer(
     let revision = -1
     let latestPublished: string | null | undefined
     let waitingTarget = target
-    const unsubscribe = window.spaceLens.onScanStateChanged((update) => {
-      if (update.revision <= revision) return
+    const unsubscribe = selections.subscribeScanState((update) => {
+      if (selection.mode !== 'follow-latest' || update.revision <= revision) return
       revision = update.revision
       const session = update.state?.session
       // Recovery metadata arrives with an idle scanner. The initial SQLite read already waits for it.
@@ -247,7 +255,8 @@ export function useExplorer(
           void refreshSnapshot(true, undefined, scanChanged)
         return
       }
-      const previous = current.current.availability?.snapshot?.entries.scanId
+      const { availability } = current.current
+      const previous = availability ? (availability.snapshot?.entries.scanId ?? null) : undefined
       if (previous !== published) void refreshSnapshot(previous !== undefined)
     })
     // A discarded Strict Mode mount does not need its own availability request.
@@ -256,7 +265,7 @@ export function useExplorer(
       const intent = waitingTarget
       waitingTarget = undefined
       if (intent) onTargetConsumed?.(intent)
-      void refreshSnapshot(false, intent)
+      void refreshSnapshot(false, intent, null, snapshots?.handoff)
     })
     return () => {
       mounted.current = false
@@ -264,6 +273,7 @@ export function useExplorer(
       refreshing.current = false
       openingTarget.current = undefined
       unsubscribe()
+      if (!snapshots) selections.release('explorer')
     }
     // Availability is queried on activation and when the scanner reports a new publication.
     // eslint-disable-next-line react-hooks/exhaustive-deps

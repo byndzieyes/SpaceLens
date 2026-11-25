@@ -21,6 +21,12 @@ import type {
 } from './insights'
 import type { FileEntry, RecentScanSummary, ScanSessionState } from './scan'
 import type {
+  PreparedSnapshotSelection,
+  SnapshotSelectionAdoption,
+  SnapshotSelectionRequest,
+  SnapshotViewRequest
+} from './snapshotSelection'
+import type {
   ScanDirectoryPage,
   ScanDirectoryRequest,
   ScanDirectoryTreemap,
@@ -42,6 +48,11 @@ export interface SpaceLensAPI {
   startScan: (request: StartScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
   getScanState: () => Promise<ScannerIpcResult<ScanStateSnapshot>>
   getScanSnapshot: () => Promise<ScannerIpcResult<ScanSnapshotAvailability>>
+  prepareSnapshotSelection: (
+    request: SnapshotSelectionRequest
+  ) => Promise<ScannerIpcResult<PreparedSnapshotSelection>>
+  adoptSnapshotSelection: (request: SnapshotSelectionAdoption) => Promise<ScannerIpcResult<null>>
+  releaseSnapshotSelection: (request: SnapshotViewRequest) => Promise<ScannerIpcResult<null>>
   listScanHistory: (
     query: ScanHistoryQuery
   ) => Promise<ScannerIpcResult<ScanHistoryPage, ScanHistoryErrorCode>>
@@ -89,6 +100,9 @@ export const IPC_CHANNELS = {
   startScan: 'spacelens:start-scan',
   getScanState: 'spacelens:get-scan-state',
   getScanSnapshot: 'spacelens:get-scan-snapshot',
+  prepareSnapshotSelection: 'spacelens:prepare-snapshot-selection',
+  adoptSnapshotSelection: 'spacelens:adopt-snapshot-selection',
+  releaseSnapshotSelection: 'spacelens:release-snapshot-selection',
   listScanHistory: 'spacelens:list-scan-history',
   getScanHistoryMetadata: 'spacelens:get-scan-history-metadata',
   deleteSnapshot: 'spacelens:delete-snapshot',

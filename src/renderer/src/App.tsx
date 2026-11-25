@@ -1,35 +1,40 @@
-import { useState } from 'react'
+import { followLatest } from '../../shared/snapshotSelection'
 import { AppShell } from './components/layout/AppShell'
-import type { ExplorerTarget, PageId } from './navigation'
+import type { PageId } from './navigation'
+import { useSnapshotSelections } from './features/snapshots/selection'
+import { useSnapshotNavigation } from './features/snapshots/useSnapshotNavigation'
 import { OverviewPage } from './pages/OverviewPage'
 import { ExplorerPage } from './pages/ExplorerPage'
 import { InsightsPage } from './pages/InsightsPage'
 import { HistoryPage } from './pages/HistoryPage'
 
 function App(): React.JSX.Element {
-  const [{ page: activePage, target }, setDestination] = useState<{
-    page: PageId
-    target?: ExplorerTarget
-  }>({ page: 'overview' })
-  const navigate = (page: PageId): void => setDestination({ page })
+  const selections = useSnapshotSelections()
+  const {
+    destination: { page: activePage, activation, target },
+    viewOptions,
+    navigate,
+    navigateToSnapshot,
+    consumeTarget
+  } = useSnapshotNavigation(selections)
   const pages: Record<PageId, React.JSX.Element> = {
-    overview: <OverviewPage onOpenExplorer={() => navigate('explorer')} />,
+    overview: <OverviewPage snapshots={selections} onOpenExplorer={() => navigate('explorer')} />,
     explorer: (
       <ExplorerPage
+        key={activation}
+        snapshots={viewOptions}
         target={target}
-        onTargetConsumed={(opened) => {
-          setDestination((current) =>
-            current.page === 'explorer' && current.target === opened
-              ? { page: 'explorer' }
-              : current
-          )
-        }}
+        onTargetConsumed={consumeTarget}
       />
     ),
     insights: (
       <InsightsPage
+        key={activation}
+        snapshots={viewOptions}
         onOpenOverview={() => navigate('overview')}
-        onOpenExplorer={(entry) => setDestination({ page: 'explorer', target: entry })}
+        onOpenExplorer={(entry) =>
+          navigateToSnapshot({ view: 'explorer', selection: followLatest, entry })
+        }
       />
     ),
     history: <HistoryPage />

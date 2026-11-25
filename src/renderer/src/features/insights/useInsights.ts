@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { InsightsSummary } from '../../../../shared/insights'
 import type { ScanStateSnapshot, ScannerIpcErrorCode } from '../../../../shared/ipc'
+import { followLatest } from '../../../../shared/snapshotSelection'
+import { useSnapshotSelections, type ViewSnapshotOptions } from '../snapshots/selection'
 
 type ReadFailure = { code: ScannerIpcErrorCode; message: string }
 type ExpiredReference =
@@ -14,11 +16,15 @@ type InsightsState =
 
 const initialState: InsightsState = { status: 'loading', refreshing: false }
 
-export function useInsights(): {
+export function useInsights(snapshots?: ViewSnapshotOptions): {
   state: InsightsState
   retry: () => void
   recheckPublication: (scanId: string) => Promise<void>
 } {
+  const selections = useSnapshotSelections(snapshots?.controller)
+  const selection = snapshots?.selection ?? followLatest
+  const handoff = snapshots?.handoff
+  const managed = snapshots !== undefined
   const [state, setState] = useState<InsightsState>(initialState)
   const retry = useRef<(() => void) | null>(null)
   const recheck = useRef<((scanId: string) => Promise<void>) | null>(null)
@@ -32,13 +38,15 @@ export function useInsights(): {
     let revision = -1
     let announcedScanId: string | null | undefined
     let resolvedScanId: string | undefined
+    let resolvedEmpty = false
     let request: { scanId?: string; visibleScanId?: string } | undefined
     let started = false
 
     const load = async (
       refreshing: boolean,
       expired?: ExpiredReference,
-      retainedScanId?: string
+      retainedScanId?: string,
+      initialHandoff?: ViewSnapshotOptions['handoff']
     ): Promise<void> => {
       // A section failure stays local unless the read confirms a publication change.
       const verifyingAnalytics = expired?.source === 'analytics'
@@ -50,6 +58,7 @@ export function useInsights(): {
       request = pending
       const clearSummary = (analyticsScanId?: string): void => {
         resolvedScanId = undefined
+        resolvedEmpty = false
         setState({ status: 'loading', refreshing, analyticsScanId })
       }
       if (!verifyingAnalytics) clearSummary(retainedScanId)
@@ -71,9 +80,14 @@ export function useInsights(): {
       }
 
       try {
-        const result = await api.getScanSnapshot()
+        const result = await selections.loadForCurrentView(
+          'insights',
+          selection,
+          isCurrent,
+          initialHandoff
+        )
         if (!isCurrent()) return
-        const scanId = result.ok ? result.value.snapshot?.entries.scanId : undefined
+        const scanId = result.ok ? (result.value.snapshot?.entries.scanId ?? null) : undefined
         // A publication can be announced while the metadata read is returning an older snapshot.
         if (announcedScanId !== announcedAtStart && scanId !== announcedScanId) {
           void load(true, expired, pending.visibleScanId)
@@ -88,6 +102,7 @@ export function useInsights(): {
           if (unavailable) fail(unavailable, 'SNAPSHOT_UNAVAILABLE')
           else {
             resolvedScanId = undefined
+            resolvedEmpty = true
             setState({ status: 'no-snapshot' })
           }
           return
@@ -123,8 +138,8 @@ export function useInsights(): {
       }
     }
 
-    const unsubscribe = api.onScanStateChanged((update: ScanStateSnapshot) => {
-      if (!active || update.revision <= revision) return
+    const unsubscribe = selections.subscribeScanState((update: ScanStateSnapshot) => {
+      if (!active || selection.mode !== 'follow-latest' || update.revision <= revision) return
       revision = update.revision
       const published =
         update.latestCompleted?.id ??
@@ -132,10 +147,8 @@ export function useInsights(): {
       if (published === undefined || published === announcedScanId) return
       announcedScanId = published
       if (published === null) {
-        request = undefined
-        resolvedScanId = undefined
-        started = true
-        setState({ status: 'no-snapshot' })
+        if (resolvedEmpty || (request && !request.scanId && !request.visibleScanId)) return
+        void load(resolvedScanId !== undefined || request !== undefined)
         return
       }
       if (
@@ -167,15 +180,16 @@ export function useInsights(): {
     }
     // Skip requests from a mount that Strict Mode or page navigation has already discarded.
     queueMicrotask(() => {
-      if (active && !started) void load(false)
+      if (active && !started) void load(false, undefined, undefined, handoff)
     })
     return () => {
       active = false
       retry.current = null
       recheck.current = null
       unsubscribe()
+      if (!managed) selections.release('insights')
     }
-  }, [])
+  }, [handoff, managed, selection, selections])
 
   return { state, retry: () => retry.current?.(), recheckPublication }
 }

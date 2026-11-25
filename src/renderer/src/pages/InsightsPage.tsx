@@ -15,6 +15,7 @@ import { InsightsSizeDistributionSection } from '../features/insights/InsightsSi
 import { InsightsSummaryCards } from '../features/insights/InsightsSummaryCards'
 import { useInsights } from '../features/insights/useInsights'
 import { formatScanDate } from '../features/overview/recentScanUtils'
+import type { ViewSnapshotOptions } from '../features/snapshots/selection'
 
 const errorMessages = {
   expired: 'The latest scan changed. Reload to see the current results.',
@@ -58,12 +59,14 @@ function PublishedScan({ scan }: { scan: InsightsSummary }): React.JSX.Element {
 
 export function InsightsPage({
   onOpenOverview,
-  onOpenExplorer
+  onOpenExplorer,
+  snapshots
 }: {
   onOpenOverview: () => void
   onOpenExplorer?: (target: ExplorerTarget) => void
+  snapshots?: ViewSnapshotOptions
 }): React.JSX.Element {
-  const { state, retry, recheckPublication } = useInsights()
+  const { state, retry, recheckPublication } = useInsights(snapshots)
   const title = useRef<HTMLHeadingElement>(null)
   const analyticsScanId =
     state.status === 'ready'

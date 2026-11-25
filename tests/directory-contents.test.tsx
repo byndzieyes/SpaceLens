@@ -5,6 +5,7 @@ import type { FileEntry } from '../src/shared/scan'
 import { treemapSummary } from './treemap-fixtures'
 import { DirectoryContentsTable } from '../src/renderer/src/features/explorer/DirectoryContentsTable'
 import App from '../src/renderer/src/App'
+import { mockSnapshotSelection } from './snapshot-selection-fixture'
 const list = vi.fn<SpaceLensAPI['listScanDirectory']>()
 const select = vi.fn<(id: string | null) => void>()
 const navigate = vi.fn<(id: string) => Promise<void>>()
@@ -208,6 +209,20 @@ test('unavailable snapshots make no requests', () => {
 
 test('table navigation synchronizes breadcrumbs, history and visible tree highlighting', async () => {
   const root = { ...folder, id: 'root', name: 'Root', parentId: null }
+  const getScanSnapshot = vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
+    ok: true,
+    value: {
+      snapshot: {
+        entries: { scanId: 'scan', rootEntryId: 'root' },
+        root,
+        completedAt: '2026-11-16T00:00:00Z',
+        entryCount: 3,
+        incomplete: false,
+        summary: { fileCount: 1, directoryCount: 2, totalBytes: 1500, errorCount: 0 }
+      },
+      unavailable: null
+    }
+  }))
   vi.stubGlobal('spaceLens', {
     listScanDirectory: list,
     getScanDirectoryTreemap: async ({ scanId, entryId }: { scanId: string; entryId: string }) => ({
@@ -219,20 +234,8 @@ test('table navigation synchronizes breadcrumbs, history and visible tree highli
     }),
     getScanState: vi.fn(async () => ({ ok: true, value: { revision: 0, state: null } })),
     onScanStateChanged: vi.fn(() => () => {}),
-    getScanSnapshot: vi.fn(async () => ({
-      ok: true,
-      value: {
-        snapshot: {
-          entries: { scanId: 'scan', rootEntryId: 'root' },
-          root,
-          completedAt: '2026-11-16T00:00:00Z',
-          entryCount: 3,
-          incomplete: false,
-          summary: { fileCount: 1, directoryCount: 2, totalBytes: 1500, errorCount: 0 }
-        },
-        unavailable: null
-      }
-    })),
+    getScanSnapshot,
+    ...mockSnapshotSelection(getScanSnapshot),
     getScanEntry: vi.fn(async () => ({ ok: true, value: folder }))
   })
   Object.defineProperty(HTMLElement.prototype, 'scrollTo', { configurable: true, value: vi.fn() })

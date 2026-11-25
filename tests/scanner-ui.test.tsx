@@ -5,6 +5,7 @@ import type { ScannerIpcResult, ScanStateSnapshot, SpaceLensAPI } from '../src/s
 import type { ScanSessionState, ScanStatus } from '../src/shared/scan'
 import { OverviewPage } from '../src/renderer/src/pages/OverviewPage'
 import App from '../src/renderer/src/App'
+import { mockSnapshotSelection } from './snapshot-selection-fixture'
 
 let api: SpaceLensAPI
 let latest: ScanStateSnapshot
@@ -71,6 +72,7 @@ beforeEach(() => {
   latest = { revision: 0, state: null }
   listeners = new Set()
   api = {
+    ...mockSnapshotSelection(() => api.getScanSnapshot()),
     getAppInfo: vi.fn(),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: latest })),
     listScanHistory: vi.fn(),

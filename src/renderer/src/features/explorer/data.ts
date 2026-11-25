@@ -5,7 +5,8 @@ import {
   type ScanDirectoryPage,
   type ScanDirectoryRequest,
   type ScanEntryRequest,
-  type ScanSnapshot
+  type ScanSnapshot,
+  type ScanSnapshotAvailability
 } from '../../../../shared/snapshot'
 
 export function isStaleSnapshotError(code?: string): boolean {
@@ -41,8 +42,10 @@ export type ExplorerSnapshotState =
  * same snapshot, and handle SNAPSHOT_EXPIRED without silently switching scans.
  * Structured failures and rejected transport promises are preserved unchanged.
  */
-export async function resolveExplorerSnapshot(): Promise<ScannerIpcResult<ExplorerSnapshotState>> {
-  const result = await window.spaceLens.getScanSnapshot()
+export async function resolveExplorerSnapshot(
+  load: () => Promise<ScannerIpcResult<ScanSnapshotAvailability>> = window.spaceLens.getScanSnapshot
+): Promise<ScannerIpcResult<ExplorerSnapshotState>> {
+  const result = await load()
   if (!result.ok) return result
   const { snapshot } = result.value
   if (snapshot) return { ok: true, value: { status: 'available', snapshot } }

@@ -34,9 +34,15 @@ import {
 import type { createStorageWorkerClient } from '../src/main/storage/workerRunner'
 import type { StorageRequest } from '../src/main/storage/workerProtocol'
 import type { FileEntry, ScanSession } from '../src/shared/scan'
-import { IPC_CHANNELS, type ScanStateSnapshot } from '../src/shared/ipc'
+import { IPC_CHANNELS, type ScannerIpcResult, type ScanStateSnapshot } from '../src/shared/ipc'
 import type { ScanSessionSubscriber } from '../src/main/scanner/sessionManager'
 import type { ScanHistoryItem, ScanHistoryPage } from '../src/shared/history'
+import {
+  followLatest,
+  type PreparedSnapshotSelection,
+  type SnapshotSelectionRequest,
+  type SnapshotSelectionResolution
+} from '../src/shared/snapshotSelection'
 import {
   buildingFixture,
   createV1Database,
@@ -1439,6 +1445,23 @@ test('reads completed history through the worker and coordinator across publicat
         sender: renderer,
         senderFrame: renderer.mainFrame
       } as unknown as IpcMainInvokeEvent
+      const prepareSelection = (
+        request: SnapshotSelectionRequest
+      ): Promise<ScannerIpcResult<PreparedSnapshotSelection>> =>
+        handlers.get(IPC_CHANNELS.prepareSnapshotSelection)!(event, request) as Promise<
+          ScannerIpcResult<PreparedSnapshotSelection>
+        >
+      const select = async (
+        request: SnapshotSelectionRequest
+      ): Promise<SnapshotSelectionResolution> => {
+        const result = await prepareSelection(request)
+        if (!result.ok) throw new Error(result.error.message)
+        const { ticket, resolution } = result.value
+        await expect(
+          handlers.get(IPC_CHANNELS.adoptSnapshotSelection)!(event, { view: request.view, ticket })
+        ).resolves.toEqual({ ok: true, value: null })
+        return resolution
+      }
       const ack = (snapshot: ScanStateSnapshot): void => {
         ipcMain.emit(IPC_CHANNELS.acknowledgeScanState, event, snapshot.revision)
       }
@@ -1456,6 +1479,44 @@ test('reads completed history through the worker and coordinator across publicat
       await expect(
         handlers.get(IPC_CHANNELS.getScanHistoryMetadata)!(event, { scanId: next.id })
       ).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
+      const firstSelection = {
+        view: 'explorer',
+        selection: { mode: 'explicit', scanId: first.id }
+      } as const
+      const prepared = await prepareSelection(firstSelection)
+      expect(prepared).toMatchObject({
+        ok: true,
+        value: { resolution: { metadata: { id: first.id } } }
+      })
+      await expect(
+        handlers.get(IPC_CHANNELS.deleteSnapshot)!(event, { scanId: first.id })
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'SNAPSHOT_IN_USE' }
+      })
+      if (!prepared.ok) throw new Error('Could not prepare the retained snapshot.')
+      await expect(
+        handlers.get(IPC_CHANNELS.adoptSnapshotSelection)!(event, {
+          view: 'explorer',
+          ticket: prepared.value.ticket
+        })
+      ).resolves.toEqual({ ok: true, value: null })
+      await expect(
+        handlers.get(IPC_CHANNELS.getScanEntry)!(event, { scanId: first.id, entryId: root.id })
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'SNAPSHOT_EXPIRED' }
+      })
+      await expect(
+        handlers.get(IPC_CHANNELS.getInsightsSummary)!(event, { scanId: first.id })
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'SNAPSHOT_EXPIRED' }
+      })
+      const follow = { view: 'explorer', selection: followLatest } as const
+      await expect(select(follow)).resolves.toMatchObject({
+        availability: { snapshot: { entries: { scanId: last.id } } }
+      })
       await expect(
         handlers.get(IPC_CHANNELS.deleteSnapshot)!(event, { scanId: first.id })
       ).resolves.toEqual({ ok: true, value: { scanId: first.id, latestCompletedScanId: last.id } })
@@ -1474,6 +1535,12 @@ test('reads completed history through the worker and coordinator across publicat
         value: { maxCompletedSnapshots: 1 }
       })
       const fresh = await preparePublication(restored, lifecycleScan('fresh'))
+      await expect(
+        prepareSelection({
+          view: 'insights',
+          selection: { mode: 'explicit', scanId: fresh.id }
+        })
+      ).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_UNAVAILABLE' } })
       await restored.publishScan(fresh, root.id)
       notify?.({
         session: fresh,
@@ -1485,6 +1552,33 @@ test('reads completed history through the worker and coordinator across publicat
           currentPath: null
         },
         failure: null
+      })
+      await vi.waitFor(() => expect(retention.status).toBe('protected'))
+      await expect(handlers.get(IPC_CHANNELS.listScanHistory)!(event, {})).resolves.toMatchObject({
+        ok: true,
+        value: { totalCount: 2, latestCompletedScanId: fresh.id }
+      })
+      await expect(
+        select({
+          view: 'insights',
+          selection: { mode: 'explicit', scanId: last.id }
+        })
+      ).resolves.toMatchObject({ metadata: { id: last.id, isLatest: false } })
+      await expect(select(follow)).resolves.toMatchObject({
+        availability: { snapshot: { entries: { scanId: fresh.id } } }
+      })
+      expect(restored.isSnapshotProtected(last.id)).toBe(true)
+      await expect(
+        handlers.get(IPC_CHANNELS.deleteSnapshot)!(event, { scanId: last.id })
+      ).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'SNAPSHOT_IN_USE' }
+      })
+      await expect(
+        handlers.get(IPC_CHANNELS.releaseSnapshotSelection)!(event, { view: 'insights' })
+      ).resolves.toEqual({
+        ok: true,
+        value: null
       })
       await vi.waitFor(() =>
         expect(renderer.send).toHaveBeenCalledWith(
@@ -1507,10 +1601,13 @@ test('reads completed history through the worker and coordinator across publicat
       await expect(new RetentionSettingsStore(settingsPath).get()).resolves.toEqual({
         maxCompletedSnapshots: 1
       })
+      expect(restored.isSnapshotProtected(fresh.id)).toBe(true)
     } finally {
       await retention.stop()
       await boundary.dispose()
     }
+    expect(restored.isSnapshotProtected(last.id)).toBe(false)
+    expect(restored.isSnapshotProtected('fresh')).toBe(false)
   } finally {
     vi.doUnmock('electron')
   }

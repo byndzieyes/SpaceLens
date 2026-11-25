@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { SpaceLensAPI } from '../src/shared/ipc'
+import { mockSnapshotSelection } from './snapshot-selection-fixture'
 import type { FileEntry } from '../src/shared/scan'
 import type { ScanSnapshot } from '../src/shared/snapshot'
 import { DetailsPanel } from '../src/renderer/src/features/explorer/DetailsPanel'
@@ -284,6 +285,7 @@ function mountExplorer(): {
   }))
   vi.stubGlobal('spaceLens', {
     getScanSnapshot: getSnapshot,
+    ...mockSnapshotSelection(getSnapshot),
     getScanEntry: getEntry,
     onScanStateChanged: () => () => {},
     getScanDirectoryTreemap: vi.fn<SpaceLensAPI['getScanDirectoryTreemap']>(

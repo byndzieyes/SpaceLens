@@ -6,13 +6,16 @@ import { demoDevices } from '../features/overview/demoDevices'
 import { RecentScans } from '../features/overview/RecentScans'
 import { ScanPanel } from '../features/scanner/ScanPanel'
 import { useScanner } from '../features/scanner/useScanner'
+import type { SnapshotSelections } from '../features/snapshots/selection'
 
 export function OverviewPage({
-  onOpenExplorer
+  onOpenExplorer,
+  snapshots
 }: {
   onOpenExplorer?: () => void
+  snapshots?: SnapshotSelections
 }): React.JSX.Element {
-  const scanner = useScanner()
+  const scanner = useScanner(snapshots)
   return (
     <div className="space-y-8 sm:space-y-10">
       <header className="flex flex-wrap items-center justify-between gap-5">

@@ -18,6 +18,11 @@ import {
   type ScanStorageCoordinator
 } from '../src/main/storage/coordinator'
 import { StorageWorkerError, type StorageWorkerClient } from '../src/main/storage/workerClient'
+import { SnapshotProtection } from '../src/main/storage/snapshotProtection'
+import type {
+  PreparedSnapshotSelection,
+  SnapshotSelectionRequest
+} from '../src/shared/snapshotSelection'
 
 vi.mock('electron', async () => {
   const { EventEmitter } = await import('node:events')
@@ -48,6 +53,7 @@ let settle: (value: ScanSessionState) => void
 let reject: (error: unknown) => void
 let renderer: ReturnType<typeof makeRenderer>
 let boundary: ReturnType<typeof registerScannerIpc>
+let protection: SnapshotProtection
 let manager: ScanSessionManager
 let start: ReturnType<typeof vi.fn>
 let cancel: ReturnType<typeof vi.fn>
@@ -70,7 +76,8 @@ const queries = {
 }
 const storage = {
   read: (async (_signal, query) => query(queries)) as ScanStorageCoordinator['read'],
-  deleteSnapshot: vi.fn<ScanStorageCoordinator['deleteSnapshot']>()
+  deleteSnapshot: vi.fn<ScanStorageCoordinator['deleteSnapshot']>(),
+  createSnapshotOwner: vi.fn<ScanStorageCoordinator['createSnapshotOwner']>()
 }
 
 function makeRenderer(): EventEmitter & {
@@ -127,6 +134,10 @@ beforeEach(async () => {
   vi.clearAllMocks()
   for (const query of Object.values(queries)) query.mockReset()
   storage.deleteSnapshot.mockReset()
+  protection = new SnapshotProtection()
+  storage.createSnapshotOwner.mockImplementation((signal) =>
+    protection.createOwner(signal, (scanId) => queries.getScanHistoryMetadata({ scanId }))
+  )
   queries.getScanSnapshot.mockResolvedValue({ snapshot: null, unavailable: null })
   state = null
   renderer = makeRenderer()
@@ -201,6 +212,165 @@ test('retrieval uses fixed, authorized channels and forwards bounded ID-only que
   })
   expect(queries.getScanDirectoryTreemap).toHaveBeenCalledExactlyOnceWith(treemap)
   expect(queries.getScanEntry).toHaveBeenCalledTimes(1)
+})
+
+test('authorizes selection calls and rejects malformed, unrecognized and cross-view requests', async () => {
+  const {
+    prepareSnapshotSelection: prepare,
+    adoptSnapshotSelection: adopt,
+    releaseSnapshotSelection: release
+  } = IPC_CHANNELS
+  const request = { view: 'explorer', selection: { mode: 'explicit', scanId: id } }
+  for (const channel of [prepare, adopt, release]) {
+    for (const sender of [event(makeRenderer()), { ...event(), senderFrame: null }]) {
+      expect(await invoke(channel, [], sender)).toMatchObject({
+        ok: false,
+        error: { code: 'UNAUTHORIZED' }
+      })
+    }
+  }
+  for (const malformed of [
+    [],
+    [request, request],
+    [{ ...request, view: 'comparison' }],
+    [{ ...request, owner: 'custom' }],
+    [{ ...request, selection: { mode: 'explicit', scanId: '../scan' } }],
+    [{ ...request, selection: { mode: 'follow-latest', scanId: id } }]
+  ]) {
+    expect(await invoke(prepare, malformed)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+  }
+  expect(await invoke(adopt, [{ view: 'explorer', ticket: 'unvalidated' }])).toMatchObject({
+    ok: false,
+    error: { code: 'INVALID_REQUEST' }
+  })
+  expect(await invoke(release, [{ view: 'comparison' }])).toMatchObject({
+    ok: false,
+    error: { code: 'INVALID_REQUEST' }
+  })
+  expect(storage.createSnapshotOwner).not.toHaveBeenCalled()
+
+  queries.getScanHistoryMetadata.mockResolvedValue({
+    ...running().session,
+    status: 'completed',
+    finishedAt: '2026-11-09T00:00:01.000Z',
+    durationMs: 1000,
+    isLatest: true,
+    incomplete: false
+  })
+  const selection = (await invoke(prepare, [
+    request
+  ])) as ScannerIpcResult<PreparedSnapshotSelection>
+  expect(selection).toMatchObject({
+    ok: true,
+    value: { resolution: { mode: 'explicit', metadata: { id } } }
+  })
+  if (!selection.ok) throw new Error('Snapshot selection failed.')
+  const adoption = { view: 'explorer', ticket: selection.value.ticket }
+  expect(protection.isProtected(id)).toBe(true)
+  expect(await invoke(adopt, [{ ...adoption, view: 'insights' }])).toMatchObject({
+    ok: false,
+    error: { code: 'UNAVAILABLE' }
+  })
+  expect(await invoke(adopt, [adoption])).toEqual({ ok: true, value: null })
+  expect(await invoke(release, [{ view: 'insights' }])).toEqual({ ok: true, value: null })
+  expect(protection.isProtected(id)).toBe(true)
+  for (let call = 0; call < 2; call++) {
+    expect(await invoke(release, [{ view: 'explorer' }])).toEqual({ ok: true, value: null })
+  }
+  expect(protection.isProtected(id)).toBe(false)
+})
+
+test('invalidates active and pending view ownership on document replacement, process loss and shutdown', async () => {
+  const {
+    prepareSnapshotSelection: prepare,
+    adoptSnapshotSelection: adopt,
+    releaseSnapshotSelection: release
+  } = IPC_CHANNELS
+  const request = (scanId: string): SnapshotSelectionRequest => ({
+    view: 'explorer',
+    selection: { mode: 'explicit', scanId }
+  })
+  const metadata = {
+    ...running().session,
+    status: 'completed',
+    finishedAt: '2026-11-09T00:00:01.000Z',
+    durationMs: 1000,
+    isLatest: true,
+    incomplete: false
+  } as const
+  queries.getScanHistoryMetadata.mockResolvedValue(metadata)
+  const value = (await invoke(prepare, [
+    request(id)
+  ])) as ScannerIpcResult<PreparedSnapshotSelection>
+  if (!value.ok) throw new Error('Snapshot selection failed.')
+  const adoption = { view: 'explorer', ticket: value.value.ticket }
+  expect(await invoke(adopt, [adoption])).toEqual({ ok: true, value: null })
+  const pending = Promise.withResolvers<typeof metadata>()
+  queries.getScanHistoryMetadata.mockReturnValueOnce(pending.promise)
+  const inFlight = invoke(prepare, [request(otherId)])
+  await vi.waitFor(() => expect(queries.getScanHistoryMetadata).toHaveBeenCalledTimes(2))
+  expect(protection.isProtected(id)).toBe(true)
+  expect(protection.isProtected(otherId)).toBe(true)
+  const oldDocument = event()
+  renderer.emit('did-start-navigation', { isMainFrame: true })
+  expect(protection.isProtected(id)).toBe(false)
+  expect(protection.isProtected(otherId)).toBe(false)
+  expect(await invoke(prepare, [request(id)], oldDocument)).toMatchObject({
+    ok: false,
+    error: { code: 'UNAUTHORIZED' }
+  })
+  renderer.mainFrame = { url }
+  renderer.emit('did-finish-load')
+  expect(await invoke(release, [{ view: 'explorer' }], oldDocument)).toMatchObject({
+    ok: false,
+    error: { code: 'UNAUTHORIZED' }
+  })
+  expect(await invoke(adopt, [adoption])).toMatchObject({
+    ok: false,
+    error: { code: 'UNAVAILABLE' }
+  })
+  pending.resolve({ ...metadata, id: otherId })
+  expect(await inFlight).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+  expect(protection.isProtected(otherId)).toBe(false)
+
+  expect(await invoke(prepare, [request(id)])).toMatchObject({ ok: true })
+  renderer.emit('render-process-gone')
+  expect(protection.isProtected(id)).toBe(false)
+  renderer.emit('did-finish-load')
+  expect(await invoke(prepare, [request(id)])).toMatchObject({ ok: true })
+  renderer.emit('destroyed')
+  expect(protection.isProtected(id)).toBe(false)
+  const replacement = makeRenderer()
+  boundary.attachRenderer(replacement as unknown as WebContents)
+  expect(await invoke(prepare, [request(id)], event(replacement))).toMatchObject({ ok: true })
+  expect(protection.isProtected(id)).toBe(true)
+  await boundary.dispose()
+  expect(protection.protectedScanIds()).toEqual([])
+})
+
+test('selection errors preserve typed failures and sanitize invalid stored metadata', async () => {
+  const request = { view: 'insights', selection: { mode: 'explicit', scanId: id } }
+  const prepare = IPC_CHANNELS.prepareSnapshotSelection
+  for (const code of ['SNAPSHOT_EXPIRED', 'SNAPSHOT_UNAVAILABLE'] as const) {
+    queries.getScanHistoryMetadata.mockRejectedValueOnce(
+      new StorageWorkerError({
+        name: 'SnapshotAccessError',
+        message: 'Saved scan unavailable.',
+        code,
+        sqliteCode: null
+      })
+    )
+    expect(await invoke(prepare, [request])).toMatchObject({ ok: false, error: { code } })
+  }
+  queries.getScanHistoryMetadata.mockRejectedValueOnce(new Error('private database path'))
+  expect(await invoke(prepare, [request])).toEqual({
+    ok: false,
+    error: { code: 'INTERNAL_ERROR', message: 'The snapshot request could not be processed.' }
+  })
+  expect(protection.protectedScanIds()).toEqual([])
 })
 
 const completed = (): CompletedScan => ({
@@ -1384,7 +1554,10 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.deleteSnapshot)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getRetentionSettings)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.setRetentionSettings)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(20)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.prepareSnapshotSelection)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.adoptSnapshotSelection)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.releaseSnapshotSelection)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(23)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

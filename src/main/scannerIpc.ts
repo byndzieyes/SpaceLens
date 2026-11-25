@@ -39,6 +39,12 @@ import { StorageWorkerError } from './storage/workerClient'
 import type { HistoryRetention } from './storage/historyRetention'
 import { RetentionSettingsError } from './storage/retentionSettings'
 import { isScanHistoryRetentionSettings } from '../shared/history'
+import {
+  readSelectionAdoption,
+  readSelectionRequest,
+  readSelectionView,
+  ViewSnapshotSelections
+} from './storage/viewSnapshotSelections'
 
 function failure(code: ScannerIpcErrorCode, message: string): ScannerIpcResult<never> {
   return { ok: false, error: { code, message } }
@@ -158,7 +164,7 @@ function publicationSummary(
 export function registerScannerIpc(
   manager: ScanSessionManager,
   rendererUrl: string,
-  storage: Pick<ScanStorageCoordinator, 'read' | 'deleteSnapshot'>,
+  storage: Pick<ScanStorageCoordinator, 'read' | 'deleteSnapshot' | 'createSnapshotOwner'>,
   restoredPublication: Promise<CompletedScan | null>,
   retention?: Pick<HistoryRetention, 'getSettings' | 'setSettings' | 'onPruned'>
 ): { attachRenderer: (renderer: WebContents) => void; dispose: () => Promise<void> } {
@@ -182,6 +188,8 @@ export function registerScannerIpc(
   let pickerBusy = false
   let starting = false
   let readContext = new AbortController()
+  let viewSelections = new ViewSnapshotSelections(storage, readContext.signal)
+  let documentNavigating = false
   const insights = new InsightsQueryService(storage)
 
   const clearApproval = (): void => {
@@ -189,11 +197,19 @@ export function registerScannerIpc(
     contextVersion++
     readContext.abort()
     readContext = new AbortController()
+    viewSelections = new ViewSnapshotSelections(storage, readContext.signal)
+  }
+  const onDocumentInvalidated = (): void => {
+    documentNavigating = true
+    clearApproval()
   }
   const onNavigation = (
     details: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>
   ): void => {
-    if (details.isMainFrame) clearApproval()
+    if (details.isMainFrame) {
+      documentNavigating = !details.isSameDocument
+      clearApproval()
+    }
   }
 
   const authorizedRenderer = (): boolean => {
@@ -257,6 +273,7 @@ export function registerScannerIpc(
     () => restore('unavailable', null)
   )
   const onLoaded = (): void => {
+    documentNavigating = false
     inFlight = null
     sendLatest()
   }
@@ -264,6 +281,7 @@ export function registerScannerIpc(
     clearApproval()
     renderer?.removeListener('did-start-navigation', onNavigation)
     renderer?.removeListener('did-finish-load', onLoaded)
+    renderer?.removeListener('render-process-gone', onDocumentInvalidated)
     renderer?.removeListener('destroyed', detachRenderer)
     renderer = null
     inFlight = null
@@ -282,6 +300,41 @@ export function registerScannerIpc(
     if (latest.revision !== acknowledged) sendLatest()
   }
   ipcMain.on(IPC_CHANNELS.acknowledgeScanState, onAck)
+
+  const selectionChannels = [
+    IPC_CHANNELS.prepareSnapshotSelection,
+    IPC_CHANNELS.adoptSnapshotSelection,
+    IPC_CHANNELS.releaseSnapshotSelection
+  ] as const
+  for (const channel of selectionChannels) {
+    ipcMain.handle(channel, async (event, ...args: unknown[]) => {
+      if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
+      if (documentNavigating || !authorized(event))
+        return failure('UNAUTHORIZED', 'Snapshot selection access is not authorized.')
+      if (args.length !== 1)
+        return failure('INVALID_REQUEST', 'One snapshot selection request is required.')
+      const { signal } = readContext
+      const current = (): boolean => !signal.aborted && !documentNavigating && authorized(event)
+      try {
+        if (channel === IPC_CHANNELS.prepareSnapshotSelection) {
+          const context = viewSelections
+          const request = readSelectionRequest(args[0])
+          const value = await context.prepare(request, current)
+          if (current()) return { ok: true, value }
+          context.discardPrepared({ view: request.view, ticket: value.ticket })
+          return failure('UNAVAILABLE', 'The snapshot selection context is no longer available.')
+        }
+        if (channel === IPC_CHANNELS.adoptSnapshotSelection)
+          viewSelections.adopt(readSelectionAdoption(args[0]))
+        else viewSelections.release(readSelectionView(args[0]))
+        return { ok: true, value: null }
+      } catch (error) {
+        return current()
+          ? snapshotFailure(error, false)
+          : failure('UNAVAILABLE', 'The snapshot selection context is no longer available.')
+      }
+    })
+  }
 
   ipcMain.handle(
     IPC_CHANNELS.selectScanDirectory,
@@ -612,12 +665,14 @@ export function registerScannerIpc(
       if (disposed) return
       detachRenderer()
       renderer = next
+      documentNavigating = false
       if (next.isDestroyed()) {
         renderer = null
         return
       }
       next.on('did-finish-load', onLoaded)
       next.on('did-start-navigation', onNavigation)
+      next.on('render-process-gone', onDocumentInvalidated)
       next.on('destroyed', detachRenderer)
       sendLatest()
     },
@@ -629,6 +684,7 @@ export function registerScannerIpc(
       detachRenderer()
       for (const channel of channels) ipcMain.removeHandler(channel)
       for (const channel of snapshotChannels) ipcMain.removeHandler(channel)
+      for (const channel of selectionChannels) ipcMain.removeHandler(channel)
       ipcMain.removeHandler(IPC_CHANNELS.selectScanDirectory)
       ipcMain.removeListener(IPC_CHANNELS.acknowledgeScanState, onAck)
       disposal = manager.dispose()

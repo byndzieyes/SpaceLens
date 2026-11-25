@@ -2,6 +2,7 @@ import { StrictMode } from 'react'
 import { act, fireEvent, render, screen, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { SpaceLensAPI } from '../src/shared/ipc'
+import { mockSnapshotSelection } from './snapshot-selection-fixture'
 import type { ScanSnapshot } from '../src/shared/snapshot'
 import { DirectoryTreemap } from '../src/renderer/src/features/explorer/DirectoryTreemap'
 import { Treemap } from '../src/renderer/src/features/explorer/Treemap'
@@ -427,6 +428,7 @@ test('Explorer shares Treemap selection and navigation with Contents, Details, b
     getScanDirectoryTreemap: list,
     listScanDirectory: listPages,
     getScanSnapshot: getSnapshot,
+    ...mockSnapshotSelection(getSnapshot),
     getScanEntry: getEntry,
     onScanStateChanged: () => () => {}
   })

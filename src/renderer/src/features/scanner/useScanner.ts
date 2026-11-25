@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ScannerIpcErrorCode, ScanStateSnapshot } from '../../../../shared/ipc'
 import type { RecentScanSummary, ScanSessionState } from '../../../../shared/scan'
+import type { SnapshotSelections } from '../snapshots/selection'
 
 interface ScanView {
   publicationStatus: NonNullable<ScanStateSnapshot['publicationStatus']>
@@ -44,7 +45,7 @@ function requestError(code: ScannerIpcErrorCode): string {
 }
 
 /** Metadata only. Main owns the scan and continues working when Overview unmounts. */
-export function useScanner(): ScanView & {
+export function useScanner(snapshots?: SnapshotSelections): ScanView & {
   select: () => void
   cancel: () => void
   refresh: () => void
@@ -83,6 +84,7 @@ export function useScanner(): ScanView & {
       const scan = snapshot.state
       if (scan && scan.progress.scanId !== scan.session.id) return
       revision = snapshot.revision
+      snapshots?.observeScanState(snapshot)
       const progressOnly =
         scan?.session.status === 'running' &&
         current.scan?.session.status === 'running' &&
@@ -222,7 +224,7 @@ export function useScanner(): ScanView & {
       actions.current = null
       unsubscribe?.()
     }
-  }, [])
+  }, [snapshots])
 
   return {
     ...view,

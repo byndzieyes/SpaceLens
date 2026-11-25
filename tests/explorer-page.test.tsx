@@ -2,9 +2,11 @@ import { render, screen, within, fireEvent } from '@testing-library/react'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
 import type { SpaceLensAPI } from '../src/shared/ipc'
 import App from '../src/renderer/src/App'
+import { mockSnapshotSelection } from './snapshot-selection-fixture'
 import { ExplorerPage } from '../src/renderer/src/pages/ExplorerPage'
 
 const api: SpaceLensAPI = {
+  ...mockSnapshotSelection(() => api.getScanSnapshot()),
   getAppInfo: vi.fn(),
   getScanState: vi.fn(),
   listScanHistory: vi.fn(),

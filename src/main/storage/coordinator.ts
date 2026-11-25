@@ -1,5 +1,5 @@
 import type { ScanPersistence } from '../scanner/persistence'
-import type { SnapshotDeletionRequest } from '../../shared/history'
+import type { ScanHistoryItem, SnapshotDeletionRequest } from '../../shared/history'
 import type {
   BuildingScan,
   CompletedScan,
@@ -86,9 +86,17 @@ export class ScanStorageCoordinator implements ScanPersistence {
     return this.enqueue(query, signal, scanId)
   }
 
-  createSnapshotOwner(signal: AbortSignal): SnapshotProtectionOwner {
-    return this.protection.createOwner(signal, (scanId) =>
-      this.read(signal, (client) => client.getScanHistoryMetadata({ scanId }), scanId)
+  createSnapshotOwner(signal: AbortSignal): SnapshotProtectionOwner<ScanHistoryItem> {
+    return this.protection.createOwner(signal, (scanId, validationSignal) =>
+      this.read(
+        validationSignal,
+        async (client) => {
+          const metadata = await client.getScanHistoryMetadata({ scanId })
+          if (metadata.id !== scanId) throw new Error('Storage returned a different history scan.')
+          return metadata
+        },
+        scanId
+      )
     )
   }
 

@@ -4,6 +4,7 @@ import type { FileEntry } from '../src/shared/scan'
 import type { ScanSnapshot } from '../src/shared/snapshot'
 import type { SpaceLensAPI } from '../src/shared/ipc'
 import { useExplorer } from '../src/renderer/src/features/explorer/useExplorer'
+import { mockSnapshotSelection } from './snapshot-selection-fixture'
 const root: FileEntry = {
   id: 'root',
   scanId: 'scan',
@@ -42,7 +43,7 @@ beforeEach(() => {
     ok: true,
     value: entryId === 'child' ? child : leaf
   }))
-  vi.stubGlobal('spaceLens', api)
+  vi.stubGlobal('spaceLens', { ...api, ...mockSnapshotSelection(api.getScanSnapshot) })
 })
 afterEach(() => vi.unstubAllGlobals())
 async function mount(): Promise<RenderHookResult<ReturnType<typeof useExplorer>, unknown>> {

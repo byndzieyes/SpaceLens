@@ -9,6 +9,7 @@ import { ArrowLeft, ArrowRight, ArrowUp, FolderTree } from 'lucide-react'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 import type { ExplorerTarget } from '../navigation'
+import type { ViewSnapshotOptions } from '../features/snapshots/selection'
 
 function ExplorerPanel({
   id,
@@ -33,12 +34,14 @@ function ExplorerPanel({
 
 export function ExplorerPage({
   target,
-  onTargetConsumed
+  onTargetConsumed,
+  snapshots
 }: {
   target?: ExplorerTarget
   onTargetConsumed?: (target: ExplorerTarget) => void
+  snapshots?: ViewSnapshotOptions
 } = {}): React.JSX.Element {
-  const explorer = useExplorer(target, onTargetConsumed)
+  const explorer = useExplorer(target, onTargetConsumed, snapshots)
   const { availability, error, loading } = explorer
   const snapshot = availability?.status === 'available' ? availability.snapshot : null
   const scanId = snapshot?.entries.scanId ?? null

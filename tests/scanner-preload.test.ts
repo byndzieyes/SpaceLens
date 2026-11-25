@@ -33,6 +33,7 @@ function emit(revision: number): void {
 test('exposes only the typed application API and uses fixed invoke channels', async () => {
   expect(contextBridge.exposeInMainWorld).toHaveBeenCalledWith('spaceLens', api)
   expect(Object.keys(api).sort()).toEqual([
+    'adoptSnapshotSelection',
     'cancelScan',
     'deleteSnapshot',
     'getAppInfo',
@@ -52,6 +53,8 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'listScanDirectory',
     'listScanHistory',
     'onScanStateChanged',
+    'prepareSnapshotSelection',
+    'releaseSnapshotSelection',
     'selectScanDirectory',
     'setRetentionSettings',
     'startScan'
@@ -145,6 +148,27 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(21, IPC_CHANNELS.setRetentionSettings, {
     maxCompletedSnapshots: 4
   })
+  const selection = { view: 'explorer', selection: { mode: 'explicit', scanId: 'scan' } } as const
+  const adoption = { view: 'explorer', ticket: 'ticket' } as const
+  const release = { view: 'explorer' } as const
+  expect(await api.prepareSnapshotSelection(selection)).toBe(response)
+  expect(await api.adoptSnapshotSelection(adoption)).toBe(response)
+  expect(await api.releaseSnapshotSelection(release)).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(
+    22,
+    IPC_CHANNELS.prepareSnapshotSelection,
+    selection
+  )
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(
+    23,
+    IPC_CHANNELS.adoptSnapshotSelection,
+    adoption
+  )
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(
+    24,
+    IPC_CHANNELS.releaseSnapshotSelection,
+    release
+  )
 })
 
 test('deduplicates subscribers, strips Electron events, and supports idempotent unsubscription', () => {
