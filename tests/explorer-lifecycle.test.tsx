@@ -224,6 +224,8 @@ function mockApp(): {
       read(scanId, (store) => store.listInsightsLargest({ scanId, offset, limit }, 'directory'))
     ),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: state })),
+    listScanHistory: vi.fn(),
+    getScanHistoryMetadata: vi.fn(),
     getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
       ok: true,
       value: {

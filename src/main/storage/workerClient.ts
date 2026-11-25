@@ -1,5 +1,11 @@
 import type { Worker } from 'node:worker_threads'
 import type {
+  ScanHistoryItem,
+  ScanHistoryMetadataRequest,
+  ScanHistoryPage,
+  ScanHistoryQuery
+} from '../../shared/history'
+import type {
   InsightsCategories,
   InsightsExtensionPage,
   InsightsExtensionRequest,
@@ -108,6 +114,14 @@ export class StorageWorkerClient {
 
   requirePublishedScan(scanId: string): Promise<CompletedScan> {
     return this.run('requirePublishedScan', { scanId })
+  }
+
+  listScanHistory(query: ScanHistoryQuery): Promise<ScanHistoryPage> {
+    return this.run('listScanHistory', query)
+  }
+
+  getScanHistoryMetadata(request: ScanHistoryMetadataRequest): Promise<ScanHistoryItem> {
+    return this.run('getScanHistoryMetadata', request)
   }
 
   getInsightsCategories(scanId: string): Promise<InsightsCategories> {

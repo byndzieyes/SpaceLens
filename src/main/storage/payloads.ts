@@ -96,11 +96,7 @@ export function validateBuildingScan(value: unknown): asserts value is BuildingS
   }
 }
 
-export function validateScanPublication(value: unknown): asserts value is ScanPublication {
-  if (!record(value) || !isSnapshotId(value.rootEntryId)) {
-    throw new TypeError('Scan publication requires a valid root entry ID.')
-  }
-  const { scan } = value
+function completedDuration(scan: unknown): number {
   if (
     !isStorageScan(scan) ||
     scan.status !== 'completed' ||
@@ -109,9 +105,26 @@ export function validateScanPublication(value: unknown): asserts value is ScanPu
   ) {
     throw new TypeError('Scan publication requires valid completed scan metadata and summary.')
   }
-  if (!(timestamp(scan.finishedAt) >= timestamp(scan.startedAt))) {
+  const duration = timestamp(scan.finishedAt) - timestamp(scan.startedAt)
+  if (!(duration >= 0)) {
     throw new TypeError('Scan publication requires valid timestamps in start-to-finish order.')
   }
+  return duration
+}
+
+export function validateScanPublication(value: unknown): asserts value is ScanPublication {
+  if (!record(value) || !isSnapshotId(value.rootEntryId)) {
+    throw new TypeError('Scan publication requires a valid root entry ID.')
+  }
+  completedDuration(value.scan)
+}
+
+export function readCompletedScanDuration(scan: CompletedScan): number {
+  const duration = completedDuration(scan)
+  if (!integer(duration) || scan.summary.directoryCount === 0) {
+    throw new Error('Invalid completed scan duration or directory count.')
+  }
+  return duration
 }
 
 export function isStorageEntry(value: unknown): value is FileEntry {

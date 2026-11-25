@@ -1,4 +1,10 @@
-import { DatabaseSync, type SQLOutputValue, type StatementSync } from 'node:sqlite'
+import {
+  DatabaseSync,
+  type SQLInputValue,
+  type SQLOutputValue,
+  type StatementSync
+} from 'node:sqlite'
+import type { ScanHistoryItem, ScanHistoryPage, ScanHistorySort } from '../../shared/history'
 import type {
   InsightsCategories,
   InsightsExtensionPage,
@@ -22,12 +28,15 @@ import {
 import {
   readExtensionRequest,
   readRankingRequest,
+  readScanHistoryQuery,
+  readSnapshotId,
   SnapshotAccessError,
   validateSnapshotRequest,
   validateTreemapRequest
 } from './snapshotAccess'
 import {
   isSnapshotId,
+  readCompletedScanDuration,
   validateBuildingScan,
   validateScanPublication,
   validateStorageBatch,
@@ -51,6 +60,14 @@ const SQLITE_PAGE_CACHE_KIB = 64 * 1024
 const SCAN_COLUMNS = `id, root_path, status, started_at, finished_at, total_bytes, file_count,
          directory_count, error_count`
 const SELECT_SCAN = `SELECT ${SCAN_COLUMNS}, publication_sequence FROM scans`
+const LATEST_SCAN =
+  "FROM scans WHERE status = 'completed' ORDER BY publication_sequence DESC LIMIT 1"
+const HISTORY_ORDER: Record<ScanHistorySort, string> = {
+  newest: 'publication_sequence DESC',
+  oldest: 'publication_sequence ASC',
+  'size-asc': 'total_bytes ASC, publication_sequence DESC',
+  'size-desc': 'total_bytes DESC, publication_sequence DESC'
+}
 const ENTRY_COLUMNS = `entry.scan_id, entry.id, entry.parent_id, entry.name, entry.path, entry.type,
          entry.size_bytes, entry.aggregated_size_bytes, entry.created_at, entry.modified_at
 `
@@ -151,6 +168,15 @@ function requireCompletedScan(scan: ScanSession): CompletedScan {
   return { ...scan, status: scan.status }
 }
 
+function historyItem(scan: CompletedScan, latestId: string | null): ScanHistoryItem {
+  return {
+    ...scan,
+    durationMs: readCompletedScanDuration(scan),
+    isLatest: scan.id === latestId,
+    incomplete: scan.summary.errorCount > 0
+  }
+}
+
 function readLegacyPublication(statement: StatementSync): CompletedScan | null {
   const [row, other] = statement.all()
   if (other) throw new Error('The database has more than one completed scan.')
@@ -204,8 +230,12 @@ function recoverScans(connection: DatabaseSync, published: CompletedScan | null)
   connection.exec("DELETE FROM scans WHERE status = 'running'")
 }
 
-function inTransaction(connection: DatabaseSync, operation: () => undefined): void {
-  connection.exec('BEGIN IMMEDIATE')
+function inTransaction(
+  connection: DatabaseSync,
+  operation: () => undefined,
+  begin: 'BEGIN IMMEDIATE' | 'BEGIN' = 'BEGIN IMMEDIATE'
+): void {
+  connection.exec(begin)
   try {
     if (operation() !== undefined) {
       throw new TypeError(
@@ -238,6 +268,7 @@ export class ScanDatabase {
   private readonly insertScanStatement: StatementSync
   private readonly selectScanStatement: StatementSync
   private readonly selectLatestScanStatement: StatementSync
+  private readonly selectLatestScanIdStatement: StatementSync
   private readonly selectOtherBuildingStatement: StatementSync
   private readonly completeScanStatement: StatementSync
   private readonly deleteBuildingScanStatement: StatementSync
@@ -279,6 +310,15 @@ export class ScanDatabase {
         })
       )
       this.analytics = new PublishedAnalytics(this.connection)
+      // BLOB byte offsets can split UTF-16 code units. Match decoded text at code-unit boundaries.
+      this.connection.function(
+        'history_path_contains',
+        { deterministic: true, directOnly: true },
+        (path, text) =>
+          Number(
+            readFilesystemText(path, 'root path').includes(readFilesystemText(text, 'search text'))
+          )
+      )
 
       this.insertScanStatement = this.connection.prepare(`
         INSERT INTO scans (
@@ -289,9 +329,10 @@ export class ScanDatabase {
       this.selectScanStatement = this.connection.prepare(`${SELECT_SCAN} WHERE id = ?`)
       this.selectScanStatement.setReadBigInts(true)
       this.selectLatestScanStatement = this.connection.prepare(
-        `${SELECT_SCAN} WHERE status = 'completed' ORDER BY publication_sequence DESC LIMIT 1`
+        `SELECT ${SCAN_COLUMNS}, publication_sequence ${LATEST_SCAN}`
       )
       this.selectLatestScanStatement.setReadBigInts(true)
+      this.selectLatestScanIdStatement = this.connection.prepare(`SELECT id ${LATEST_SCAN}`)
       this.selectOtherBuildingStatement = this.connection.prepare(`
         SELECT id FROM scans WHERE status = 'running' AND id <> ? LIMIT 1
       `)
@@ -516,6 +557,86 @@ export class ScanDatabase {
     this.requireOpen()
     const row = this.selectLatestScanStatement.get()
     return row ? requireCompletedScan(readSequencedScan(row)) : null
+  }
+
+  listScanHistory(request: unknown): ScanHistoryPage {
+    this.requireOpen()
+    const { offset, limit, sort, rootPath, rootPathContains } = readScanHistoryQuery(request)
+    const predicates = ["status = 'completed'"]
+    const bindings: SQLInputValue[] = []
+    if (rootPath !== undefined) {
+      predicates.push('root_path = ?')
+      bindings.push(bindFilesystemText(rootPath))
+    }
+    if (rootPathContains !== undefined) {
+      predicates.push('history_path_contains(root_path, ?) = 1')
+      bindings.push(bindFilesystemText(rootPathContains))
+    }
+    const where = `WHERE ${predicates.join(' AND ')}`
+
+    let page!: ScanHistoryPage
+    inTransaction(
+      this.connection,
+      () => {
+        const count = this.connection.prepare(`SELECT COUNT(*) AS total_count FROM scans ${where}`)
+        count.setReadBigInts(true)
+        const totalCount = readInteger(count.get(...bindings)?.total_count ?? null, 'history total')
+        const latestCompletedScanId = this.getLatestScanId()
+        const items: ScanHistoryItem[] = []
+        if (offset < totalCount) {
+          const select = this.connection.prepare(
+            `${SELECT_SCAN} ${where} ORDER BY ${HISTORY_ORDER[sort]} LIMIT ? OFFSET ?`
+          )
+          select.setReadBigInts(true)
+          for (const row of select.all(...bindings, limit, offset)) {
+            items.push(
+              historyItem(requireCompletedScan(readSequencedScan(row)), latestCompletedScanId)
+            )
+          }
+        }
+        const end = offset + items.length
+        page = {
+          items,
+          offset,
+          limit,
+          totalCount,
+          nextOffset: end < totalCount ? end : null,
+          latestCompletedScanId
+        }
+      },
+      'BEGIN'
+    )
+    return page
+  }
+
+  getScanHistoryMetadata(request: unknown): ScanHistoryItem {
+    this.requireOpen()
+    const scanId = readSnapshotId(request)
+    let item!: ScanHistoryItem
+    inTransaction(
+      this.connection,
+      () => {
+        const scan = this.getScan(scanId)
+        if (!scan)
+          throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'This saved scan no longer exists.')
+        if (scan.status !== 'completed') {
+          throw new SnapshotAccessError(
+            'SNAPSHOT_UNAVAILABLE',
+            'This scan has no available snapshot.'
+          )
+        }
+        item = historyItem(requireCompletedScan(scan), this.getLatestScanId())
+      },
+      'BEGIN'
+    )
+    return item
+  }
+
+  private getLatestScanId(): string | null {
+    const row = this.selectLatestScanIdStatement.get()
+    if (!row) return null
+    if (!isSnapshotId(row.id)) throw new Error('Invalid latest scan ID.')
+    return row.id
   }
 
   getScanSnapshot(): ScanSnapshotAvailability {

@@ -21,6 +21,8 @@ import type { ScanDirectoryRequest, ScanEntryRequest } from '../shared/snapshot'
 import { InsightsQueryService } from './insights/queryService'
 import {
   SnapshotAccessError,
+  readScanHistoryQuery,
+  readSnapshotId,
   validateSnapshotRequest,
   validateTreemapRequest
 } from './storage/snapshotAccess'
@@ -39,7 +41,7 @@ function failure(code: ScannerIpcErrorCode, message: string): ScannerIpcResult<n
   return { ok: false, error: { code, message } }
 }
 
-function snapshotFailure(error: unknown): ScannerIpcResult<never> {
+function snapshotFailure(error: unknown, history: boolean): ScannerIpcResult<never> {
   if (error instanceof SnapshotAccessError) return failure(error.code, error.message)
   if (error instanceof StorageUnavailableError) return failure('UNAVAILABLE', error.message)
   if (error instanceof StorageWorkerError && error.name === 'SnapshotAccessError') {
@@ -53,7 +55,12 @@ function snapshotFailure(error: unknown): ScannerIpcResult<never> {
         return failure(error.code, error.message)
     }
   }
-  return failure('INTERNAL_ERROR', 'The snapshot request could not be processed.')
+  return failure(
+    'INTERNAL_ERROR',
+    history
+      ? 'The scan history request could not be processed.'
+      : 'The snapshot request could not be processed.'
+  )
 }
 
 class ScanStartRejected extends Error {
@@ -311,6 +318,8 @@ export function registerScannerIpc(
 
   const readChannels = [
     IPC_CHANNELS.getScanSnapshot,
+    IPC_CHANNELS.listScanHistory,
+    IPC_CHANNELS.getScanHistoryMetadata,
     IPC_CHANNELS.getScanEntry,
     IPC_CHANNELS.listScanDirectory,
     IPC_CHANNELS.getScanDirectoryTreemap,
@@ -327,19 +336,23 @@ export function registerScannerIpc(
       if (disposed) return failure('UNAVAILABLE', 'Scanner is shutting down.')
       if (!authorized(event)) return failure('UNAUTHORIZED', 'Scanner access is not authorized.')
       const { signal } = readContext
+      const history =
+        channel === IPC_CHANNELS.listScanHistory || channel === IPC_CHANNELS.getScanHistoryMetadata
       const reply = <T>(result: ScannerIpcResult<T>): ScannerIpcResult<T> =>
         signal.aborted || !authorized(event)
           ? failure(
               'UNAVAILABLE',
-              channel === IPC_CHANNELS.getInsightsSummary ||
-                channel === IPC_CHANNELS.getInsightsCategories ||
-                channel === IPC_CHANNELS.getInsightsSizeDistribution ||
-                channel === IPC_CHANNELS.getInsightsObservations ||
-                channel === IPC_CHANNELS.listInsightsExtensions ||
-                channel === IPC_CHANNELS.listInsightsLargestFiles ||
-                channel === IPC_CHANNELS.listInsightsLargestDirectories
-                ? 'The Insights context is no longer available.'
-                : 'The Explorer context is no longer available.'
+              history
+                ? 'The History context is no longer available.'
+                : channel === IPC_CHANNELS.getInsightsSummary ||
+                    channel === IPC_CHANNELS.getInsightsCategories ||
+                    channel === IPC_CHANNELS.getInsightsSizeDistribution ||
+                    channel === IPC_CHANNELS.getInsightsObservations ||
+                    channel === IPC_CHANNELS.listInsightsExtensions ||
+                    channel === IPC_CHANNELS.listInsightsLargestFiles ||
+                    channel === IPC_CHANNELS.listInsightsLargestDirectories
+                  ? 'The Insights context is no longer available.'
+                  : 'The Explorer context is no longer available.'
             )
           : result
       try {
@@ -349,8 +362,27 @@ export function registerScannerIpc(
           const value = await storage.read(signal, (client) => client.getScanSnapshot())
           return reply({ ok: true, value })
         }
-        if (args.length !== 1)
-          return failure('INVALID_REQUEST', 'One snapshot request is required.')
+        if (args.length !== 1) {
+          return failure(
+            'INVALID_REQUEST',
+            history ? 'One scan history request is required.' : 'One snapshot request is required.'
+          )
+        }
+        if (channel === IPC_CHANNELS.listScanHistory) {
+          const query = readScanHistoryQuery(args[0])
+          const value = await storage.read(signal, (client) => client.listScanHistory(query))
+          if (value.offset !== query.offset || value.limit !== query.limit)
+            throw new Error('Storage returned a different history page.')
+          return reply({ ok: true, value })
+        }
+        if (channel === IPC_CHANNELS.getScanHistoryMetadata) {
+          const scanId = readSnapshotId(args[0])
+          const value = await storage.read(signal, (client) =>
+            client.getScanHistoryMetadata({ scanId })
+          )
+          if (value.id !== scanId) throw new Error('Storage returned a different history scan.')
+          return reply({ ok: true, value })
+        }
         if (channel === IPC_CHANNELS.getInsightsSummary) {
           const value = await insights.getSummary(args[0], signal)
           return reply({ ok: true, value })
@@ -398,7 +430,7 @@ export function registerScannerIpc(
         )
         return reply({ ok: true, value })
       } catch (error) {
-        return reply(snapshotFailure(error))
+        return reply(snapshotFailure(error, history))
       }
     })
   }

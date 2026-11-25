@@ -39,6 +39,8 @@ Directory pages contain at most 100 direct children, sorted by name then ID in U
 
 Main serializes reads and scanner writes through one Storage Worker. Scanner writes take priority over queued reads. Up to 16 reads may wait for a turn, each with a 10-second queue deadline. Document changes and shutdown drop queued snapshot reads. An active SQLite query can delay the next write. Cold analytics and targeting a file in a wide or deeply nested directory can take noticeable time on large scans. Cancellation remains available through traversal and batch persistence and closes when the final publication request is sent.
 
+The internal History API reads completed scan metadata in pages of 20 by default, with at most 100 scans per request. Root filters match stored paths case-sensitively, with literal substring search available. Offset-based pages reflect the current history on each read. Future consumers need to refresh pagination after publication, deletion, or pruning because a mutation can shift later pages.
+
 Scan history and comparisons, duplicate detection, file cleanup, and background monitoring are deferred beyond Phase 4.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).

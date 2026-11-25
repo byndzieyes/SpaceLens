@@ -32,6 +32,12 @@ export interface SpaceLensAPI {
   startScan: (request: StartScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
   getScanState: () => Promise<ScannerIpcResult<ScanStateSnapshot>>
   getScanSnapshot: () => Promise<ScannerIpcResult<ScanSnapshotAvailability>>
+  listScanHistory: (
+    query: ScanHistoryQuery
+  ) => Promise<ScannerIpcResult<ScanHistoryPage, ScanHistoryErrorCode>>
+  getScanHistoryMetadata: (
+    request: ScanHistoryMetadataRequest
+  ) => Promise<ScannerIpcResult<ScanHistoryItem, ScanHistoryErrorCode>>
   getScanEntry: (request: ScanEntryRequest) => Promise<ScannerIpcResult<FileEntry>>
   listScanDirectory: (request: ScanDirectoryRequest) => Promise<ScannerIpcResult<ScanDirectoryPage>>
   getScanDirectoryTreemap: (
@@ -64,6 +70,8 @@ export const IPC_CHANNELS = {
   startScan: 'spacelens:start-scan',
   getScanState: 'spacelens:get-scan-state',
   getScanSnapshot: 'spacelens:get-scan-snapshot',
+  listScanHistory: 'spacelens:list-scan-history',
+  getScanHistoryMetadata: 'spacelens:get-scan-history-metadata',
   getScanEntry: 'spacelens:get-scan-entry',
   listScanDirectory: 'spacelens:list-scan-directory',
   getScanDirectoryTreemap: 'spacelens:get-scan-directory-treemap',
@@ -104,11 +112,11 @@ export type ScannerIpcErrorCode =
   | 'UNAVAILABLE'
   | 'INTERNAL_ERROR'
 
-export type ScannerIpcResult<T> =
+export type ScannerIpcResult<T, Code extends string = ScannerIpcErrorCode> =
   | { readonly ok: true; readonly value: T }
   | {
       readonly ok: false
-      readonly error: { readonly code: ScannerIpcErrorCode; readonly message: string }
+      readonly error: { readonly code: Code; readonly message: string }
     }
 
 /** Compare revisions when combining query responses with subscription updates. */
@@ -126,3 +134,10 @@ export interface ScanStateSnapshot {
 export interface ScanAccepted {
   readonly scanId: string
 }
+import type {
+  ScanHistoryErrorCode,
+  ScanHistoryItem,
+  ScanHistoryMetadataRequest,
+  ScanHistoryPage,
+  ScanHistoryQuery
+} from './history'

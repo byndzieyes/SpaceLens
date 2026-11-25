@@ -41,12 +41,14 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'getInsightsSummary',
     'getScanDirectoryTreemap',
     'getScanEntry',
+    'getScanHistoryMetadata',
     'getScanSnapshot',
     'getScanState',
     'listInsightsExtensions',
     'listInsightsLargestDirectories',
     'listInsightsLargestFiles',
     'listScanDirectory',
+    'listScanHistory',
     'onScanStateChanged',
     'selectScanDirectory',
     'startScan'
@@ -121,6 +123,13 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   })
   expect(await api.getInsightsObservations({ scanId: 'scan' })).toBe(response)
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(16, IPC_CHANNELS.getInsightsObservations, {
+    scanId: 'scan'
+  })
+  const query = { limit: 2, rootPathContains: '%_' }
+  expect(await api.listScanHistory(query)).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(17, IPC_CHANNELS.listScanHistory, query)
+  expect(await api.getScanHistoryMetadata({ scanId: 'scan' })).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(18, IPC_CHANNELS.getScanHistoryMetadata, {
     scanId: 'scan'
   })
 })

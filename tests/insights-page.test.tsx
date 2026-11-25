@@ -257,6 +257,8 @@ beforeEach(() => {
   api = {
     getAppInfo: vi.fn(),
     getScanState: vi.fn(async () => success(update(0))),
+    listScanHistory: vi.fn(),
+    getScanHistoryMetadata: vi.fn(),
     getScanSnapshot: vi.fn(async () => metadata(publication)),
     getScanEntry: vi.fn(),
     listScanDirectory: vi.fn(),

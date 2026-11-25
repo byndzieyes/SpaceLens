@@ -1,12 +1,13 @@
 // @vitest-environment node
 
-import { once } from 'node:events'
+import { EventEmitter, once } from 'node:events'
 import { mkdtemp, readdir, rm, stat } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import { tmpdir } from 'node:os'
 import { basename, dirname, join, resolve } from 'node:path'
 import { DatabaseSync } from 'node:sqlite'
 import { Worker } from 'node:worker_threads'
+import type { IpcMainInvokeEvent, WebContents } from 'electron'
 import { resolveConfig } from 'electron-vite'
 import { build } from 'vite'
 import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
@@ -31,6 +32,8 @@ import {
 import type { createStorageWorkerClient } from '../src/main/storage/workerRunner'
 import type { StorageRequest } from '../src/main/storage/workerProtocol'
 import type { FileEntry, ScanSession } from '../src/shared/scan'
+import { IPC_CHANNELS } from '../src/shared/ipc'
+import type { ScanHistoryItem, ScanHistoryPage } from '../src/shared/history'
 import {
   buildingFixture,
   createV1Database,
@@ -410,6 +413,7 @@ test('coordinates a real Worker after startup and prioritizes publication over E
       storage.read(signal, (db) => db.getScanEntry({ scanId: old.id, entryId: file.id }))
     ).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
     const nextSnapshot = storage.read(signal, (db) => db.getScanSnapshot())
+    const queuedHistory = storage.read(signal, (db) => db.listScanHistory({}))
     const expiredSummary = expect(
       insights.getSummary({ scanId: old.id }, signal)
     ).rejects.toMatchObject({
@@ -443,6 +447,13 @@ test('coordinates a real Worker after startup and prioritizes publication over E
     await expiredExtensions
     await oldRanking
     expect((await nextSnapshot).snapshot?.entries.scanId).toBe(next.id)
+    expect(await queuedHistory).toMatchObject({
+      items: [
+        { id: next.id, isLatest: true },
+        { id: old.id, isLatest: false }
+      ],
+      latestCompletedScanId: next.id
+    })
     expect(await nextSummary).toMatchObject({ scanId: next.id, summary: next.summary })
     expect(await observations).toEqual({ scanId: next.id, incomplete: false, observations: [] })
     expect(await nextCategories).toMatchObject({ scanId: next.id })
@@ -504,6 +515,7 @@ test('queues rankings and Explorer reads alongside a real Scanner batch for a re
     ).rejects.toMatchObject({
       code: 'SNAPSHOT_UNAVAILABLE'
     })
+    const history = storage.read(signal, (db) => db.listScanHistory({}))
     expect(sent).not.toHaveBeenCalled()
     release.resolve()
     await write
@@ -513,6 +525,7 @@ test('queues rankings and Explorer reads alongside a real Scanner batch for a re
     expect(observed.buckets[0]).toEqual({ id: 'empty', fileCount: 1, knownBytes: 0 })
     expect(await current).toMatchObject({ scanId: old.id, id: file.id })
     await building
+    expect(await history).toMatchObject({ items: [{ id: old.id }], totalCount: 1 })
     await storage.discardBuildingScan(next.id)
     expect(await insights.listLargest({ scanId: old.id }, 'file', signal)).toEqual(await ranking)
   } finally {
@@ -535,6 +548,10 @@ test('bounds waits during startup, drops abandoned renderer work and allows a ne
   )
   const results = Promise.allSettled(waiting)
   await expect(storage.read(live.signal, query)).rejects.toThrow('busy')
+  await expect(storage.read(live.signal, (db) => db.listScanHistory({}))).rejects.toThrow('busy')
+  await expect(
+    storage.read(live.signal, (db) => db.getScanHistoryMetadata({ scanId: 'saved' }))
+  ).rejects.toThrow('busy')
   const request = { scanId: 'previous' }
   await expect(insights.getSummary(request, live.signal)).rejects.toThrow('busy')
   await expect(insights.getSizeDistribution(request, live.signal)).rejects.toThrow('busy')
@@ -1320,6 +1337,101 @@ test('an interrupted worker migration leaves the v1 schema and rows available fo
   await retry.recoverStorage()
   await expect(retry.getPublishedScan()).resolves.toEqual(legacyScan)
   await expect(retry.getScan('interrupted')).resolves.toBeNull()
+})
+
+test('reads completed history through the worker and coordinator across publication, discard and restart', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.recoverStorage()
+  const { signal } = new AbortController()
+  const storage = new ScanStorageCoordinator(Promise.resolve(client))
+  const list = (): Promise<ScanHistoryPage> => storage.read(signal, (db) => db.listScanHistory({}))
+  const metadata = (scanId: string): Promise<ScanHistoryItem> =>
+    storage.read(signal, (db) => db.getScanHistoryMetadata({ scanId }))
+  expect(await list()).toMatchObject({ totalCount: 0, latestCompletedScanId: null })
+  const first = await preparePublication(client, lifecycleScan('first'))
+  await storage.publishScan(first, root.id)
+  const next = await preparePublication(client, lifecycleScan('next'))
+  await expect(metadata(next.id)).rejects.toMatchObject({ code: 'SNAPSHOT_UNAVAILABLE' })
+  expect((await list()).items.map(({ id }) => id)).toEqual([first.id])
+  await expect(
+    storage.publishScan({ ...next, summary: { ...next.summary, fileCount: 2 } }, root.id)
+  ).rejects.toThrow('differ from the scan summary')
+  await storage.discardBuildingScan(next.id)
+  await expect(metadata(next.id)).rejects.toMatchObject({ code: 'SNAPSHOT_EXPIRED' })
+  const last = await preparePublication(client, lifecycleScan('last'))
+  await storage.publishScan(last, root.id)
+  const saved = await list()
+  expect(saved.items.map(({ id }) => id)).toEqual([last.id, first.id])
+  await expect(metadata(first.id)).resolves.toEqual(saved.items[1])
+  await expect(client.listScanHistory({ limit: 101 })).rejects.toMatchObject({
+    code: 'INVALID_REQUEST'
+  })
+  await expect(client.getScanHistoryMetadata({ scanId: 'invalid/path' })).rejects.toMatchObject({
+    code: 'INVALID_REQUEST'
+  })
+  await expect(client.getScanEntry({ scanId: first.id, entryId: root.id })).rejects.toMatchObject({
+    code: 'SNAPSHOT_EXPIRED'
+  })
+  await client.dispose()
+
+  // Use the bundled worker with the client class shared by the source IPC handler.
+  const reopened = wrap(start())
+  await reopened.initialize(databasePath)
+  await reopened.recoverStorage()
+  const restored = new ScanStorageCoordinator(Promise.resolve(reopened))
+  await expect(restored.read(signal, (db) => db.listScanHistory({}))).resolves.toEqual(saved)
+  await expect(
+    restored.read(signal, (db) => db.getScanHistoryMetadata({ scanId: last.id }))
+  ).resolves.toEqual(saved.items[0])
+
+  // Exercise the actual IPC handler against the bundled worker and coordinator.
+  const handlers = new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>()
+  const ipcMain = Object.assign(new EventEmitter(), {
+    handle: (
+      channel: string,
+      handler: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown
+    ) => handlers.set(channel, handler),
+    removeHandler: (channel: string) => handlers.delete(channel)
+  })
+  vi.doMock('electron', () => ({ ipcMain, app: {}, BrowserWindow: {}, dialog: {} }))
+  try {
+    const { registerScannerIpc } = await import('../src/main/scannerIpc')
+    const manager = {
+      getState: () => null,
+      subscribe: () => () => {},
+      dispose: async () => {}
+    } as unknown as Parameters<typeof registerScannerIpc>[0]
+    const url = 'file:///history/index.html'
+    const renderer = Object.assign(new EventEmitter(), {
+      isDestroyed: () => false,
+      mainFrame: { url },
+      send: vi.fn()
+    })
+    const latest = await reopened.getPublishedScan()
+    const boundary = registerScannerIpc(manager, url, restored, Promise.resolve(latest))
+    try {
+      boundary.attachRenderer(renderer as unknown as WebContents)
+      const event = {
+        sender: renderer,
+        senderFrame: renderer.mainFrame
+      } as unknown as IpcMainInvokeEvent
+      await expect(handlers.get(IPC_CHANNELS.listScanHistory)!(event, {})).resolves.toEqual({
+        ok: true,
+        value: saved
+      })
+      await expect(
+        handlers.get(IPC_CHANNELS.getScanHistoryMetadata)!(event, { scanId: first.id })
+      ).resolves.toEqual({ ok: true, value: saved.items[1] })
+      await expect(
+        handlers.get(IPC_CHANNELS.getScanHistoryMetadata)!(event, { scanId: next.id })
+      ).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
+    } finally {
+      await boundary.dispose()
+    }
+  } finally {
+    vi.doUnmock('electron')
+  }
 })
 
 test('makes a failed startup recovery terminal without removing persisted rows', async () => {

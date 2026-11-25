@@ -45,6 +45,9 @@ const api: SpaceLensAPI = {
   startScan: (request) => ipcRenderer.invoke(IPC_CHANNELS.startScan, request),
   getScanState: () => ipcRenderer.invoke(IPC_CHANNELS.getScanState),
   getScanSnapshot: () => ipcRenderer.invoke(IPC_CHANNELS.getScanSnapshot),
+  listScanHistory: (query) => ipcRenderer.invoke(IPC_CHANNELS.listScanHistory, query),
+  getScanHistoryMetadata: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.getScanHistoryMetadata, request),
   getScanEntry: (request) => ipcRenderer.invoke(IPC_CHANNELS.getScanEntry, request),
   listScanDirectory: (request) => ipcRenderer.invoke(IPC_CHANNELS.listScanDirectory, request),
   getScanDirectoryTreemap: (request) =>

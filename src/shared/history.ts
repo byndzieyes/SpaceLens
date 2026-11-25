@@ -6,16 +6,33 @@ export const MAX_SCAN_HISTORY_PAGE_SIZE = 100
 export const DEFAULT_SCAN_HISTORY_LIMIT = 10
 
 export interface ScanHistoryItem extends CompletedScanMetadata {
+  /** Elapsed wall-clock milliseconds derived from startedAt and finishedAt. */
+  readonly durationMs: number
+  /** Whether this scan is Latest across all retained snapshots. */
+  readonly isLatest: boolean
   /** True when recoverable scan errors may have left known totals partial. */
   readonly incomplete: boolean
 }
 
+export type ScanHistorySort = 'newest' | 'oldest' | 'size-asc' | 'size-desc'
+
 export interface ScanHistoryQuery {
-  /** Zero-based offset into completed scans ordered newest publication first. Defaults to zero. */
+  /** Zero-based offset into the ordered, filtered results. Defaults to zero. */
   readonly offset?: number
   /** Defaults to DEFAULT_SCAN_HISTORY_PAGE_SIZE, up to MAX_SCAN_HISTORY_PAGE_SIZE. */
   readonly limit?: number
+  /** Defaults to newest publication first. Size ties use newest publication first. */
+  readonly sort?: ScanHistorySort
+  /** Exact, case-sensitive match against the stored root path. */
+  readonly rootPath?: string
+  /** Literal, case-sensitive substring. Combined with rootPath when both are present. */
+  readonly rootPathContains?: string
 }
+
+export type ResolvedScanHistoryQuery = ScanHistoryQuery &
+  Required<Pick<ScanHistoryQuery, 'offset' | 'limit' | 'sort'>>
+
+export type ScanHistoryMetadataRequest = Pick<ScanEntriesReference, 'scanId'>
 
 /** Pagination reflects the retained history at the time of each read. */
 export interface ScanHistoryPage {
@@ -24,6 +41,8 @@ export interface ScanHistoryPage {
   readonly limit: number
   readonly totalCount: number
   readonly nextOffset: number | null
+  /** Latest across all retained scans, including when it is outside this filter or page. */
+  readonly latestCompletedScanId: string | null
 }
 
 export interface ScanHistoryRetentionSettings {
@@ -58,16 +77,38 @@ function isSafeIntegerAtLeast(value: unknown, minimum: number): value is number 
   return typeof value === 'number' && Number.isSafeInteger(value) && value >= minimum
 }
 
+function isHistoryPathText(value: unknown): value is string {
+  return (
+    typeof value === 'string' && value.length > 0 && value.length <= 32767 && !value.includes('\0')
+  )
+}
+
 /** Resolve omitted fields. Null denotes an invalid request. */
-export function resolveScanHistoryQuery(value: unknown): Required<ScanHistoryQuery> | null {
-  if (!isRecord(value) || Object.keys(value).some((key) => key !== 'offset' && key !== 'limit'))
+export function resolveScanHistoryQuery(value: unknown): ResolvedScanHistoryQuery | null {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).some(
+      (key) => !['offset', 'limit', 'sort', 'rootPath', 'rootPathContains'].includes(key)
+    )
+  )
     return null
 
   const offset = Object.hasOwn(value, 'offset') ? value.offset : 0
   const limit = Object.hasOwn(value, 'limit') ? value.limit : DEFAULT_SCAN_HISTORY_PAGE_SIZE
+  const sort = Object.hasOwn(value, 'sort') ? value.sort : 'newest'
   if (!isSafeIntegerAtLeast(offset, 0) || !isSafeIntegerAtLeast(limit, 1)) return null
   if (limit > MAX_SCAN_HISTORY_PAGE_SIZE) return null
-  return { offset, limit }
+  if (sort !== 'newest' && sort !== 'oldest' && sort !== 'size-asc' && sort !== 'size-desc')
+    return null
+
+  const query: ResolvedScanHistoryQuery = { offset, limit, sort }
+  for (const field of ['rootPath', 'rootPathContains'] as const) {
+    if (!Object.hasOwn(value, field)) continue
+    const path = value[field]
+    if (!isHistoryPathText(path)) return null
+    Object.assign(query, { [field]: path })
+  }
+  return query
 }
 
 export function isScanHistoryRetentionSettings(

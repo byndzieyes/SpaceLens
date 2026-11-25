@@ -19,6 +19,8 @@ import type { ScannerIpcResult, SpaceLensAPI } from '../src/shared/ipc'
 
 const queries = {
   requirePublishedScan: vi.fn<StorageWorkerClient['requirePublishedScan']>(),
+  listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
+  getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
   getInsightsSizeDistribution: vi.fn<StorageWorkerClient['getInsightsSizeDistribution']>(),
   getInsightsObservations: vi.fn<StorageWorkerClient['getInsightsObservations']>(),

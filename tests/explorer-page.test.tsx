@@ -7,6 +7,8 @@ import { ExplorerPage } from '../src/renderer/src/pages/ExplorerPage'
 const api: SpaceLensAPI = {
   getAppInfo: vi.fn(),
   getScanState: vi.fn(),
+  listScanHistory: vi.fn(),
+  getScanHistoryMetadata: vi.fn(),
   getScanSnapshot: vi.fn(),
   getScanEntry: vi.fn(),
   listScanDirectory: vi.fn(),

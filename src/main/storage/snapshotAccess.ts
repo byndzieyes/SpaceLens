@@ -38,6 +38,12 @@ export function readSnapshotId(request: unknown): string {
   throw new SnapshotAccessError('INVALID_REQUEST', 'A valid snapshot scan ID is required.')
 }
 
+export function readScanHistoryQuery(request: unknown): ResolvedScanHistoryQuery {
+  const query = resolveScanHistoryQuery(request)
+  if (query) return query
+  throw new SnapshotAccessError('INVALID_REQUEST', 'Invalid scan history query.')
+}
+
 export function readExtensionRequest(request: unknown): Required<InsightsExtensionRequest> {
   return readInsightsPage(
     request,
@@ -121,3 +127,4 @@ export function validateTreemapRequest(
     `Valid snapshot IDs and an optional Treemap limit from 1 to ${MAX_SCAN_TREEMAP_ENTRIES} are required.`
   )
 }
+import { resolveScanHistoryQuery, type ResolvedScanHistoryQuery } from '../../shared/history'

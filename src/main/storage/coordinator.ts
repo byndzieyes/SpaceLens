@@ -15,6 +15,8 @@ type SnapshotQueries = Pick<
   | 'listScanDirectory'
   | 'getScanDirectoryTreemap'
   | 'requirePublishedScan'
+  | 'listScanHistory'
+  | 'getScanHistoryMetadata'
   | 'getInsightsCategories'
   | 'getInsightsSizeDistribution'
   | 'getInsightsObservations'

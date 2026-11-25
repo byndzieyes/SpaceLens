@@ -31,6 +31,7 @@ import {
 import {
   readExtensionRequest,
   readRankingRequest,
+  readScanHistoryQuery,
   readSnapshotId,
   validateSnapshotRequest,
   validateTreemapRequest
@@ -41,6 +42,7 @@ import {
   isSnapshotId,
   isStorageEntry,
   isStorageScan,
+  readCompletedScanDuration,
   nonempty,
   nullableString,
   record,
@@ -62,6 +64,8 @@ interface StorageCommands {
   discardBuildingScan: { payload: { scanId: string }; result: null }
   getPublishedScan: { payload: null; result: CompletedScan | null }
   requirePublishedScan: { payload: { scanId: string }; result: CompletedScan }
+  listScanHistory: { payload: ScanHistoryQuery; result: ScanHistoryPage }
+  getScanHistoryMetadata: { payload: ScanHistoryMetadataRequest; result: ScanHistoryItem }
   getInsightsCategories: { payload: { scanId: string }; result: InsightsCategories }
   getInsightsSizeDistribution: { payload: { scanId: string }; result: InsightsSizeDistribution }
   getInsightsObservations: { payload: { scanId: string }; result: InsightsObservations }
@@ -152,10 +156,13 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       if (payload === null) return { requestId, operation, payload }
       break
     case 'requirePublishedScan':
+    case 'getScanHistoryMetadata':
     case 'getInsightsCategories':
     case 'getInsightsSizeDistribution':
     case 'getInsightsObservations':
       return { requestId, operation, payload: { scanId: readSnapshotId(payload) } }
+    case 'listScanHistory':
+      return { requestId, operation, payload: readScanHistoryQuery(payload) }
     case 'listInsightsExtensions':
       return { requestId, operation, payload: readExtensionRequest(payload) }
     case 'listInsightsLargestFiles':
@@ -205,6 +212,52 @@ function isNull(value: unknown): value is null {
 
 function isCompletedScan(value: unknown): value is CompletedScan {
   return isStorageScan(value) && value.status === 'completed'
+}
+
+function isHistoryItem(value: unknown): value is ScanHistoryItem {
+  if (!isCompletedScan(value) || Object.keys(value).length !== 9) return false
+  const { durationMs, incomplete, isLatest }: Partial<ScanHistoryItem> = value
+  try {
+    return (
+      durationMs === readCompletedScanDuration(value) &&
+      incomplete === value.summary.errorCount > 0 &&
+      typeof isLatest === 'boolean'
+    )
+  } catch {
+    return false
+  }
+}
+
+function isHistoryPage(value: unknown): value is ScanHistoryPage {
+  if (!record(value) || Object.keys(value).length !== 6) return false
+  const { items, offset, limit, totalCount, nextOffset, latestCompletedScanId } = value
+  if (
+    !integer(offset) ||
+    !integer(limit) ||
+    limit === 0 ||
+    limit > MAX_SCAN_HISTORY_PAGE_SIZE ||
+    !integer(totalCount) ||
+    (latestCompletedScanId === null ? totalCount !== 0 : !isSnapshotId(latestCompletedScanId)) ||
+    !Array.isArray(items) ||
+    items.length !== Math.min(limit, Math.max(0, totalCount - offset))
+  )
+    return false
+
+  const end = offset + items.length
+  const ids = new Set<string>()
+  return (
+    nextOffset === (end < totalCount ? end : null) &&
+    Array.from(items).every((item) => {
+      if (
+        !isHistoryItem(item) ||
+        item.isLatest !== (item.id === latestCompletedScanId) ||
+        ids.has(item.id)
+      )
+        return false
+      ids.add(item.id)
+      return true
+    })
+  )
 }
 
 function isSnapshotAvailability(value: unknown): value is ScanSnapshotAvailability {
@@ -520,6 +573,8 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     getPublishedScan: (value): value is CompletedScan | null =>
       value === null || isCompletedScan(value),
     requirePublishedScan: isCompletedScan,
+    listScanHistory: isHistoryPage,
+    getScanHistoryMetadata: isHistoryItem,
     getInsightsCategories: isInsightsCategories,
     getInsightsSizeDistribution: isSizeDistribution,
     getInsightsObservations: isObservations,
@@ -576,3 +631,10 @@ export function serializeStorageFailure(cause: unknown): StorageFailure {
     sqliteCode: record(detail) && integer(detail.errcode) ? detail.errcode : null
   }
 }
+import {
+  MAX_SCAN_HISTORY_PAGE_SIZE,
+  type ScanHistoryItem,
+  type ScanHistoryMetadataRequest,
+  type ScanHistoryPage,
+  type ScanHistoryQuery
+} from '../../shared/history'

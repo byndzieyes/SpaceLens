@@ -62,6 +62,8 @@ const queries = {
   listInsightsLargestFiles: vi.fn<StorageWorkerClient['listInsightsLargestFiles']>(),
   listInsightsLargestDirectories: vi.fn<StorageWorkerClient['listInsightsLargestDirectories']>(),
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
+  listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
+  getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
   getScanDirectoryTreemap: vi.fn<StorageWorkerClient['getScanDirectoryTreemap']>()
@@ -203,6 +205,96 @@ const completed = (): CompletedScan => ({
   ...running().session,
   status: 'completed',
   finishedAt: '2026-11-12T12:00:00Z'
+})
+
+test('validates, authorizes, and forwards history reads on the existing renderer boundary', async () => {
+  const item = { ...completed(), durationMs: 302400000, isLatest: true, incomplete: false }
+  const page = {
+    items: [item],
+    offset: 0,
+    limit: 20,
+    totalCount: 1,
+    nextOffset: null,
+    latestCompletedScanId: item.id
+  }
+  queries.listScanHistory.mockResolvedValue(page)
+  queries.getScanHistoryMetadata.mockResolvedValue(item)
+  const { listScanHistory, getScanHistoryMetadata } = IPC_CHANNELS
+  for (const [channel, args] of [
+    [listScanHistory, [{}]],
+    [getScanHistoryMetadata, [{ scanId: id }]]
+  ] as const) {
+    expect(await invoke(channel, [...args], event(makeRenderer()))).toMatchObject({
+      ok: false,
+      error: { code: 'UNAUTHORIZED' }
+    })
+  }
+  for (const args of [[], [{ limit: 101 }], [{ sort: 'total_bytes' }], [{}, {}]]) {
+    expect(await invoke(listScanHistory, args)).toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+  }
+  expect(await invoke(getScanHistoryMetadata, [{ scanId: 'bad/path' }])).toMatchObject({
+    ok: false,
+    error: { code: 'INVALID_REQUEST' }
+  })
+  expect(queries.listScanHistory).not.toHaveBeenCalled()
+  expect(queries.getScanHistoryMetadata).not.toHaveBeenCalled()
+  expect(await invoke(listScanHistory, [{ rootPathContains: '%_' }])).toEqual({
+    ok: true,
+    value: page
+  })
+  expect(queries.listScanHistory).toHaveBeenCalledExactlyOnceWith({
+    offset: 0,
+    limit: 20,
+    sort: 'newest',
+    rootPathContains: '%_'
+  })
+  expect(await invoke(getScanHistoryMetadata, [{ scanId: id }])).toEqual({ ok: true, value: item })
+  expect(queries.getScanHistoryMetadata).toHaveBeenCalledExactlyOnceWith({ scanId: id })
+})
+
+test.each(['navigation', 'destroyed'])(
+  'invalidates history replies after renderer %s',
+  async (eventName) => {
+    const pending =
+      Promise.withResolvers<Awaited<ReturnType<StorageWorkerClient['listScanHistory']>>>()
+    queries.listScanHistory.mockReturnValueOnce(pending.promise)
+    const reply = invoke(IPC_CHANNELS.listScanHistory, [{}])
+    if (eventName === 'navigation') renderer.emit('did-start-navigation', { isMainFrame: true })
+    else renderer.emit('destroyed')
+    pending.resolve({
+      items: [],
+      totalCount: 0,
+      latestCompletedScanId: null,
+      offset: 0,
+      limit: 20,
+      nextOffset: null
+    })
+    expect(await reply).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+  }
+)
+
+test('returns typed history errors and sanitizes backend diagnostics', async () => {
+  const request = { scanId: id }
+  queries.getScanHistoryMetadata.mockRejectedValueOnce(
+    new StorageWorkerError({
+      code: 'SNAPSHOT_EXPIRED',
+      name: 'SnapshotAccessError',
+      message: 'Saved scan missing.',
+      sqliteCode: null
+    })
+  )
+  expect(await invoke(IPC_CHANNELS.getScanHistoryMetadata, [request])).toEqual({
+    ok: false,
+    error: { code: 'SNAPSHOT_EXPIRED', message: 'Saved scan missing.' }
+  })
+  queries.getScanHistoryMetadata.mockRejectedValueOnce(new Error('private SQLite metadata'))
+  expect(await invoke(IPC_CHANNELS.getScanHistoryMetadata, [request])).toEqual({
+    ok: false,
+    error: { code: 'INTERNAL_ERROR', message: 'The scan history request could not be processed.' }
+  })
 })
 
 async function attachWithRecovery(publication: Promise<CompletedScan | null>): Promise<void> {
@@ -1126,7 +1218,9 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listInsightsLargestDirectories)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsSizeDistribution)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsObservations)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(15)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listScanHistory)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getScanHistoryMetadata)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(17)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {
