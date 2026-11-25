@@ -13,6 +13,7 @@ import type {
   StorageBatchOperation
 } from '../src/main/storage/payloads'
 import type { FileEntry, ScanSession, ScanStatus } from '../src/shared/scan'
+import { createV1Database } from './v1-scan-fixture'
 
 const rootPath = resolve('fixture')
 const startedAt = '2026-11-20T15:00:00.000+02:00'
@@ -92,23 +93,24 @@ function inspectDatabase(inspect: (connection: DatabaseSync) => void): void {
   }
 }
 
-test('creates a version 1 database with two strict tables and the default rollback journal', () => {
+test('creates a version 2 database with strict tables and the default rollback journal', () => {
   const db = open()
   expect(db.getScan('missing')).toBeNull()
   expect(db.getEntry('missing', 'root')).toBeNull()
   db.close()
 
   inspectDatabase((sql) => {
-    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(1)
+    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(2)
     expect(sql.prepare('PRAGMA journal_mode').get()?.journal_mode).toBe('delete')
     expect(
       sql
         .prepare(
-          "SELECT name, strict FROM pragma_table_list WHERE schema = 'main' AND name IN ('entries', 'scans') ORDER BY name"
+          "SELECT name, strict FROM pragma_table_list WHERE schema = 'main' AND name NOT LIKE 'sqlite_%' ORDER BY name"
         )
         .all()
     ).toEqual([
       { name: 'entries', strict: 1 },
+      { name: 'scan_publication_counter', strict: 1 },
       { name: 'scans', strict: 1 }
     ])
   })
@@ -146,30 +148,33 @@ test('repeated initialization and idempotent close preserve all stored metadata'
     expect(reopened.getEntry('scan-a', 'file')).toEqual(file())
     reopened.close()
   }
-  inspectDatabase((sql) => expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(1))
+  inspectDatabase((sql) => expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(2))
 })
 
 test('refuses a future version and leaves the database intact', () => {
   const db = open()
   db.insertScan(scan())
   db.close()
-  inspectDatabase((sql) => sql.exec('PRAGMA user_version = 2'))
+  inspectDatabase((sql) => sql.exec('PRAGMA user_version = 3'))
 
-  expect(() => open()).toThrow('Unsupported SQLite schema version 2.')
+  expect(() => open()).toThrow('Unsupported SQLite schema version 3.')
   inspectDatabase((sql) => {
-    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(2)
+    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(3)
     expect(sql.prepare('SELECT id FROM scans').get()?.id).toBe('scan-a')
   })
 })
 
-test('rejects a modified version 1 schema', () => {
-  open().close()
+test.each([1, 2])('rejects a modified version %i schema', (version) => {
+  if (version === 1) createV1Database(databasePath).close()
+  else open().close()
   inspectDatabase((sql) => {
     sql.exec('DROP INDEX entries_by_parent; CREATE INDEX entries_by_parent ON entries(id)')
   })
 
   expect(() => open()).toThrow('Unexpected definition for entries_by_parent.')
-  inspectDatabase((sql) => expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(1))
+  inspectDatabase((sql) =>
+    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(version)
+  )
 })
 
 test('leaves a non-empty unversioned database alone', () => {
@@ -191,7 +196,7 @@ test('rolls back both the version marker and the DDL when initialization fails',
     sql: string
   ) {
     exec.call(this, sql)
-    if (sql === 'PRAGMA user_version = 1') throw new Error('Simulated initialization failure.')
+    if (sql === 'PRAGMA user_version = 2') throw new Error('Simulated initialization failure.')
   })
 
   try {
@@ -460,8 +465,8 @@ test('accepts an empty batch for a running scan and exactly the scanner batch li
 test('requires the parent to precede the child and belong to the same scan', () => {
   const db = open()
   db.insertScan(scan('scan-a', 'running'))
-  db.insertScan(scan('scan-b', 'running'))
-  db.applyBatch('scan-b', [discover(root('scan-b'))])
+  db.insertScan(scan('scan-b'))
+  db.insertEntry(root('scan-b'))
   expect(() => db.applyBatch('scan-a', [discover(file()), discover(root())])).toThrow(
     'FOREIGN KEY constraint failed'
   )
@@ -1115,9 +1120,6 @@ test.each([false, true])(
     const saved = published ? readyScan(db) : null
     if (saved) db.publishScan(saved, 'root')
     const interrupted = readyScan(db, 'interrupted')
-    const other = building('another-interrupted')
-    db.insertScan(other)
-    db.insertEntry(root(other.id))
     db.close()
 
     const reopened = open()
@@ -1126,8 +1128,6 @@ test.each([false, true])(
       expect(reopened.getPublishedScan()).toEqual(saved)
       expect(reopened.getScan(interrupted.id)).toBeNull()
       expect(reopened.getEntry(interrupted.id, 'file')).toBeNull()
-      expect(reopened.getScan(other.id)).toBeNull()
-      expect(reopened.getEntry(other.id, 'root')).toBeNull()
       if (saved) expect(reopened.getEntry(saved.id, 'file')).toEqual(file(saved.id))
     }
     reopened.beginScan(building('fresh'))
@@ -1448,7 +1448,10 @@ test('readers see only the old snapshot before commit and a failed commit rolls 
   db.publishScan(previous, 'root')
   const next = readyScan(db, 'scan-b')
   const observer = new DatabaseSync(databasePath, { readOnly: true })
-  const read = observer.prepare("SELECT id FROM scans WHERE status = 'completed'")
+  const read = observer.prepare(
+    "SELECT id, publication_sequence FROM scans WHERE status = 'completed'"
+  )
+  const counter = observer.prepare('SELECT last_sequence FROM scan_publication_counter')
   const exec = DatabaseSync.prototype.exec
   let failCommit = true
   const commit = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (
@@ -1456,7 +1459,8 @@ test('readers see only the old snapshot before commit and a failed commit rolls 
     sql: string
   ) {
     if (sql === 'COMMIT') {
-      expect(read.all()).toEqual([{ id: previous.id }])
+      expect(read.all()).toEqual([{ id: previous.id, publication_sequence: 1 }])
+      expect(counter.get()?.last_sequence).toBe(1)
       expect(
         observer.prepare('SELECT id FROM entries WHERE scan_id = ? ORDER BY id').all(previous.id)
       ).toEqual([{ id: 'file' }, { id: 'root' }])
@@ -1469,9 +1473,11 @@ test('readers see only the old snapshot before commit and a failed commit rolls 
     expect(db.getPublishedScan()).toEqual(previous)
     expect(db.getEntry(previous.id, 'file')).toEqual(file(previous.id))
     expect(db.getScan(next.id)?.status).toBe('running')
+    expect(counter.get()?.last_sequence).toBe(1)
     failCommit = false
     db.publishScan(next, 'root')
-    expect(read.all()).toEqual([{ id: next.id }])
+    expect(read.all()).toEqual([{ id: next.id, publication_sequence: 2 }])
+    expect(counter.get()?.last_sequence).toBe(2)
   } finally {
     commit.mockRestore()
     observer.close()

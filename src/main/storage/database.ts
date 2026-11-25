@@ -37,6 +37,11 @@ import {
   type StorageBatchOperation
 } from './payloads'
 import { prepareSnapshotValidation } from './publication'
+import {
+  nextPublicationSequence,
+  readPublicationCounter,
+  recordPublicationSequence
+} from './publicationSequence'
 import { initializeSchema } from './schema'
 import { bindFilesystemText, readFilesystemText } from './filesystemText'
 import { PublishedAnalytics } from './publishedAnalytics'
@@ -142,6 +147,52 @@ function validateEntryReference(entry: FileEntry): FileEntry {
   return entry
 }
 
+function readSinglePublication(statement: StatementSync): CompletedScan | null {
+  const [row, other] = statement.all()
+  if (other) throw new Error('The database has more than one completed scan.')
+  if (!row) return null
+  const scan = readScan(row)
+  if (scan.status !== 'completed') throw new Error('Invalid persisted publication status.')
+  return { ...scan, status: scan.status }
+}
+
+function validatePublishedRoot(scan: CompletedScan, root: FileEntry | null): FileEntry {
+  if (!root || root.type !== 'directory' || root.parentId !== null || root.path !== scan.rootPath) {
+    throw new Error('The expected scan root directory is missing or invalid.')
+  }
+  if (root.aggregatedSizeBytes !== scan.summary.totalBytes) {
+    throw new Error('The scan root is unfinished or its total differs from the scan summary.')
+  }
+  return root
+}
+
+/** Both schema versions use the same tree and recovery checks inside the startup transaction. */
+function recoverScans(connection: DatabaseSync, published: CompletedScan | null): void {
+  if (
+    connection
+      .prepare("SELECT 1 FROM scans WHERE status NOT IN ('running', 'completed') LIMIT 1")
+      .get()
+  ) {
+    throw new Error('The database contains an unexpected persisted scan status.')
+  }
+  if (connection.prepare('PRAGMA foreign_key_check').get()) {
+    throw new Error('The database contains invalid scan or entry references.')
+  }
+  if (published) {
+    const selectRoot = connection.prepare(
+      `${SELECT_ENTRY} WHERE entry.scan_id = ? AND entry.parent_id IS NULL`
+    )
+    selectRoot.setReadBigInts(true)
+    const row = selectRoot.get(published.id)
+    const publication = { scan: published, rootEntryId: row?.id }
+    validateScanPublication(publication)
+    validatePublishedRoot(published, row ? readEntry(row) : null)
+    prepareSnapshotValidation(connection)(published)
+  }
+  // No legitimate scanner can be running under the profile lock during startup recovery.
+  connection.exec("DELETE FROM scans WHERE status = 'running'")
+}
+
 function inTransaction(connection: DatabaseSync, operation: () => undefined): void {
   connection.exec('BEGIN IMMEDIATE')
   try {
@@ -180,9 +231,6 @@ export class ScanDatabase {
   private readonly completeScanStatement: StatementSync
   private readonly deleteScanStatement: StatementSync
   private readonly selectRootIdStatement: StatementSync
-  private readonly selectUnexpectedStatusStatement: StatementSync
-  private readonly checkForeignKeysStatement: StatementSync
-  private readonly deleteInterruptedScansStatement: StatementSync
   private readonly validateSnapshot: (scan: CompletedScan) => void
   private readonly insertEntryStatement: StatementSync
   private readonly selectEntryStatement: StatementSync
@@ -209,19 +257,29 @@ export class ScanDatabase {
       // Retiring a large scan touches several indexes with unrelated page orderings.
       // A bounded connection-local cache limits page churn during atomic replacement.
       this.connection.exec(`PRAGMA main.cache_size = -${SQLITE_PAGE_CACHE_KIB}`)
-      inTransaction(this.connection, () => initializeSchema(this.connection))
+      inTransaction(this.connection, () =>
+        initializeSchema(this.connection, () => {
+          const legacy = this.connection.prepare(
+            `${SELECT_SCAN} WHERE status = 'completed' LIMIT 2`
+          )
+          legacy.setReadBigInts(true)
+          const published = readSinglePublication(legacy)
+          recoverScans(this.connection, published)
+          return published?.id ?? null
+        })
+      )
       this.analytics = new PublishedAnalytics(this.connection)
 
       this.insertScanStatement = this.connection.prepare(`
         INSERT INTO scans (
           id, root_path, status, started_at, finished_at, total_bytes, file_count,
-          directory_count, error_count
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+          directory_count, error_count, publication_sequence
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `)
       this.selectScanStatement = this.connection.prepare(`${SELECT_SCAN} WHERE id = ?`)
       this.selectScanStatement.setReadBigInts(true)
       this.selectPublishedStatement = this.connection.prepare(
-        `${SELECT_SCAN} WHERE status = 'completed' LIMIT 2`
+        `${SELECT_SCAN} WHERE status = 'completed' ORDER BY publication_sequence DESC LIMIT 2`
       )
       this.selectPublishedStatement.setReadBigInts(true)
       this.selectOtherBuildingStatement = this.connection.prepare(`
@@ -229,7 +287,7 @@ export class ScanDatabase {
       `)
       this.completeScanStatement = this.connection.prepare(`
         UPDATE scans SET status = 'completed', finished_at = ?, total_bytes = ?,
-                         file_count = ?, directory_count = ?, error_count = ?
+                         file_count = ?, directory_count = ?, error_count = ?, publication_sequence = ?
         WHERE id = ? AND status = 'running'
       `)
       this.deleteScanStatement = this.connection.prepare(
@@ -237,13 +295,6 @@ export class ScanDatabase {
       )
       this.selectRootIdStatement = this.connection.prepare(
         'SELECT id FROM entries WHERE scan_id = ? AND parent_id IS NULL'
-      )
-      this.selectUnexpectedStatusStatement = this.connection.prepare(
-        "SELECT status FROM scans WHERE status NOT IN ('running', 'completed') LIMIT 1"
-      )
-      this.checkForeignKeysStatement = this.connection.prepare('PRAGMA foreign_key_check')
-      this.deleteInterruptedScansStatement = this.connection.prepare(
-        "DELETE FROM scans WHERE status = 'running'"
       )
       this.validateSnapshot = prepareSnapshotValidation(this.connection)
 
@@ -349,6 +400,21 @@ export class ScanDatabase {
 
   insertScan(scan: ScanSession): void {
     this.requireOpen()
+    if (scan.status !== 'completed') {
+      this.insertScanRow(scan, null)
+      return
+    }
+    // Low-level callers may already be seeding a scan and its entries in a transaction.
+    const insertCompleted = (): undefined => {
+      const sequence = nextPublicationSequence(this.connection)
+      this.insertScanRow(scan, sequence)
+      recordPublicationSequence(this.connection, sequence)
+    }
+    if (this.connection.isTransaction) insertCompleted()
+    else this.transaction(insertCompleted)
+  }
+
+  private insertScanRow(scan: ScanSession, sequence: bigint | null): void {
     const { summary } = scan
     this.insertScanStatement.run(
       scan.id,
@@ -359,7 +425,8 @@ export class ScanDatabase {
       bindInteger(summary.totalBytes, 'totalBytes'),
       bindInteger(summary.fileCount, 'fileCount'),
       bindInteger(summary.directoryCount, 'directoryCount'),
-      bindInteger(summary.errorCount, 'errorCount')
+      bindInteger(summary.errorCount, 'errorCount'),
+      sequence
     )
   }
 
@@ -372,23 +439,8 @@ export class ScanDatabase {
   /** Startup only. SQLite has already resolved any interrupted journal on open. */
   recoverStorage(): void {
     this.transaction(() => {
-      const published = this.getPublishedScan()
-      if (this.selectUnexpectedStatusStatement.get()) {
-        throw new Error('The database contains an unexpected persisted scan status.')
-      }
-      if (this.checkForeignKeysStatement.get()) {
-        throw new Error('The database contains invalid scan or entry references.')
-      }
-      if (published) {
-        const publication = {
-          scan: published,
-          rootEntryId: this.selectRootIdStatement.get(published.id)?.id
-        }
-        validateScanPublication(publication)
-        this.validatePublishedTree(publication.scan, publication.rootEntryId)
-      }
-      // No legitimate scanner can be running under the profile lock during startup recovery.
-      this.deleteInterruptedScansStatement.run()
+      readPublicationCounter(this.connection)
+      recoverScans(this.connection, this.getPublishedScan())
     })
     this.analytics.clear()
   }
@@ -419,6 +471,7 @@ export class ScanDatabase {
       this.validatePublishedTree(scan, rootEntryId)
 
       const previous = this.getPublishedScan()
+      const sequence = nextPublicationSequence(this.connection)
       const { totalBytes, fileCount, directoryCount, errorCount } = scan.summary
       const result = this.completeScanStatement.run(
         scan.finishedAt,
@@ -426,6 +479,7 @@ export class ScanDatabase {
         bindInteger(fileCount, 'fileCount'),
         bindInteger(directoryCount, 'directoryCount'),
         bindInteger(errorCount, 'errorCount'),
+        sequence,
         scan.id
       )
       if (result.changes !== 1) throw new Error(`Could not promote scan ${scan.id}.`)
@@ -434,6 +488,7 @@ export class ScanDatabase {
       }
       const stored = this.getPublishedScan()
       if (!stored || stored.id !== scan.id) throw new Error('Could not read the promoted scan.')
+      recordPublicationSequence(this.connection, sequence)
       published = stored
     })
     this.analytics.usePublication(published.id)
@@ -451,12 +506,7 @@ export class ScanDatabase {
 
   getPublishedScan(): CompletedScan | null {
     this.requireOpen()
-    const rows = this.selectPublishedStatement.all()
-    if (rows.length > 1) throw new Error('The database has more than one completed scan.')
-    if (!rows[0]) return null
-    const scan = readScan(rows[0])
-    if (scan.status !== 'completed') throw new Error('Invalid persisted publication status.')
-    return { ...scan, status: scan.status }
+    return readSinglePublication(this.selectPublishedStatement)
   }
 
   getScanSnapshot(): ScanSnapshotAvailability {
@@ -620,19 +670,7 @@ export class ScanDatabase {
   }
 
   private readPublishedRoot(scan: CompletedScan, rootEntryId: string): FileEntry {
-    const root = this.getEntry(scan.id, rootEntryId)
-    if (
-      !root ||
-      root.type !== 'directory' ||
-      root.parentId !== null ||
-      root.path !== scan.rootPath
-    ) {
-      throw new Error('The expected scan root directory is missing or invalid.')
-    }
-    if (root.aggregatedSizeBytes !== scan.summary.totalBytes) {
-      throw new Error('The scan root is unfinished or its total differs from the scan summary.')
-    }
-    return root
+    return validatePublishedRoot(scan, this.getEntry(scan.id, rootEntryId))
   }
 
   private requireOnlyBuildingScan(scanId: string): void {

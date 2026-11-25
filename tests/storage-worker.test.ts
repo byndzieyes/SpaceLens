@@ -31,6 +31,14 @@ import {
 import type { createStorageWorkerClient } from '../src/main/storage/workerRunner'
 import type { StorageRequest } from '../src/main/storage/workerProtocol'
 import type { FileEntry, ScanSession } from '../src/shared/scan'
+import {
+  buildingFixture,
+  createV1Database,
+  legacyEntries,
+  legacyScan,
+  seedV1Interrupted,
+  seedV1Scan
+} from './v1-scan-fixture'
 
 const require = createRequire(import.meta.url)
 const clients = new Set<StorageWorkerClient>()
@@ -1195,6 +1203,106 @@ test('allows startup recovery before any writes and rejects recovery during a le
   expect((await client.getScan(building.id))?.status).toBe('running')
   await client.publishScan(building, root.id)
   await expect(client.getPublishedScan()).resolves.toEqual(building)
+})
+
+test('migrates v1 during bundled worker initialization and preserves Explorer and Insights reads', async () => {
+  const { root, folder, image, unknown } = legacyEntries
+  {
+    using sql = createV1Database(databasePath)
+    seedV1Scan(sql, legacyScan, [root, folder, image, unknown])
+    seedV1Interrupted(sql)
+  }
+
+  const baseline = bundled()
+  await baseline.initialize(join(dirname(databasePath), 'baseline.sqlite'))
+  await baseline.beginScan(buildingFixture(legacyScan.id))
+  await baseline.applyBatch(legacyScan.id, [
+    { type: 'entry', entry: { ...root, aggregatedSizeBytes: null } },
+    { type: 'entry', entry: { ...folder, aggregatedSizeBytes: null } },
+    { type: 'entry', entry: image },
+    { type: 'entry', entry: unknown },
+    {
+      type: 'directory-finalized',
+      entry: { ...folder, type: 'directory', aggregatedSizeBytes: 25 }
+    },
+    { type: 'directory-finalized', entry: { ...root, type: 'directory', aggregatedSizeBytes: 25 } }
+  ])
+  await baseline.publishScan(legacyScan, root.id)
+
+  const migrated = bundled()
+  await migrated.initialize(databasePath)
+  // Inspect before the separate startup recovery request. Initialization already migrated and cleaned up.
+  {
+    using sql = new DatabaseSync(databasePath, { readOnly: true })
+    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(2)
+    expect(sql.prepare('SELECT id, publication_sequence FROM scans').all()).toEqual([
+      { id: legacyScan.id, publication_sequence: 1 }
+    ])
+    expect(sql.prepare('SELECT COUNT(*) AS count FROM entries').get()?.count).toBe(4)
+  }
+  await migrated.recoverStorage()
+  await expect(migrated.getPublishedScan()).resolves.toEqual(legacyScan)
+
+  const directory = { scanId: legacyScan.id, entryId: folder.id }
+  const page = { ...directory, offset: 0, limit: 10 }
+  const insights = { scanId: legacyScan.id, offset: 0, limit: 10 }
+  const read = async (client: StorageWorkerClient): Promise<unknown> => ({
+    snapshot: await client.getScanSnapshot(),
+    entry: await client.getScanEntry({ scanId: legacyScan.id, entryId: image.id }),
+    directory: await client.listScanDirectory(page),
+    treemap: await client.getScanDirectoryTreemap(directory),
+    categories: await client.getInsightsCategories(legacyScan.id),
+    extensions: await client.listInsightsExtensions(insights),
+    files: await client.listInsightsLargestFiles(insights),
+    directories: await client.listInsightsLargestDirectories(insights),
+    distribution: await client.getInsightsSizeDistribution(legacyScan.id),
+    observations: await client.getInsightsObservations(legacyScan.id)
+  })
+  const expected = await read(baseline)
+  expect(await read(migrated)).toEqual(expected)
+  await migrated.dispose()
+
+  const reopened = bundled()
+  await reopened.initialize(databasePath)
+  await reopened.recoverStorage()
+  expect(await read(reopened)).toEqual(expected)
+})
+
+test('an interrupted worker migration leaves the v1 schema and rows available for retry', async () => {
+  {
+    using sql = createV1Database(databasePath)
+    seedV1Scan(sql, legacyScan, Object.values(legacyEntries))
+    seedV1Interrupted(sql)
+  }
+  const worker = start(`
+    const { DatabaseSync } = require('node:sqlite')
+    const exec = DatabaseSync.prototype.exec
+    DatabaseSync.prototype.exec = function (sql) {
+      if (sql === 'COMMIT') process.exit(73)
+      return exec.call(this, sql)
+    }
+    require(${JSON.stringify(workerPath)})
+  `)
+  const client = wrap(worker)
+  await expect(client.initialize(databasePath)).rejects.toThrow(/exited unexpectedly.*73/)
+
+  {
+    using sql = new DatabaseSync(databasePath)
+    expect(sql.prepare('PRAGMA user_version').get()?.user_version).toBe(1)
+    expect(
+      sql.prepare("SELECT name FROM sqlite_schema WHERE name = 'scan_publication_counter'").get()
+    ).toBeUndefined()
+    expect(sql.prepare('SELECT id FROM scans ORDER BY id').all()).toEqual([
+      { id: 'interrupted' },
+      { id: legacyScan.id }
+    ])
+    expect(sql.prepare('SELECT COUNT(*) AS count FROM entries').get()?.count).toBe(7)
+  }
+  const retry = bundled()
+  await retry.initialize(databasePath)
+  await retry.recoverStorage()
+  await expect(retry.getPublishedScan()).resolves.toEqual(legacyScan)
+  await expect(retry.getScan('interrupted')).resolves.toBeNull()
 })
 
 test('makes a failed startup recovery terminal without removing persisted rows', async () => {

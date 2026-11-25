@@ -27,6 +27,8 @@ SpaceLens streams scanner batches into `scans.sqlite` in Electron's `userData` d
 
 At startup, Electron's single-instance lock protects the application profile while the Storage Worker validates the saved publication and removes interrupted scans in a transaction. New scans wait for recovery. If recovery fails, a write outcome is unknown, or a building scan cannot be discarded, SpaceLens blocks further scans for that session. Restarting runs recovery against the committed SQLite state.
 
+The Storage Worker upgrades schema v1 databases to v2 in one transaction. It preserves the saved scan and its entries and discards interrupted scans as part of the upgrade. Phase 4 builds cannot open schema v2. Downgrading requires a copy of the database from before the upgrade.
+
 Storage requests have a 10-second deadline. On normal shutdown Main waits for scanner and startup work to settle, then gives the Worker two seconds to close. If the Worker must be terminated, the client waits up to another two seconds for it to exit.
 
 SQLite uses its default `DELETE` rollback journal. Snapshot replacement and recovery free pages for future writes, so the database can stay near its previous peak size after the old rows are removed. A rollback journal may be present during a write or after an interruption. SQLite handles journal recovery when the database is reopened.
