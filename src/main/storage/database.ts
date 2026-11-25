@@ -43,6 +43,9 @@ import {
   type BuildingScan,
   type CompletedScan,
   type CommittedSnapshotDeletion,
+  type RetentionCandidateRequest,
+  type RetentionCandidate,
+  type PruneSnapshotRequest,
   type FinalizedDirectory,
   type StorageBatchOperation
 } from './payloads'
@@ -557,11 +560,65 @@ export class ScanDatabase {
     })
   }
 
-  deleteSnapshot(request: unknown): CommittedSnapshotDeletion {
+  getRetentionCandidate({
+    limit,
+    protectedScanIds
+  }: RetentionCandidateRequest): RetentionCandidate {
+    this.requireOpen()
+    const exclusions =
+      protectedScanIds.length === 0
+        ? ''
+        : `AND id NOT IN (${protectedScanIds.map(() => '?').join(', ')})`
+    const statement = this.connection.prepare(`
+      WITH stats AS (
+        SELECT (SELECT COUNT(*) FROM scans WHERE status = 'completed') AS total_count,
+               EXISTS (SELECT 1 FROM scans WHERE status = 'running') AS building
+      ), latest AS (
+        SELECT id, publication_sequence ${LATEST_SCAN}
+      )
+      SELECT total_count, building, latest.id AS latest_scan_id,
+             CASE WHEN total_count > ? AND NOT building THEN (
+               SELECT id FROM scans
+               WHERE status = 'completed' AND publication_sequence < latest.publication_sequence
+               ${exclusions}
+               ORDER BY publication_sequence ASC LIMIT 1
+             ) END AS candidate_scan_id
+      FROM stats LEFT JOIN latest ON TRUE
+    `)
+    statement.setReadBigInts(true)
+    const row = statement.get(limit, ...protectedScanIds)!
+    const { latest_scan_id: latestScanId, candidate_scan_id: candidateScanId } = row
+    if (
+      (latestScanId !== null && !isSnapshotId(latestScanId)) ||
+      (candidateScanId !== null && !isSnapshotId(candidateScanId))
+    )
+      throw new Error('Invalid snapshot reference in retention metadata.')
+    return {
+      totalCount: readInteger(row.total_count, 'retained snapshot count'),
+      latestScanId,
+      candidateScanId,
+      building: row.building === 1n
+    }
+  }
+
+  pruneSnapshot(request: PruneSnapshotRequest): CommittedSnapshotDeletion | null {
+    return this.deleteSnapshot({ scanId: request.scanId }, request)
+  }
+
+  deleteSnapshot(request: unknown): CommittedSnapshotDeletion
+  deleteSnapshot(
+    request: unknown,
+    retention: RetentionCandidateRequest
+  ): CommittedSnapshotDeletion | null
+  deleteSnapshot(
+    request: unknown,
+    retention?: RetentionCandidateRequest
+  ): CommittedSnapshotDeletion | null {
     const scanId = readSnapshotId(request)
-    let deleted!: CommittedSnapshotDeletion
+    let deleted: CommittedSnapshotDeletion | null = null
     let deletedLatest = false
     this.transaction(() => {
+      if (retention && this.getRetentionCandidate(retention).candidateScanId !== scanId) return
       const scan = this.getScan(scanId)
       if (!scan)
         throw new SnapshotAccessError('SNAPSHOT_EXPIRED', 'This saved scan no longer exists.')

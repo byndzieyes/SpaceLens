@@ -228,6 +228,8 @@ function mockApp(): {
     listScanHistory: vi.fn(),
     getScanHistoryMetadata: vi.fn(),
     deleteSnapshot: vi.fn(),
+    getRetentionSettings: vi.fn(),
+    setRetentionSettings: vi.fn(),
     getScanSnapshot: vi.fn<SpaceLensAPI['getScanSnapshot']>(async () => ({
       ok: true,
       value: {

@@ -40,6 +40,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'getInsightsObservations',
     'getInsightsSizeDistribution',
     'getInsightsSummary',
+    'getRetentionSettings',
     'getScanDirectoryTreemap',
     'getScanEntry',
     'getScanHistoryMetadata',
@@ -52,6 +53,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'listScanHistory',
     'onScanStateChanged',
     'selectScanDirectory',
+    'setRetentionSettings',
     'startScan'
   ])
   const response = { ok: false, error: { code: 'PATH_NOT_AUTHORIZED', message: 'Not approved' } }
@@ -136,6 +138,12 @@ test('exposes only the typed application API and uses fixed invoke channels', as
   expect(await api.deleteSnapshot({ scanId: 'scan' })).toBe(response)
   expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(19, IPC_CHANNELS.deleteSnapshot, {
     scanId: 'scan'
+  })
+  expect(await api.getRetentionSettings()).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(20, IPC_CHANNELS.getRetentionSettings)
+  expect(await api.setRetentionSettings({ maxCompletedSnapshots: 4 })).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenNthCalledWith(21, IPC_CHANNELS.setRetentionSettings, {
+    maxCompletedSnapshots: 4
   })
 })
 

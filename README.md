@@ -33,7 +33,7 @@ Storage requests have a 10-second deadline. On normal shutdown Main waits for sc
 
 SQLite uses its default `DELETE` rollback journal. Recovery and cancellation free pages from interrupted or discarded scans for future writes. A rollback journal may be present during a write or after an interruption. SQLite handles journal recovery when the database is reopened.
 
-Overview, Explorer, and Insights use the latest completed scan. After publication is confirmed, the views refresh for the new scan. SpaceLens retains each completed snapshot and allows at most one building scan. Completed scans accumulate without a limit until configurable retention and automatic pruning arrive in Task 5.6. Known logical sizes can be partial when some items are unreadable. The UI reports scan errors and incomplete coverage.
+Overview, Explorer, and Insights use the latest completed scan. After publication is confirmed, the views refresh for the new scan. SpaceLens retains completed snapshots under the history retention policy and allows at most one building scan. Known logical sizes can be partial when some items are unreadable. The UI reports scan errors and incomplete coverage.
 
 Directory pages contain at most 100 direct children, sorted by name then ID in UTF-16 order. Explorer and Insights references expire when a newer scan becomes Latest. Treemap reads the latest completed scan, including after restart. It ranks up to 100 direct children by known size and groups the remaining entries into Other. It uses logical file sizes and the scanner's stored directory totals.
 
@@ -41,9 +41,13 @@ Main serializes reads and scanner writes through one Storage Worker. Scanner wri
 
 The internal History API reads completed scan metadata in pages of 20 by default, with at most 100 scans per request. Root filters match stored paths case-sensitively, with literal substring search available. Offset-based pages reflect the current history on each read. Future consumers need to refresh pagination after publication, deletion, or pruning because a mutation can shift later pages.
 
-The History deletion API removes one completed snapshot and its stored entries in a SQLite transaction. Deleting Latest selects the next publication by sequence, or clears Latest when history is empty. Confirmed publications and deletions advance a history revision on the scanner-state channel. The deletion queue admits one request at a time. Queued scanner writes take priority, and an active cascade can delay the next batch because SQLite executes it synchronously.
+The History deletion API removes one completed snapshot and its stored entries in a SQLite transaction. Deleting Latest selects the next publication by sequence, or clears Latest when history is empty. Confirmed publications, manual deletions, and automatic pruning advance a history revision on the scanner-state channel. The deletion queue admits one request at a time. Queued scanner writes take priority, and an active cascade can delay the next batch because SQLite executes it synchronously.
 
 Main owns process-local protection. ID-based Explorer and Insights requests hold their snapshot from queue admission until the worker operation settles. A dispatched request keeps protection after renderer navigation or timeout until the worker replies or exits. Argument-free Latest discovery selects and reads Latest within one serialized worker request. History metadata reads use their own read transactions. Task 5.7 will attach the owner leases to view selection and renderer-document lifetimes.
+
+The global history target defaults to 10 completed snapshots and accepts integers from 1 through JavaScript’s maximum safe integer. The settings API saves the limit as `history-retention.json` in Electron’s `userData` directory by syncing a temporary file and atomically replacing the previous file. A missing file uses the default. Invalid persisted settings suspend pruning until an explicit valid save. Settings controls are planned for Task 5.18.
+
+Automatic retention prunes the oldest eligible snapshot by publication sequence, one transaction per snapshot. It preserves Latest and protected snapshots and can temporarily exceed the target. Maintenance resumes when a relevant lease is released and defers while a scan is building. A confirmed publication stands independently of pruning. The limit controls retained snapshot count. Deleted rows free SQLite pages for later writes, so the database file may stay near its previous peak size.
 
 Scan history and comparisons, duplicate detection, file cleanup, and background monitoring are deferred beyond Phase 4.
 

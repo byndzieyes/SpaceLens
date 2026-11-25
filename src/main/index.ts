@@ -9,6 +9,8 @@ import { ScanSessionManager } from './scanner/sessionManager'
 import { writeScan } from './scanner/persistence'
 import { registerScannerIpc, registerScannerShutdown } from './scannerIpc'
 import { ScanStorageCoordinator } from './storage/coordinator'
+import { HistoryRetention } from './storage/historyRetention'
+import { RetentionSettingsStore } from './storage/retentionSettings'
 import { createStorageWorkerClient } from './storage/workerRunner'
 import type { StorageWorkerClient } from './storage/workerClient'
 
@@ -17,18 +19,24 @@ let scannerIpc: ReturnType<typeof registerScannerIpc> | undefined
 let storage: StorageWorkerClient | undefined
 let storageReady: Promise<StorageWorkerClient> | undefined
 let storageRequests: ScanStorageCoordinator | undefined
+let historyRetention: HistoryRetention | undefined
 let quitting = false
 registerScannerShutdown(async () => {
   quitting = true
+  const maintenanceStopped = historyRetention?.stop()
   storageRequests?.stopReads()
   try {
     if (scannerIpc) await scannerIpc.dispose()
     else await scanManager?.dispose()
   } finally {
-    if (storage) {
-      // Recovery owns a transaction even when no scanner session has been admitted yet.
-      await storageReady?.catch(() => {})
-      await storage.dispose()
+    try {
+      if (storage) {
+        // Recovery owns a transaction even when no scanner session has been admitted yet.
+        await storageReady?.catch(() => {})
+        await storage.dispose()
+      }
+    } finally {
+      await maintenanceStopped
     }
   }
 })
@@ -94,8 +102,8 @@ app.whenReady().then(async () => {
   })
 
   registerAppInfoHandler(rendererUrl)
+  const directory = app.getPath('userData')
   const startup = (async () => {
-    const directory = app.getPath('userData')
     await mkdir(directory, { recursive: true })
     if (quitting) throw new Error('The application is shutting down.')
     const client = createStorageWorkerClient()
@@ -109,6 +117,10 @@ app.whenReady().then(async () => {
   })()
   storageReady = startup.then(({ client }) => client)
   const requests = new ScanStorageCoordinator(storageReady)
+  historyRetention = new HistoryRetention(
+    requests,
+    new RetentionSettingsStore(join(directory, 'history-retention.json'))
+  )
   storageRequests = requests
   const scanStorageReady = storageReady.then(() => requests)
   void scanStorageReady.catch((error: unknown) => {
@@ -120,7 +132,8 @@ app.whenReady().then(async () => {
     scanManager,
     rendererUrl,
     requests,
-    startup.then(({ published }) => published)
+    startup.then(({ published }) => published),
+    historyRetention
   )
 
   if (!app.isPackaged && process.env['NODE_ENV'] === 'development') {

@@ -19,6 +19,8 @@ import {
   StorageUnavailableError
 } from '../src/main/storage/coordinator'
 import { ScanDatabase } from '../src/main/storage/database'
+import { HistoryRetention } from '../src/main/storage/historyRetention'
+import { RetentionSettingsStore } from '../src/main/storage/retentionSettings'
 import type {
   BuildingScan,
   CompletedScan,
@@ -32,7 +34,8 @@ import {
 import type { createStorageWorkerClient } from '../src/main/storage/workerRunner'
 import type { StorageRequest } from '../src/main/storage/workerProtocol'
 import type { FileEntry, ScanSession } from '../src/shared/scan'
-import { IPC_CHANNELS } from '../src/shared/ipc'
+import { IPC_CHANNELS, type ScanStateSnapshot } from '../src/shared/ipc'
+import type { ScanSessionSubscriber } from '../src/main/scanner/sessionManager'
 import type { ScanHistoryItem, ScanHistoryPage } from '../src/shared/history'
 import {
   buildingFixture,
@@ -366,7 +369,7 @@ function readyMetadata(pending: BuildingScan): CompletedScan {
 }
 
 async function preparePublication(
-  client: StorageWorkerClient,
+  client: Pick<StorageWorkerClient, 'beginScan' | 'applyBatch'>,
   pending: BuildingScan
 ): Promise<CompletedScan> {
   await client.beginScan(pending)
@@ -1300,6 +1303,20 @@ test('migrates v1 during bundled worker initialization and preserves Explorer an
   await reopened.initialize(databasePath)
   await reopened.recoverStorage()
   expect(await read(reopened)).toEqual(expected)
+  const settings = new RetentionSettingsStore(join(dirname(databasePath), 'history-retention.json'))
+  const storage = new ScanStorageCoordinator(Promise.resolve(reopened))
+  const discover = vi.spyOn(reopened, 'getRetentionCandidate')
+  const retention = new HistoryRetention(storage, settings)
+  try {
+    await expect(retention.getSettings()).resolves.toEqual({ maxCompletedSnapshots: 10 })
+    await vi.waitFor(() =>
+      expect(discover).toHaveBeenCalledWith({ limit: 10, protectedScanIds: [] })
+    )
+    await vi.waitFor(() => expect(retention.status).toBe('idle'))
+    await expect(reopened.getPublishedScan()).resolves.toEqual(legacyScan)
+  } finally {
+    await retention.stop()
+  }
 })
 
 test('an interrupted worker migration leaves the v1 schema and rows available for retry', async () => {
@@ -1397,9 +1414,13 @@ test('reads completed history through the worker and coordinator across publicat
   vi.doMock('electron', () => ({ ipcMain, app: {}, BrowserWindow: {}, dialog: {} }))
   try {
     const { registerScannerIpc } = await import('../src/main/scannerIpc')
+    let notify: ScanSessionSubscriber | undefined
     const manager = {
       getState: () => null,
-      subscribe: () => () => {},
+      subscribe: (callback: ScanSessionSubscriber) => {
+        notify = callback
+        return () => {}
+      },
       dispose: async () => {}
     } as unknown as Parameters<typeof registerScannerIpc>[0]
     const url = 'file:///history/index.html'
@@ -1409,13 +1430,22 @@ test('reads completed history through the worker and coordinator across publicat
       send: vi.fn()
     })
     const latest = await reopened.getPublishedScan()
-    const boundary = registerScannerIpc(manager, url, restored, Promise.resolve(latest))
+    const settingsPath = join(dirname(databasePath), 'history-retention.json')
+    const retention = new HistoryRetention(restored, new RetentionSettingsStore(settingsPath))
+    const boundary = registerScannerIpc(manager, url, restored, Promise.resolve(latest), retention)
     try {
       boundary.attachRenderer(renderer as unknown as WebContents)
       const event = {
         sender: renderer,
         senderFrame: renderer.mainFrame
       } as unknown as IpcMainInvokeEvent
+      const ack = (snapshot: ScanStateSnapshot): void => {
+        ipcMain.emit(IPC_CHANNELS.acknowledgeScanState, event, snapshot.revision)
+      }
+      renderer.send.mockImplementation((_channel, snapshot: ScanStateSnapshot) =>
+        queueMicrotask(() => ack(snapshot))
+      )
+      ack(renderer.send.mock.calls[0][1] as ScanStateSnapshot)
       await expect(handlers.get(IPC_CHANNELS.listScanHistory)!(event, {})).resolves.toEqual({
         ok: true,
         value: saved
@@ -1433,7 +1463,52 @@ test('reads completed history through the worker and coordinator across publicat
         ok: true,
         value: { items: [{ id: last.id }], totalCount: 1 }
       })
+      await expect(handlers.get(IPC_CHANNELS.getRetentionSettings)!(event)).resolves.toEqual({
+        ok: true,
+        value: { maxCompletedSnapshots: 10 }
+      })
+      await expect(
+        handlers.get(IPC_CHANNELS.setRetentionSettings)!(event, { maxCompletedSnapshots: 1 })
+      ).resolves.toEqual({
+        ok: true,
+        value: { maxCompletedSnapshots: 1 }
+      })
+      const fresh = await preparePublication(restored, lifecycleScan('fresh'))
+      await restored.publishScan(fresh, root.id)
+      notify?.({
+        session: fresh,
+        progress: {
+          scanId: fresh.id,
+          processedFileCount: 1,
+          processedDirectoryCount: 1,
+          processedBytes: 0,
+          currentPath: null
+        },
+        failure: null
+      })
+      await vi.waitFor(() =>
+        expect(renderer.send).toHaveBeenCalledWith(
+          IPC_CHANNELS.scanStateChanged,
+          expect.objectContaining({
+            historyRevision: 3,
+            latestCompleted: expect.objectContaining({ id: fresh.id })
+          })
+        )
+      )
+      await expect(
+        handlers.get(IPC_CHANNELS.listScanHistory)!(event, { offset: 0, limit: 1 })
+      ).resolves.toMatchObject({
+        ok: true,
+        value: { items: [{ id: fresh.id }], totalCount: 1, latestCompletedScanId: fresh.id }
+      })
+      await expect(
+        handlers.get(IPC_CHANNELS.getScanHistoryMetadata)!(event, { scanId: last.id })
+      ).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
+      await expect(new RetentionSettingsStore(settingsPath).get()).resolves.toEqual({
+        maxCompletedSnapshots: 1
+      })
     } finally {
+      await retention.stop()
       await boundary.dispose()
     }
   } finally {
@@ -1469,6 +1544,50 @@ test('makes a failed startup recovery terminal without removing persisted rows',
     { id: 'previous', status: 'completed' }
   ])
   expect(observer.prepare('SELECT COUNT(*) AS count FROM entries').get()?.count).toBe(6)
+})
+
+test('startup prunes oversized history using the saved limit after worker recovery', async () => {
+  const seed = bundled()
+  await seed.initialize(databasePath)
+  for (const id of ['first', 'second', 'third', 'latest']) {
+    const completed = await preparePublication(seed, lifecycleScan(id))
+    await seed.publishScan(completed, root.id)
+  }
+  await seed.dispose()
+  const settingsPath = join(dirname(databasePath), 'history-retention.json')
+  await new RetentionSettingsStore(settingsPath).set({ maxCompletedSnapshots: 2 })
+
+  const reopened = wrap(start())
+  const ready = Promise.withResolvers<StorageWorkerClient>()
+  const storage = new ScanStorageCoordinator(ready.promise)
+  const retention = new HistoryRetention(storage, new RetentionSettingsStore(settingsPath))
+  const pruned: string[] = []
+  retention.onPruned(({ scanId }) => pruned.push(scanId))
+  const discover = vi.spyOn(reopened, 'getRetentionCandidate')
+  try {
+    await expect(retention.getSettings()).resolves.toEqual({ maxCompletedSnapshots: 2 })
+    expect(discover).not.toHaveBeenCalled()
+    await reopened.initialize(databasePath)
+    await reopened.recoverStorage()
+    ready.resolve(reopened)
+    await vi.waitFor(() => expect(pruned).toEqual(['first', 'second']))
+    await vi.waitFor(() => expect(retention.status).toBe('idle'))
+  } finally {
+    await retention.stop()
+  }
+  await reopened.dispose()
+  const restored = bundled()
+  await restored.initialize(databasePath)
+  await restored.recoverStorage()
+  await expect(restored.listScanHistory({})).resolves.toMatchObject({
+    items: [{ id: 'latest' }, { id: 'third' }],
+    totalCount: 2,
+    latestCompletedScanId: 'latest'
+  })
+  using observer = new DatabaseSync(databasePath, { readOnly: true })
+  expect(
+    observer.prepare('SELECT last_sequence FROM scan_publication_counter').get()?.last_sequence
+  ).toBe(4)
 })
 
 test('deletes snapshots through the bundled worker while preserving an active scan and publication order', async () => {
@@ -1532,15 +1651,20 @@ test('deletes snapshots through the bundled worker while preserving an active sc
   ).toBe(3)
 })
 
-test.each(['before commit', 'before acknowledgment'])(
-  'recovers an uncertain deletion after worker exit %s',
-  async (point) => {
+test.each([
+  ['before commit', 'deleteSnapshot'],
+  ['before acknowledgment', 'deleteSnapshot'],
+  ['before commit', 'pruneSnapshot'],
+  ['before acknowledgment', 'pruneSnapshot']
+] as const)(
+  'recovers an uncertain deletion after worker exit %s for %s',
+  async (point, operation) => {
     const worker = start(`
     const { parentPort } = require('node:worker_threads')
     const { DatabaseSync } = require('node:sqlite')
     let deleting = false
     parentPort.on('message', request => {
-      deleting = request.operation === 'deleteSnapshot'
+      deleting = request.operation === ${JSON.stringify(operation)}
     })
     if (${JSON.stringify(point)} === 'before commit') {
       const exec = DatabaseSync.prototype.exec
@@ -1564,7 +1688,12 @@ test.each(['before commit', 'before acknowledgment'])(
     const unrelated = await preparePublication(client, lifecycleScan('latest'))
     await client.publishScan(unrelated, root.id)
     const storage = new ScanStorageCoordinator(Promise.resolve(client))
-    await expect(storage.deleteSnapshot({ scanId: saved.id })).rejects.toMatchObject({
+    await Promise.resolve()
+    const deleting =
+      operation === 'deleteSnapshot'
+        ? storage.deleteSnapshot({ scanId: saved.id })
+        : storage.pruneSnapshotIfIdle(saved.id, 1)
+    await expect(deleting).rejects.toMatchObject({
       code: 'SNAPSHOT_DELETE_UNCERTAIN'
     })
     await expect(storage.beginScan(lifecycleScan('blocked'))).rejects.toThrow(

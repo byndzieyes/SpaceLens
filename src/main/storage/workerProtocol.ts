@@ -39,6 +39,7 @@ import {
 } from './snapshotAccess'
 import {
   integer,
+  MAX_RETENTION_EXCLUSIONS,
   isScanSummary,
   isSnapshotId,
   isStorageEntry,
@@ -53,6 +54,9 @@ import {
   type BuildingScan,
   type CompletedScan,
   type CommittedSnapshotDeletion,
+  type PruneSnapshotRequest,
+  type RetentionCandidate,
+  type RetentionCandidateRequest,
   type ScanPublication,
   type StorageBatch
 } from './payloads'
@@ -69,6 +73,8 @@ interface StorageCommands {
   listScanHistory: { payload: ScanHistoryQuery; result: ScanHistoryPage }
   getScanHistoryMetadata: { payload: ScanHistoryMetadataRequest; result: ScanHistoryItem }
   deleteSnapshot: { payload: SnapshotDeletionRequest; result: CommittedSnapshotDeletion }
+  getRetentionCandidate: { payload: RetentionCandidateRequest; result: RetentionCandidate }
+  pruneSnapshot: { payload: PruneSnapshotRequest; result: CommittedSnapshotDeletion | null }
   getInsightsCategories: { payload: { scanId: string }; result: InsightsCategories }
   getInsightsSizeDistribution: { payload: { scanId: string }; result: InsightsSizeDistribution }
   getInsightsObservations: { payload: { scanId: string }; result: InsightsObservations }
@@ -167,6 +173,31 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       return { requestId, operation, payload: { scanId: readSnapshotId(payload) } }
     case 'listScanHistory':
       return { requestId, operation, payload: readScanHistoryQuery(payload) }
+    case 'getRetentionCandidate':
+    case 'pruneSnapshot': {
+      if (
+        !record(payload) ||
+        !integer(payload.limit) ||
+        payload.limit === 0 ||
+        !Array.isArray(payload.protectedScanIds) ||
+        payload.protectedScanIds.length > MAX_RETENTION_EXCLUSIONS ||
+        !Array.from(payload.protectedScanIds).every(isSnapshotId)
+      )
+        break
+      const settings = {
+        limit: payload.limit,
+        protectedScanIds: payload.protectedScanIds as string[]
+      }
+      if (operation === 'getRetentionCandidate' && Object.keys(payload).length === 2)
+        return { requestId, operation, payload: settings }
+      if (
+        operation === 'pruneSnapshot' &&
+        Object.keys(payload).length === 3 &&
+        isSnapshotId(payload.scanId)
+      )
+        return { requestId, operation, payload: { ...settings, scanId: payload.scanId } }
+      break
+    }
     case 'listInsightsExtensions':
       return { requestId, operation, payload: readExtensionRequest(payload) }
     case 'listInsightsLargestFiles':
@@ -227,6 +258,20 @@ function isCommittedDeletion(value: unknown): value is CommittedSnapshotDeletion
         isSnapshotId(latestCompleted.id) &&
         latestCompleted.id === latestCompletedScanId &&
         latestCompleted.id !== value.scanId
+}
+
+function isRetentionCandidate(value: unknown): value is RetentionCandidate {
+  if (!record(value) || !integer(value.totalCount) || typeof value.building !== 'boolean')
+    return false
+  const { latestScanId, candidateScanId } = value
+  return (
+    (value.totalCount === 0 ? latestScanId === null : isSnapshotId(latestScanId)) &&
+    (candidateScanId === null ||
+      (!value.building &&
+        value.totalCount > 1 &&
+        isSnapshotId(candidateScanId) &&
+        candidateScanId !== latestScanId))
+  )
 }
 
 function isHistoryItem(value: unknown): value is ScanHistoryItem {
@@ -591,6 +636,9 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     listScanHistory: isHistoryPage,
     getScanHistoryMetadata: isHistoryItem,
     deleteSnapshot: isCommittedDeletion,
+    getRetentionCandidate: isRetentionCandidate,
+    pruneSnapshot: (value): value is CommittedSnapshotDeletion | null =>
+      value === null || isCommittedDeletion(value),
     getInsightsCategories: isInsightsCategories,
     getInsightsSizeDistribution: isSizeDistribution,
     getInsightsObservations: isObservations,

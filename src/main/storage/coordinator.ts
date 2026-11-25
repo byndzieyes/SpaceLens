@@ -4,6 +4,7 @@ import type {
   BuildingScan,
   CompletedScan,
   CommittedSnapshotDeletion,
+  RetentionCandidate,
   StorageBatchOperation
 } from './payloads'
 import { readSnapshotId, SnapshotAccessError } from './snapshotAccess'
@@ -16,6 +17,10 @@ import {
 } from './workerClient'
 
 export const MAX_QUEUED_EXPLORER_READS = 16
+
+export type RetentionOpportunity =
+  | { readonly type: 'idle' | 'publication' | 'manual-deletion' }
+  | { readonly type: 'released'; readonly scanId: string }
 
 type SnapshotQueries = Pick<
   StorageWorkerClient,
@@ -55,7 +60,11 @@ export class ScanStorageCoordinator implements ScanPersistence {
   private active: Job | undefined
   private write: Job | undefined
   private deletion: Job | undefined
-  private readonly protection = new SnapshotProtection()
+  private readonly protection = new SnapshotProtection((scanId) =>
+    this.signalRetention({ type: 'released', scanId })
+  )
+  private retentionListener: ((opportunity: RetentionOpportunity) => void) | undefined
+  private buildingScanId: string | undefined
   private readonly reads: Job[] = []
   private readsStopped = false
 
@@ -87,8 +96,61 @@ export class ScanStorageCoordinator implements ScanPersistence {
     return this.protection.isProtected(scanId)
   }
 
+  get retentionIdle(): boolean {
+    return (
+      !!this.client?.isReady &&
+      !this.failure &&
+      !this.readsStopped &&
+      !this.active &&
+      !this.write &&
+      !this.protection.deletionPending &&
+      !this.reads.length &&
+      this.buildingScanId === undefined
+    )
+  }
+
+  observeRetention(listener: (opportunity: RetentionOpportunity) => void): () => void {
+    if (this.retentionListener) throw new Error('Retention is already observing storage.')
+    this.retentionListener = listener
+    return () => {
+      if (this.retentionListener === listener) this.retentionListener = undefined
+    }
+  }
+
+  async findRetentionCandidate(
+    limit: number,
+    signal: AbortSignal
+  ): Promise<(RetentionCandidate & { protectedScanIds: readonly string[] }) | undefined> {
+    if (!this.retentionIdle) return undefined
+    const protectedScanIds = this.protection.protectedScanIds()
+    const result = await this.enqueue(
+      (client) => client.getRetentionCandidate({ limit, protectedScanIds }),
+      signal
+    )
+    return { ...result, protectedScanIds }
+  }
+
+  async pruneSnapshotIfIdle(
+    scanId: string,
+    limit: number
+  ): Promise<CommittedSnapshotDeletion | null | undefined> {
+    if (!this.retentionIdle) return undefined
+    return this.delete(scanId, (client) =>
+      client.pruneSnapshot({ scanId, limit, protectedScanIds: this.protection.protectedScanIds() })
+    )
+  }
+
   async deleteSnapshot(request: SnapshotDeletionRequest): Promise<CommittedSnapshotDeletion> {
     const scanId = readSnapshotId(request)
+    const result = await this.delete(scanId, (client) => client.deleteSnapshot({ scanId }))
+    this.signalRetention({ type: 'manual-deletion' })
+    return result
+  }
+
+  private async delete<T extends CommittedSnapshotDeletion | null>(
+    scanId: string,
+    operation: (client: StorageWorkerClient) => Promise<T>
+  ): Promise<T> {
     if (this.failure) throw this.failure
     if (this.readsStopped) throw new StorageUnavailableError('Saved scan storage is shutting down.')
     if (this.protection.deletionPending) {
@@ -102,7 +164,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
       return await this.enqueue(
         async (client) => {
           try {
-            return await client.deleteSnapshot({ scanId })
+            return await operation(client)
           } catch (error) {
             if (!isUncertainStorageWrite(error)) throw error
             uncertain = true
@@ -118,12 +180,18 @@ export class ScanStorageCoordinator implements ScanPersistence {
         true
       )
     } finally {
-      if (!uncertain) release()
+      if (!uncertain) {
+        release()
+        this.notifyIdle()
+      }
     }
   }
 
   beginScan(scan: BuildingScan): Promise<void> {
-    return this.enqueue((client) => client.beginScan(scan))
+    return this.enqueue(async (client) => {
+      await client.beginScan(scan)
+      this.buildingScanId = scan.id
+    })
   }
 
   applyBatch(scanId: string, operations: readonly StorageBatchOperation[]): Promise<void> {
@@ -131,11 +199,19 @@ export class ScanStorageCoordinator implements ScanPersistence {
   }
 
   publishScan(scan: CompletedScan, rootEntryId: string): Promise<CompletedScan> {
-    return this.enqueue((client) => client.publishScan(scan, rootEntryId))
+    return this.enqueue(async (client) => {
+      const published = await client.publishScan(scan, rootEntryId)
+      if (this.buildingScanId === scan.id) this.buildingScanId = undefined
+      this.signalRetention({ type: 'publication' })
+      return published
+    })
   }
 
   discardBuildingScan(scanId: string): Promise<void> {
-    return this.enqueue((client) => client.discardBuildingScan(scanId))
+    return this.enqueue(async (client) => {
+      await client.discardBuildingScan(scanId)
+      if (this.buildingScanId === scanId) this.buildingScanId = undefined
+    })
   }
 
   /** Drop read requests before scanner shutdown, which may still need a final write. */
@@ -235,7 +311,10 @@ export class ScanStorageCoordinator implements ScanPersistence {
       return
     }
     const job = this.write ?? this.deletion ?? this.reads.shift()
-    if (!job) return
+    if (!job) {
+      this.notifyIdle()
+      return
+    }
     if (job === this.write) this.write = undefined
     if (job === this.deletion) this.deletion = undefined
     this.active = job
@@ -243,6 +322,18 @@ export class ScanStorageCoordinator implements ScanPersistence {
       this.active = undefined
       this.drain()
     })
+  }
+
+  private notifyIdle(): void {
+    if (this.retentionIdle) this.signalRetention({ type: 'idle' })
+  }
+
+  private signalRetention(event: RetentionOpportunity): void {
+    try {
+      this.retentionListener?.(event)
+    } catch (error) {
+      console.error('Could not schedule history retention.', error)
+    }
   }
 
   private fail(): void {

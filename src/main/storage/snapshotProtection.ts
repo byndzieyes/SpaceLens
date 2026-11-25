@@ -15,8 +15,14 @@ export class SnapshotProtection {
   private owners = 0
   private deleting: string | undefined
 
+  constructor(private readonly onReleased: (scanId: string) => void = () => {}) {}
+
   isProtected(scanId: string): boolean {
     return this.leases.has(scanId)
+  }
+
+  protectedScanIds(): string[] {
+    return [...this.leases.keys()]
   }
 
   get deletionPending(): boolean {
@@ -33,8 +39,10 @@ export class SnapshotProtection {
       if (released) return
       released = true
       const count = this.leases.get(scanId)!
-      if (count === 1) this.leases.delete(scanId)
-      else this.leases.set(scanId, count - 1)
+      if (count === 1) {
+        this.leases.delete(scanId)
+        this.onReleased(scanId)
+      } else this.leases.set(scanId, count - 1)
     }
   }
 

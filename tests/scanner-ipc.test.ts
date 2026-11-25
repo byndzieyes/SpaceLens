@@ -299,10 +299,13 @@ test('returns typed history errors and sanitizes backend diagnostics', async () 
   })
 })
 
-async function attachWithRecovery(publication: Promise<CompletedScan | null>): Promise<void> {
+async function attachWithRecovery(
+  publication: Promise<CompletedScan | null>,
+  retention?: Parameters<typeof registerScannerIpc>[4]
+): Promise<void> {
   await boundary.dispose()
   vi.mocked(ipcMain.handle).mockClear()
-  boundary = registerScannerIpc(manager, url, storage, publication)
+  boundary = registerScannerIpc(manager, url, storage, publication, retention)
   boundary.attachRenderer(renderer as unknown as WebContents)
   ack((renderer.send.mock.calls.at(-1)![1] as ScanStateSnapshot).revision)
   renderer.send.mockClear()
@@ -515,6 +518,55 @@ test('authorizes explicit deletion and publishes a new history revision for each
       latestCompleted: expect.objectContaining({ id: previous.id })
     })
   )
+})
+
+test('authorizes and validates settings requests and suppresses a reply to an invalidated document', async () => {
+  let current = { maxCompletedSnapshots: 10 }
+  const saved = Promise.withResolvers<void>()
+  const retention = {
+    getSettings: vi.fn(async () => current),
+    setSettings: vi.fn(async (settings: typeof current) => {
+      await saved.promise
+      current = settings
+      return current
+    }),
+    onPruned: vi.fn(() => () => {})
+  }
+  await attachWithRecovery(
+    Promise.resolve(null),
+    retention as NonNullable<Parameters<typeof registerScannerIpc>[4]>
+  )
+  const { getRetentionSettings, setRetentionSettings } = IPC_CHANNELS
+  expect(await invoke(getRetentionSettings, [], event(makeRenderer()))).toMatchObject({
+    ok: false,
+    error: { code: 'UNAUTHORIZED' }
+  })
+  expect(
+    await invoke(setRetentionSettings, [{ maxCompletedSnapshots: 4 }], event(makeRenderer()))
+  ).toMatchObject({
+    ok: false,
+    error: { code: 'UNAUTHORIZED' }
+  })
+  expect(await invoke(setRetentionSettings, [{ maxCompletedSnapshots: 0 }])).toMatchObject({
+    ok: false,
+    error: { code: 'INVALID_REQUEST' }
+  })
+  expect(retention.getSettings).not.toHaveBeenCalled()
+  expect(retention.setSettings).not.toHaveBeenCalled()
+  expect(await invoke(getRetentionSettings)).toEqual({
+    ok: true,
+    value: { maxCompletedSnapshots: 10 }
+  })
+  const reply = invoke(setRetentionSettings, [{ maxCompletedSnapshots: 4 }])
+  renderer.emit('destroyed')
+  saved.resolve()
+  expect(await reply).toMatchObject({ ok: false, error: { code: 'UNAVAILABLE' } })
+  renderer = makeRenderer()
+  boundary.attachRenderer(renderer as unknown as WebContents)
+  expect(await invoke(getRetentionSettings)).toEqual({
+    ok: true,
+    value: { maxCompletedSnapshots: 4 }
+  })
 })
 
 test.each(['navigation', 'destroyed'])(
@@ -1330,7 +1382,9 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listScanHistory)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getScanHistoryMetadata)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.deleteSnapshot)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(18)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getRetentionSettings)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.setRetentionSettings)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(20)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

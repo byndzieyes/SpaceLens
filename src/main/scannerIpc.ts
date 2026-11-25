@@ -36,6 +36,9 @@ import {
 } from './scanner/directoryApproval'
 import { StorageUnavailableError, type ScanStorageCoordinator } from './storage/coordinator'
 import { StorageWorkerError } from './storage/workerClient'
+import type { HistoryRetention } from './storage/historyRetention'
+import { RetentionSettingsError } from './storage/retentionSettings'
+import { isScanHistoryRetentionSettings } from '../shared/history'
 
 function failure(code: ScannerIpcErrorCode, message: string): ScannerIpcResult<never> {
   return { ok: false, error: { code, message } }
@@ -43,6 +46,7 @@ function failure(code: ScannerIpcErrorCode, message: string): ScannerIpcResult<n
 
 function snapshotFailure(error: unknown, history: boolean): ScannerIpcResult<never> {
   if (error instanceof SnapshotAccessError) return failure(error.code, error.message)
+  if (error instanceof RetentionSettingsError) return failure(error.code, error.message)
   if (error instanceof StorageUnavailableError) return failure('UNAVAILABLE', error.message)
   if (error instanceof StorageWorkerError && error.name === 'SnapshotAccessError') {
     switch (error.code) {
@@ -155,7 +159,8 @@ export function registerScannerIpc(
   manager: ScanSessionManager,
   rendererUrl: string,
   storage: Pick<ScanStorageCoordinator, 'read' | 'deleteSnapshot'>,
-  restoredPublication: Promise<CompletedScan | null>
+  restoredPublication: Promise<CompletedScan | null>,
+  retention?: Pick<HistoryRetention, 'getSettings' | 'setSettings' | 'onPruned'>
 ): { attachRenderer: (renderer: WebContents) => void; dispose: () => Promise<void> } {
   let renderer: WebContents | null = null
   let disposed = false
@@ -233,6 +238,11 @@ export function registerScannerIpc(
       historyCommitted({ ...state.session, status: state.session.status })
     }
     capture(state)
+    sendLatest()
+  })
+  const unsubscribeRetention = retention?.onPruned((result) => {
+    historyCommitted(result.latestCompleted)
+    capture(manager.getState())
     sendLatest()
   })
   const restore = (status: 'ready' | 'unavailable', scan: CompletedScan | null): void => {
@@ -329,6 +339,8 @@ export function registerScannerIpc(
     IPC_CHANNELS.listScanHistory,
     IPC_CHANNELS.getScanHistoryMetadata,
     IPC_CHANNELS.deleteSnapshot,
+    IPC_CHANNELS.getRetentionSettings,
+    IPC_CHANNELS.setRetentionSettings,
     IPC_CHANNELS.getScanEntry,
     IPC_CHANNELS.listScanDirectory,
     IPC_CHANNELS.getScanDirectoryTreemap,
@@ -348,7 +360,9 @@ export function registerScannerIpc(
       const history =
         channel === IPC_CHANNELS.listScanHistory ||
         channel === IPC_CHANNELS.getScanHistoryMetadata ||
-        channel === IPC_CHANNELS.deleteSnapshot
+        channel === IPC_CHANNELS.deleteSnapshot ||
+        channel === IPC_CHANNELS.getRetentionSettings ||
+        channel === IPC_CHANNELS.setRetentionSettings
       const reply = <T>(result: ScannerIpcResult<T>): ScannerIpcResult<T> =>
         signal.aborted || !authorized(event)
           ? failure(
@@ -373,6 +387,13 @@ export function registerScannerIpc(
           const value = await storage.read(signal, (client) => client.getScanSnapshot())
           return reply({ ok: true, value })
         }
+        if (channel === IPC_CHANNELS.getRetentionSettings) {
+          if (args.length !== 0)
+            return failure('INVALID_REQUEST', 'getRetentionSettings does not accept arguments.')
+          if (!retention)
+            return failure('UNAVAILABLE', 'History retention settings are unavailable.')
+          return reply({ ok: true, value: await retention.getSettings() })
+        }
         if (args.length !== 1) {
           return failure(
             'INVALID_REQUEST',
@@ -390,6 +411,13 @@ export function registerScannerIpc(
           capture(manager.getState())
           sendLatest()
           return reply({ ok: true, value: { scanId, latestCompletedScanId } })
+        }
+        if (channel === IPC_CHANNELS.setRetentionSettings) {
+          if (!isScanHistoryRetentionSettings(args[0]))
+            return failure('INVALID_REQUEST', 'Invalid history retention limit.')
+          if (!retention)
+            return failure('UNAVAILABLE', 'History retention settings are unavailable.')
+          return reply({ ok: true, value: await retention.setSettings(args[0]) })
         }
         if (channel === IPC_CHANNELS.listScanHistory) {
           const query = readScanHistoryQuery(args[0])
@@ -597,6 +625,7 @@ export function registerScannerIpc(
       if (disposal) return disposal
       disposed = true
       unsubscribe()
+      unsubscribeRetention?.()
       detachRenderer()
       for (const channel of channels) ipcMain.removeHandler(channel)
       for (const channel of snapshotChannels) ipcMain.removeHandler(channel)

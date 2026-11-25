@@ -4,6 +4,7 @@ import type {
   ScanHistoryMetadataRequest,
   ScanHistoryPage,
   ScanHistoryQuery,
+  ScanHistoryRetentionSettings,
   SnapshotDeletionRequest,
   SnapshotDeletionResult
 } from './history'
@@ -50,6 +51,12 @@ export interface SpaceLensAPI {
   deleteSnapshot: (
     request: SnapshotDeletionRequest
   ) => Promise<ScannerIpcResult<SnapshotDeletionResult, ScanHistoryErrorCode>>
+  getRetentionSettings: () => Promise<
+    ScannerIpcResult<ScanHistoryRetentionSettings, ScanHistoryErrorCode>
+  >
+  setRetentionSettings: (
+    settings: ScanHistoryRetentionSettings
+  ) => Promise<ScannerIpcResult<ScanHistoryRetentionSettings, ScanHistoryErrorCode>>
   getScanEntry: (request: ScanEntryRequest) => Promise<ScannerIpcResult<FileEntry>>
   listScanDirectory: (request: ScanDirectoryRequest) => Promise<ScannerIpcResult<ScanDirectoryPage>>
   getScanDirectoryTreemap: (
@@ -85,6 +92,8 @@ export const IPC_CHANNELS = {
   listScanHistory: 'spacelens:list-scan-history',
   getScanHistoryMetadata: 'spacelens:get-scan-history-metadata',
   deleteSnapshot: 'spacelens:delete-snapshot',
+  getRetentionSettings: 'spacelens:get-retention-settings',
+  setRetentionSettings: 'spacelens:set-retention-settings',
   getScanEntry: 'spacelens:get-scan-entry',
   listScanDirectory: 'spacelens:list-scan-directory',
   getScanDirectoryTreemap: 'spacelens:get-scan-directory-treemap',

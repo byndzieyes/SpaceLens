@@ -28,6 +28,9 @@ import type {
   BuildingScan,
   CompletedScan,
   CommittedSnapshotDeletion,
+  PruneSnapshotRequest,
+  RetentionCandidate,
+  RetentionCandidateRequest,
   StorageBatchOperation
 } from './payloads'
 import {
@@ -137,12 +140,26 @@ export class StorageWorkerClient {
 
   async deleteSnapshot(request: SnapshotDeletionRequest): Promise<CommittedSnapshotDeletion> {
     const result = await this.run('deleteSnapshot', request)
-    if (result.scanId !== request.scanId) {
+    this.assertDeletedId(result, request.scanId)
+    return result
+  }
+
+  getRetentionCandidate(request: RetentionCandidateRequest): Promise<RetentionCandidate> {
+    return this.run('getRetentionCandidate', request)
+  }
+
+  async pruneSnapshot(request: PruneSnapshotRequest): Promise<CommittedSnapshotDeletion | null> {
+    const result = await this.run('pruneSnapshot', request)
+    if (result) this.assertDeletedId(result, request.scanId)
+    return result
+  }
+
+  private assertDeletedId(result: CommittedSnapshotDeletion, scanId: string): void {
+    if (result.scanId !== scanId) {
       const error = new Error('Storage returned a different deleted scan.')
       this.fail(error)
       throw error
     }
-    return result
   }
 
   /** Unlike dispose(), this settles only when the worker has actually exited. */

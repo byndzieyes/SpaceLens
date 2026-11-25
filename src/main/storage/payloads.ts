@@ -1,5 +1,5 @@
 import { isAbsolute } from 'node:path'
-import type { SnapshotDeletionResult } from '../../shared/history'
+import type { SnapshotDeletionRequest, SnapshotDeletionResult } from '../../shared/history'
 import type { FileEntry, ScanSession, ScanSummary } from '../../shared/scan'
 import { SCANNER_BATCH_SIZE } from '../scanner/workerProtocol'
 
@@ -23,6 +23,23 @@ export type CompletedScan = ScanSession & { readonly status: 'completed' }
 export interface CommittedSnapshotDeletion extends SnapshotDeletionResult {
   readonly latestCompleted: CompletedScan | null
 }
+
+// Greater than the maximum number of view leases and admitted snapshot reads.
+export const MAX_RETENTION_EXCLUSIONS = 64
+
+export interface RetentionCandidateRequest {
+  readonly limit: number
+  readonly protectedScanIds: readonly string[]
+}
+
+export interface RetentionCandidate {
+  readonly totalCount: number
+  readonly latestScanId: string | null
+  readonly candidateScanId: string | null
+  readonly building: boolean
+}
+
+export type PruneSnapshotRequest = SnapshotDeletionRequest & RetentionCandidateRequest
 
 export interface ScanPublication {
   readonly scan: CompletedScan

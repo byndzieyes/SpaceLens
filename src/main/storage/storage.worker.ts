@@ -73,6 +73,10 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().getScanHistoryMetadata(request.payload)
     case 'deleteSnapshot':
       return writableDatabase().deleteSnapshot(request.payload)
+    case 'getRetentionCandidate':
+      return requireDatabase().getRetentionCandidate(request.payload)
+    case 'pruneSnapshot':
+      return writableDatabase().pruneSnapshot(request.payload)
     case 'getInsightsCategories':
       return requireDatabase().getInsightsCategories(request.payload.scanId)
     case 'getInsightsSizeDistribution':
