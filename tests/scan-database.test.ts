@@ -610,14 +610,18 @@ function completed(
   }
 }
 
-function readyScan(db: ScanDatabase, id = 'scan-a'): CompletedScan {
+function readyScan(db: ScanDatabase, id = 'scan-a', bytes = 20): CompletedScan {
   const pending = building(id)
   db.beginScan(pending)
-  db.applyBatch(id, [discover(root(id)), discover(file(id)), finalize(root(id), 20)])
-  return completed(pending)
+  db.applyBatch(id, [
+    discover(root(id)),
+    discover({ ...file(id), sizeBytes: bytes }),
+    finalize(root(id), bytes)
+  ])
+  return completed(pending, { totalBytes: bytes })
 }
 
-test('reads published Explorer metadata and entries through reopen and atomic replacement', () => {
+test('reads Explorer metadata across reopen and a change to Latest', () => {
   const db = open()
   const old = readyScan(db, 'previous')
   const oldRoot = { scanId: old.id, entryId: 'root' }
@@ -661,6 +665,7 @@ test('reads published Explorer metadata and entries through reopen and atomic re
   ).toThrow(expect.objectContaining({ code: 'NOT_DIRECTORY' }))
 
   reopened.publishScan(next, 'root')
+  expect(reopened.getEntry(old.id, 'file')).toEqual(file(old.id))
   expect(() => reopened.getScanEntry(oldRoot)).toThrow(
     expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
   )
@@ -1091,9 +1096,6 @@ test('reports inconsistent persisted Explorer metadata and rejects unsafe intege
       .run(finishedAt, Buffer.from(join(rootPath, 'different'), 'utf16le').swap16(), saved.id)
   )
   expect(() => db.getScanSnapshot()).toThrow('root directory is missing or invalid')
-  db.insertScan(scan('ambiguous'))
-  expect(() => db.getScanSnapshot()).toThrow('more than one completed scan')
-  expect(() => db.getScanEntry(entry)).toThrow('more than one completed scan')
 })
 
 test.each([false, true])(
@@ -1113,65 +1115,69 @@ test.each([false, true])(
   }
 )
 
-test.each([false, true])(
-  'recovers abandoned rows and entries on reopen (published: %s)',
-  (published) => {
+test.each([0, 1, 3])(
+  'recovers abandoned rows and entries on reopen with %i publications',
+  (count) => {
     const db = open()
-    const saved = published ? readyScan(db) : null
-    if (saved) db.publishScan(saved, 'root')
+    const retained = Array.from({ length: count }, (_, index) =>
+      db.publishScan(readyScan(db, `saved-${index}`), 'root')
+    )
+    const latest = retained.at(-1) ?? null
     const interrupted = readyScan(db, 'interrupted')
     db.close()
 
     const reopened = open()
     for (let attempt = 0; attempt < 2; attempt++) {
       reopened.recoverStorage()
-      expect(reopened.getPublishedScan()).toEqual(saved)
+      expect(reopened.getPublishedScan()).toEqual(latest)
       expect(reopened.getScan(interrupted.id)).toBeNull()
       expect(reopened.getEntry(interrupted.id, 'file')).toBeNull()
-      if (saved) expect(reopened.getEntry(saved.id, 'file')).toEqual(file(saved.id))
+      for (const saved of retained) {
+        expect(reopened.getScan(saved.id)).toEqual(saved)
+        expect(reopened.getEntry(saved.id, 'file')).toEqual(file(saved.id))
+      }
     }
     reopened.beginScan(building('fresh'))
   }
 )
 
-test.each([
-  'ambiguous completed scans',
-  'invalid completed tree',
-  'invalid status',
-  'orphan entry'
-])('fails recovery before deleting anything with %s', (problem) => {
-  const db = open()
-  const saved = readyScan(db)
-  db.publishScan(saved, 'root')
-  const interrupted = readyScan(db, 'interrupted')
-  let message: string
-  switch (problem) {
-    case 'ambiguous completed scans':
-      db.insertScan(scan('second'))
-      message = 'more than one completed scan'
-      break
-    case 'invalid completed tree':
-      inspectDatabase((sql) => {
-        sql.prepare('DELETE FROM entries WHERE scan_id = ? AND id = ?').run(saved.id, 'file')
-      })
-      message = 'differ from the scan summary'
-      break
-    case 'invalid status':
-      db.insertScan(scan('terminal', 'cancelled'))
-      message = 'unexpected persisted scan status'
-      break
-    default:
-      inspectDatabase((sql) => {
-        sql.exec('PRAGMA foreign_keys = OFF')
-        sql.prepare('DELETE FROM entries WHERE scan_id = ? AND id = ?').run(interrupted.id, 'root')
-      })
-      message = 'invalid scan or entry references'
+test.each(['invalid completed tree', 'invalid status', 'orphan entry'])(
+  'fails recovery before deleting anything with %s',
+  (problem) => {
+    const db = open()
+    const older = db.publishScan(readyScan(db, 'older'), 'root')
+    const saved = readyScan(db)
+    db.publishScan(saved, 'root')
+    const interrupted = readyScan(db, 'interrupted')
+    let message: string
+    switch (problem) {
+      case 'invalid completed tree':
+        inspectDatabase((sql) => {
+          sql.prepare('DELETE FROM entries WHERE scan_id = ? AND id = ?').run(saved.id, 'file')
+        })
+        message = 'differ from the scan summary'
+        break
+      case 'invalid status':
+        db.insertScan(scan('terminal', 'cancelled'))
+        message = 'unexpected persisted scan status'
+        break
+      default:
+        inspectDatabase((sql) => {
+          sql.exec('PRAGMA foreign_keys = OFF')
+          sql
+            .prepare('DELETE FROM entries WHERE scan_id = ? AND id = ?')
+            .run(interrupted.id, 'root')
+        })
+        message = 'invalid scan or entry references'
+    }
+    expect(() => db.recoverStorage()).toThrow(message)
+    expect(db.getScan(older.id)).toEqual(older)
+    expect(db.getEntry(older.id, 'file')).toEqual(file(older.id))
+    expect(db.getScan(saved.id)).toEqual(saved)
+    expect(db.getScan(interrupted.id)?.status).toBe('running')
+    expect(db.getEntry(interrupted.id, 'file')).toEqual(file(interrupted.id))
   }
-  expect(() => db.recoverStorage()).toThrow(message)
-  expect(db.getScan(saved.id)).toEqual(saved)
-  expect(db.getScan(interrupted.id)?.status).toBe('running')
-  expect(db.getEntry(interrupted.id, 'file')).toEqual(file(interrupted.id))
-})
+)
 
 test('rolls back abandoned-row and entry deletion if the recovery commit fails', () => {
   const db = open()
@@ -1203,26 +1209,66 @@ test('rolls back abandoned-row and entry deletion if the recovery commit fails',
   expect(reopened.getPublishedScan()).toEqual(saved)
 })
 
-test('retains only the latest publication and its entries after several replacements', () => {
+test('retains independent snapshots with shared entry IDs and distinct metadata across restart', () => {
   const db = open()
-  const ids = ['first', 'second', 'third', 'fourth']
-  for (const id of ids) db.publishScan(readyScan(db, id), 'root')
+  const publications = ['first', 'second', 'third'].map((id, index) => {
+    const scan = readyScan(db, id, index * 10)
+    expect(db.publishScan(scan, 'root')).toEqual(scan)
+    expect(db.getPublishedScan()).toEqual(scan)
+    return scan
+  })
   db.close()
 
   const reopened = open()
   reopened.recoverStorage()
-  expect(reopened.getPublishedScan()?.id).toBe('fourth')
-  for (const id of ids)
+  expect(reopened.getPublishedScan()).toEqual(publications.at(-1))
+  for (const scan of publications) {
+    const {
+      id,
+      summary: { totalBytes }
+    } = scan
+    expect(reopened.getScan(id)).toEqual(scan)
+    expect(reopened.getEntry(id, 'root')).toEqual({ ...root(id), aggregatedSizeBytes: totalBytes })
+    expect(reopened.getEntry(id, 'file')).toEqual({ ...file(id), sizeBytes: totalBytes })
     expect(() => reopened.discardBuildingScan(id)).toThrow('not a building scan')
+    expect(() => reopened.applyBatch(id, [discover(file(id, 'new-file'))])).toThrow('not running')
+    expect(() => reopened.applyBatch(id, [finalize(root(id), 99)])).toThrow('not running')
+    expect(() => reopened.publishScan(scan, 'root')).toThrow('not a building scan')
+  }
   inspectDatabase((sql) => {
-    expect(sql.prepare('SELECT id, status FROM scans').all()).toEqual([
-      { id: 'fourth', status: 'completed' }
-    ])
-    expect(sql.prepare('SELECT scan_id, id FROM entries ORDER BY id').all()).toEqual([
-      { scan_id: 'fourth', id: 'file' },
-      { scan_id: 'fourth', id: 'root' }
-    ])
+    expect(
+      sql
+        .prepare('SELECT id, status, publication_sequence FROM scans ORDER BY publication_sequence')
+        .all()
+    ).toEqual(
+      publications.map(({ id }, index) => ({
+        id,
+        status: 'completed',
+        publication_sequence: index + 1
+      }))
+    )
+    expect(sql.prepare('SELECT scan_id, id FROM entries ORDER BY scan_id, id').all()).toEqual(
+      publications.flatMap(({ id }) => [
+        { scan_id: id, id: 'file' },
+        { scan_id: id, id: 'root' }
+      ])
+    )
   })
+})
+
+test('startup validates Latest without a full tree check of retained history', () => {
+  const db = open()
+  const older = db.publishScan(readyScan(db, 'older'), 'root')
+  const latest = db.publishScan(readyScan(db, 'latest'), 'root')
+  db.close()
+  inspectDatabase((sql) =>
+    sql.prepare('UPDATE scans SET file_count = 2 WHERE id = ?').run(older.id)
+  )
+  const reopened = open()
+  reopened.recoverStorage()
+  expect(reopened.getPublishedScan()).toEqual(latest)
+  expect(reopened.getScan(older.id)?.summary.fileCount).toBe(2)
+  expect(reopened.getEntry(older.id, 'file')).toEqual(file(older.id))
 })
 
 test('begins one building scan with empty counters and rejects invalid or conflicting metadata', () => {
@@ -1290,7 +1336,7 @@ test('publishes a first scan with recoverable errors and persists exact scanner 
   expect(reopened.getEntry(pending.id, directory.id)?.aggregatedSizeBytes).toBe(max)
 })
 
-test('keeps the old snapshot while the new one builds and retires it after successful publication', () => {
+test('keeps the old snapshot while the new one builds and after it becomes Latest', () => {
   const db = open()
   const previous = readyScan(db)
   db.publishScan(previous, 'root')
@@ -1303,9 +1349,9 @@ test('keeps the old snapshot while the new one builds and retires it after succe
   expect(() => reopened.beginScan(building('scan-c'))).toThrow('already active')
   reopened.publishScan(next, 'root')
   expect(reopened.getPublishedScan()).toEqual(next)
-  expect(reopened.getScan(previous.id)).toBeNull()
-  expect(reopened.getEntry(previous.id, 'root')).toBeNull()
-  expect(reopened.getEntry(previous.id, 'file')).toBeNull()
+  expect(reopened.getScan(previous.id)).toEqual(previous)
+  expect(reopened.getEntry(previous.id, 'root')).toEqual(root(previous.id))
+  expect(reopened.getEntry(previous.id, 'file')).toEqual(file(previous.id))
   expect(reopened.getEntry(next.id, 'file')).toEqual(file(next.id))
 })
 
@@ -1442,16 +1488,21 @@ test('discards only the addressed building scan and rejects stale publication an
   expect(db.getScan(next.id)?.status).toBe('running')
 })
 
-test('readers see only the old snapshot before commit and a failed commit rolls back promotion and deletion', () => {
+test('readers see only prior publications before commit and a failed commit rolls back promotion and sequence', () => {
   const db = open()
+  const older = db.publishScan(readyScan(db, 'older'), 'root')
   const previous = readyScan(db)
   db.publishScan(previous, 'root')
   const next = readyScan(db, 'scan-b')
   const observer = new DatabaseSync(databasePath, { readOnly: true })
   const read = observer.prepare(
-    "SELECT id, publication_sequence FROM scans WHERE status = 'completed'"
+    "SELECT id, publication_sequence FROM scans WHERE status = 'completed' ORDER BY publication_sequence"
   )
   const counter = observer.prepare('SELECT last_sequence FROM scan_publication_counter')
+  const prior = [
+    { id: older.id, publication_sequence: 1 },
+    { id: previous.id, publication_sequence: 2 }
+  ]
   const exec = DatabaseSync.prototype.exec
   let failCommit = true
   const commit = vi.spyOn(DatabaseSync.prototype, 'exec').mockImplementation(function (
@@ -1459,8 +1510,8 @@ test('readers see only the old snapshot before commit and a failed commit rolls 
     sql: string
   ) {
     if (sql === 'COMMIT') {
-      expect(read.all()).toEqual([{ id: previous.id, publication_sequence: 1 }])
-      expect(counter.get()?.last_sequence).toBe(1)
+      expect(read.all()).toEqual(prior)
+      expect(counter.get()?.last_sequence).toBe(2)
       expect(
         observer.prepare('SELECT id FROM entries WHERE scan_id = ? ORDER BY id').all(previous.id)
       ).toEqual([{ id: 'file' }, { id: 'root' }])
@@ -1471,28 +1522,42 @@ test('readers see only the old snapshot before commit and a failed commit rolls 
   try {
     expect(() => db.publishScan(next, 'root')).toThrow('Controlled publication commit failure')
     expect(db.getPublishedScan()).toEqual(previous)
+    expect(db.getEntry(older.id, 'file')).toEqual(file(older.id))
     expect(db.getEntry(previous.id, 'file')).toEqual(file(previous.id))
     expect(db.getScan(next.id)?.status).toBe('running')
-    expect(counter.get()?.last_sequence).toBe(1)
+    expect(read.all()).toEqual(prior)
+    expect(counter.get()?.last_sequence).toBe(2)
     failCommit = false
     db.publishScan(next, 'root')
-    expect(read.all()).toEqual([{ id: next.id, publication_sequence: 2 }])
-    expect(counter.get()?.last_sequence).toBe(2)
+    expect(read.all()).toEqual([...prior, { id: next.id, publication_sequence: 3 }])
+    expect(counter.get()?.last_sequence).toBe(3)
   } finally {
     commit.mockRestore()
     observer.close()
   }
 })
 
-test('ignores legacy failed or cancelled rows and refuses ambiguous legacy completions', () => {
+test('ignores non-completed rows when discovering Latest and distinguishes their access errors', () => {
   const db = open()
   db.insertScan(scan('failed', 'failed'))
   db.insertScan(scan('cancelled', 'cancelled'))
   expect(db.getPublishedScan()).toBeNull()
-  db.insertScan(scan('first'))
-  db.insertScan(scan('second'))
-  expect(() => db.getPublishedScan()).toThrow('more than one completed scan')
-  expect(() => db.beginScan(building())).toThrow('more than one completed scan')
-  expect(db.getScan('first')?.status).toBe('completed')
-  expect(db.getScan('second')?.status).toBe('completed')
+  const first = db.publishScan(readyScan(db, 'first'), 'root')
+  const second = db.publishScan(readyScan(db, 'second'), 'root')
+  const running = building('running')
+  db.beginScan(running)
+  expect(db.getPublishedScan()).toEqual(second)
+  expect(db.getScan(first.id)).toEqual(first)
+  expect(db.getScan(running.id)).toEqual(running)
+  expect(db.getScan('missing')).toBeNull()
+  for (const id of ['failed', 'cancelled', running.id]) {
+    expect(() => db.requirePublishedScan(id)).toThrow(
+      expect.objectContaining({ code: 'SNAPSHOT_UNAVAILABLE' })
+    )
+  }
+  for (const id of [first.id, 'missing']) {
+    expect(() => db.requirePublishedScan(id)).toThrow(
+      expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
+    )
+  }
 })

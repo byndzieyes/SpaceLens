@@ -508,7 +508,7 @@ test('stops automatic recovery for the same expired reference and offers reload'
     error: { code: 'SNAPSHOT_EXPIRED', message: 'Expired fixture' }
   })
   openInsights()
-  expect(await screen.findByRole('alert')).toHaveTextContent('The saved scan was replaced')
+  expect(await screen.findByRole('alert')).toHaveTextContent('The latest scan changed')
   expect(api.getScanSnapshot).toHaveBeenCalledTimes(2)
   expect(api.getInsightsSummary).toHaveBeenCalledOnce()
   publication = replacement

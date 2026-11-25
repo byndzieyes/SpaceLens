@@ -22,7 +22,7 @@ export function RecentScans({ scan, status }: RecentScansProps): React.JSX.Eleme
         Recent Scans
       </h3>
       <p className="text-xs text-text-secondary">
-        SpaceLens keeps the latest published scan. Sizes show known logical file bytes.
+        Showing the latest completed scan. Sizes show known logical file bytes.
       </p>
       <Card aria-labelledby={titleId} className="min-w-0">
         {status === 'loading' ? (

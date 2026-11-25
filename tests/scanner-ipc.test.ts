@@ -6,12 +6,13 @@ import { app, dialog, ipcMain, type IpcMainInvokeEvent, type WebContents } from 
 import { IPC_CHANNELS, type ScannerIpcResult, type ScanStateSnapshot } from '../src/shared/ipc'
 import { INSIGHTS_SIZE_BUCKETS } from '../src/shared/insights'
 import type { CompletedScan } from '../src/main/storage/payloads'
-import type { ScanSessionState } from '../src/shared/scan'
+import type { FileEntry, ScanSessionState } from '../src/shared/scan'
 import type { ScanSessionManager, ScanSessionSubscriber } from '../src/main/scanner/sessionManager'
 import { registerScannerIpc, registerScannerShutdown } from '../src/main/scannerIpc'
 import { registerAppInfoHandler } from '../src/main/ipc'
 import { verifyScanDirectory } from '../src/main/scanner/directoryApproval'
 import { ScanStorageError } from '../src/main/scanner/persistence'
+import { ScanDatabase } from '../src/main/storage/database'
 import {
   StorageUnavailableError,
   type ScanStorageCoordinator
@@ -268,6 +269,78 @@ test('keeps the acknowledged publication when recovery or later unsuccessful ses
         latestCompleted: { id: scan.id, completedAt: scan.finishedAt }
       }
     })
+  }
+})
+
+test('restores Latest to Overview and restricts Explorer and Insights to it with retained history', async () => {
+  const db = new ScanDatabase(':memory:')
+  try {
+    const previous = completed()
+    const latest = { ...previous, id: otherId, finishedAt: '2026-11-10T12:00:00Z' }
+    const root: FileEntry = {
+      id: 'root',
+      scanId: latest.id,
+      parentId: null,
+      name: 'approved-fixture',
+      path: rootPath,
+      type: 'directory',
+      sizeBytes: null,
+      aggregatedSizeBytes: null,
+      createdAt: null,
+      modifiedAt: null
+    }
+    for (const scan of [previous, latest]) {
+      db.beginScan({
+        ...scan,
+        status: 'running',
+        finishedAt: null,
+        summary: { ...scan.summary, directoryCount: 0 }
+      })
+      const directory = { ...root, scanId: scan.id }
+      db.applyBatch(scan.id, [
+        { type: 'entry', entry: directory },
+        {
+          type: 'directory-finalized',
+          entry: { ...directory, type: 'directory', aggregatedSizeBytes: 0 }
+        }
+      ])
+      db.publishScan(scan, root.id)
+    }
+    db.recoverStorage()
+    await attachWithRecovery(Promise.resolve(db.getPublishedScan()))
+    expect(invoke(IPC_CHANNELS.getScanState)).toMatchObject({
+      ok: true,
+      value: { state: null, latestCompleted: { id: latest.id, completedAt: latest.finishedAt } }
+    })
+
+    queries.getScanEntry.mockImplementation(async (request) => db.getScanEntry(request))
+    queries.requirePublishedScan.mockImplementation(async (scanId) =>
+      db.requirePublishedScan(scanId)
+    )
+    const entry = { scanId: previous.id, entryId: root.id }
+    expect(db.getEntry(previous.id, root.id)).toEqual({
+      ...root,
+      scanId: previous.id,
+      aggregatedSizeBytes: 0
+    })
+    expect(await invoke(IPC_CHANNELS.getScanEntry, [entry], event(makeRenderer()))).toMatchObject({
+      ok: false,
+      error: { code: 'UNAUTHORIZED' }
+    })
+    expect(await invoke(IPC_CHANNELS.getScanEntry, [entry])).toMatchObject({
+      ok: false,
+      error: { code: 'SNAPSHOT_EXPIRED' }
+    })
+    expect(await invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: previous.id }])).toMatchObject({
+      ok: false,
+      error: { code: 'SNAPSHOT_EXPIRED' }
+    })
+    expect(await invoke(IPC_CHANNELS.getInsightsSummary, [{ scanId: latest.id }])).toMatchObject({
+      ok: true,
+      value: { scanId: latest.id, completedAt: latest.finishedAt }
+    })
+  } finally {
+    db.close()
   }
 })
 

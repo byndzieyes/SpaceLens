@@ -50,6 +50,9 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       requireDatabase().recoverStorage()
       return null
     case 'insertScan':
+      if (request.payload.status === 'completed') {
+        throw new Error('Completed scans must be created through publication.')
+      }
       writableDatabase().insertScan(request.payload)
       return null
     case 'beginScan':
@@ -86,9 +89,16 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().getScanDirectoryTreemap(request.payload)
     case 'getScan':
       return requireDatabase().getScan(request.payload.id)
-    case 'insertEntry':
-      writableDatabase().insertEntry(request.payload)
+    case 'insertEntry': {
+      const db = writableDatabase()
+      db.transaction(() => {
+        if (db.getScan(request.payload.scanId)?.status === 'completed') {
+          throw new Error('Entries cannot be added to a completed scan.')
+        }
+        db.insertEntry(request.payload)
+      })
       return null
+    }
     case 'applyBatch':
       writableDatabase().applyBatch(request.payload.scanId, request.payload.operations)
       return null

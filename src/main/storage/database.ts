@@ -48,10 +48,9 @@ import { PublishedAnalytics } from './publishedAnalytics'
 
 const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
 const SQLITE_PAGE_CACHE_KIB = 64 * 1024
-const SELECT_SCAN = `
-  SELECT id, root_path, status, started_at, finished_at, total_bytes, file_count,
-         directory_count, error_count FROM scans
-`
+const SCAN_COLUMNS = `id, root_path, status, started_at, finished_at, total_bytes, file_count,
+         directory_count, error_count`
+const SELECT_SCAN = `SELECT ${SCAN_COLUMNS}, publication_sequence FROM scans`
 const ENTRY_COLUMNS = `entry.scan_id, entry.id, entry.parent_id, entry.name, entry.path, entry.type,
          entry.size_bytes, entry.aggregated_size_bytes, entry.created_at, entry.modified_at
 `
@@ -147,13 +146,25 @@ function validateEntryReference(entry: FileEntry): FileEntry {
   return entry
 }
 
-function readSinglePublication(statement: StatementSync): CompletedScan | null {
-  const [row, other] = statement.all()
-  if (other) throw new Error('The database has more than one completed scan.')
-  if (!row) return null
-  const scan = readScan(row)
+function requireCompletedScan(scan: ScanSession): CompletedScan {
   if (scan.status !== 'completed') throw new Error('Invalid persisted publication status.')
   return { ...scan, status: scan.status }
+}
+
+function readLegacyPublication(statement: StatementSync): CompletedScan | null {
+  const [row, other] = statement.all()
+  if (other) throw new Error('The database has more than one completed scan.')
+  return row ? requireCompletedScan(readScan(row)) : null
+}
+
+function readSequencedScan(row: Record<string, SQLOutputValue>): ScanSession {
+  const sequence = row.publication_sequence
+  if (
+    row.status === 'completed' ? typeof sequence !== 'bigint' || sequence <= 0n : sequence !== null
+  ) {
+    throw new Error('Invalid scan publication sequence.')
+  }
+  return readScan(row)
 }
 
 function validatePublishedRoot(scan: CompletedScan, root: FileEntry | null): FileEntry {
@@ -226,10 +237,10 @@ export class ScanDatabase {
   private readonly analytics: PublishedAnalytics
   private readonly insertScanStatement: StatementSync
   private readonly selectScanStatement: StatementSync
-  private readonly selectPublishedStatement: StatementSync
+  private readonly selectLatestScanStatement: StatementSync
   private readonly selectOtherBuildingStatement: StatementSync
   private readonly completeScanStatement: StatementSync
-  private readonly deleteScanStatement: StatementSync
+  private readonly deleteBuildingScanStatement: StatementSync
   private readonly selectRootIdStatement: StatementSync
   private readonly validateSnapshot: (scan: CompletedScan) => void
   private readonly insertEntryStatement: StatementSync
@@ -254,16 +265,15 @@ export class ScanDatabase {
       if (this.connection.prepare('PRAGMA foreign_keys').get()?.foreign_keys !== 1) {
         throw new Error('SQLite foreign-key enforcement is unavailable.')
       }
-      // Retiring a large scan touches several indexes with unrelated page orderings.
-      // A bounded connection-local cache limits page churn during atomic replacement.
+      // A bounded connection-local cache limits page churn while scanning and recovering.
       this.connection.exec(`PRAGMA main.cache_size = -${SQLITE_PAGE_CACHE_KIB}`)
       inTransaction(this.connection, () =>
         initializeSchema(this.connection, () => {
           const legacy = this.connection.prepare(
-            `${SELECT_SCAN} WHERE status = 'completed' LIMIT 2`
+            `SELECT ${SCAN_COLUMNS} FROM scans WHERE status = 'completed' LIMIT 2`
           )
           legacy.setReadBigInts(true)
-          const published = readSinglePublication(legacy)
+          const published = readLegacyPublication(legacy)
           recoverScans(this.connection, published)
           return published?.id ?? null
         })
@@ -278,10 +288,10 @@ export class ScanDatabase {
       `)
       this.selectScanStatement = this.connection.prepare(`${SELECT_SCAN} WHERE id = ?`)
       this.selectScanStatement.setReadBigInts(true)
-      this.selectPublishedStatement = this.connection.prepare(
-        `${SELECT_SCAN} WHERE status = 'completed' ORDER BY publication_sequence DESC LIMIT 2`
+      this.selectLatestScanStatement = this.connection.prepare(
+        `${SELECT_SCAN} WHERE status = 'completed' ORDER BY publication_sequence DESC LIMIT 1`
       )
-      this.selectPublishedStatement.setReadBigInts(true)
+      this.selectLatestScanStatement.setReadBigInts(true)
       this.selectOtherBuildingStatement = this.connection.prepare(`
         SELECT id FROM scans WHERE status = 'running' AND id <> ? LIMIT 1
       `)
@@ -290,8 +300,8 @@ export class ScanDatabase {
                          file_count = ?, directory_count = ?, error_count = ?, publication_sequence = ?
         WHERE id = ? AND status = 'running'
       `)
-      this.deleteScanStatement = this.connection.prepare(
-        'DELETE FROM scans WHERE id = ? AND status = ?'
+      this.deleteBuildingScanStatement = this.connection.prepare(
+        "DELETE FROM scans WHERE id = ? AND status = 'running'"
       )
       this.selectRootIdStatement = this.connection.prepare(
         'SELECT id FROM entries WHERE scan_id = ? AND parent_id IS NULL'
@@ -430,10 +440,11 @@ export class ScanDatabase {
     )
   }
 
+  /** Internal by-ID metadata lookup, including retained and running scans. */
   getScan(id: string): ScanSession | null {
     this.requireOpen()
     const row = this.selectScanStatement.get(id)
-    return row ? readScan(row) : null
+    return row ? readSequencedScan(row) : null
   }
 
   /** Startup only. SQLite has already resolved any interrupted journal on open. */
@@ -450,7 +461,7 @@ export class ScanDatabase {
     this.transaction(() => {
       if (this.getScan(scan.id)) throw new Error(`Scan ${scan.id} already exists.`)
       this.requireOnlyBuildingScan(scan.id)
-      this.getPublishedScan() // Refuse an ambiguous pre-existing publication before starting work.
+      readPublicationCounter(this.connection)
       this.insertScan(scan)
     })
   }
@@ -470,7 +481,6 @@ export class ScanDatabase {
 
       this.validatePublishedTree(scan, rootEntryId)
 
-      const previous = this.getPublishedScan()
       const sequence = nextPublicationSequence(this.connection)
       const { totalBytes, fileCount, directoryCount, errorCount } = scan.summary
       const result = this.completeScanStatement.run(
@@ -483,13 +493,10 @@ export class ScanDatabase {
         scan.id
       )
       if (result.changes !== 1) throw new Error(`Could not promote scan ${scan.id}.`)
-      if (previous && this.deleteScanStatement.run(previous.id, 'completed').changes !== 1) {
-        throw new Error(`Could not retire published scan ${previous.id}.`)
-      }
-      const stored = this.getPublishedScan()
-      if (!stored || stored.id !== scan.id) throw new Error('Could not read the promoted scan.')
       recordPublicationSequence(this.connection, sequence)
-      published = stored
+      const stored = this.getScan(scan.id)
+      if (!stored) throw new Error('Could not read the promoted scan.')
+      published = requireCompletedScan(stored)
     })
     this.analytics.usePublication(published.id)
     return published
@@ -498,15 +505,17 @@ export class ScanDatabase {
   discardBuildingScan(scanId: string): void {
     if (!isSnapshotId(scanId)) throw new TypeError('Discard requires a valid scan ID.')
     this.transaction(() => {
-      if (this.deleteScanStatement.run(scanId, 'running').changes !== 1) {
+      if (this.deleteBuildingScanStatement.run(scanId).changes !== 1) {
         throw new Error(`Scan ${scanId} is not a building scan.`)
       }
     })
   }
 
+  /** Latest completed scan by committed publication order. */
   getPublishedScan(): CompletedScan | null {
     this.requireOpen()
-    return readSinglePublication(this.selectPublishedStatement)
+    const row = this.selectLatestScanStatement.get()
+    return row ? requireCompletedScan(readSequencedScan(row)) : null
   }
 
   getScanSnapshot(): ScanSnapshotAvailability {
@@ -642,17 +651,18 @@ export class ScanDatabase {
   }
 
   requirePublishedScan(scanId: string): CompletedScan {
-    const published = this.getPublishedScan()
-    if (!published || (published.id !== scanId && this.getScan(scanId))) {
+    const latest = this.getPublishedScan()
+    if (latest?.id === scanId) return latest
+
+    const requested = latest ? this.getScan(scanId) : null
+    if (!latest || (requested && requested.status !== 'completed')) {
       throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'This scan has no available snapshot.')
     }
-    if (published.id !== scanId) {
-      throw new SnapshotAccessError(
-        'SNAPSHOT_EXPIRED',
-        'This snapshot reference is no longer available.'
-      )
-    }
-    return published
+    // Explorer and Insights currently expose only Latest, even when older scans are retained.
+    throw new SnapshotAccessError(
+      'SNAPSHOT_EXPIRED',
+      'This snapshot reference is no longer current.'
+    )
   }
 
   private requirePublishedEntry({ scanId, entryId }: ScanEntryRequest): FileEntry {

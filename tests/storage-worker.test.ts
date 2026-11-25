@@ -181,7 +181,7 @@ test('round-trips scan-scoped entries, large safe integers, zero, nulls, and Uni
   const client = bundled()
   await client.initialize(databasePath)
   const maximum = Number.MAX_SAFE_INTEGER
-  const completed: ScanSession = {
+  const completed: CompletedScan = {
     ...scan,
     id: 'scan-b',
     status: 'completed',
@@ -201,9 +201,24 @@ test('round-trips scan-scoped entries, large safe integers, zero, nulls, and Uni
     path: join(completed.rootPath, fileName),
     sizeBytes: maximum
   }
+  await expect(client.insertScan(completed)).rejects.toThrow('must be created through publication')
+  await client.beginScan({
+    ...completed,
+    status: 'running',
+    finishedAt: null,
+    summary: scan.summary
+  })
+  await client.applyBatch(completed.id, [
+    { type: 'entry', entry: { ...secondRoot, aggregatedSizeBytes: null } },
+    { type: 'entry', entry: secondFile },
+    {
+      type: 'directory-finalized',
+      entry: { ...secondRoot, type: 'directory', aggregatedSizeBytes: maximum }
+    }
+  ])
+  await client.publishScan(completed, secondRoot.id)
   await client.insertScan(scan)
-  await client.insertScan(completed)
-  for (const entry of [root, file, secondRoot, secondFile]) await client.insertEntry(entry)
+  for (const entry of [root, file]) await client.insertEntry(entry)
 
   await expect(client.getScan(scan.id)).resolves.toEqual(scan)
   await expect(client.getScan(completed.id)).resolves.toEqual(completed)
@@ -445,6 +460,8 @@ test('coordinates a real Worker after startup and prioritizes publication over E
       entries: [{ id: file.id, parentId: root.id }]
     })
     expect(await page).toMatchObject({ scanId: next.id, totalCount: 1, nextOffset: null })
+    await expect(client.getScan(old.id)).resolves.toEqual(old)
+    await expect(client.getEntry(old.id, file.id)).resolves.toEqual({ ...file, scanId: old.id })
   } finally {
     storage.stopReads()
     release.resolve()
@@ -1308,26 +1325,31 @@ test('an interrupted worker migration leaves the v1 schema and rows available fo
 test('makes a failed startup recovery terminal without removing persisted rows', async () => {
   const seed = bundled()
   await seed.initialize(databasePath)
+  const older = await preparePublication(seed, lifecycleScan('older'))
+  await seed.publishScan(older, root.id)
   const previous = await preparePublication(seed, lifecycleScan('previous'))
   await seed.publishScan(previous, root.id)
   await preparePublication(seed, lifecycleScan('interrupted'))
-  await seed.insertScan({ ...previous, id: 'ambiguous' })
   await seed.dispose()
+  {
+    using sql = new DatabaseSync(databasePath)
+    sql.prepare('UPDATE scans SET file_count = 2 WHERE id = ?').run(previous.id)
+  }
 
   const client = bundled()
   await client.initialize(databasePath)
-  await expect(client.recoverStorage()).rejects.toThrow('more than one completed scan')
+  await expect(client.recoverStorage()).rejects.toThrow('differ from the scan summary')
   await expect(client.beginScan(lifecycleScan('new'))).rejects.toThrow(
-    'more than one completed scan'
+    'differ from the scan summary'
   )
-  await expect(client.dispose()).rejects.toThrow('more than one completed scan')
+  await expect(client.dispose()).rejects.toThrow('differ from the scan summary')
   using observer = new DatabaseSync(databasePath, { readOnly: true })
   expect(observer.prepare('SELECT id, status FROM scans ORDER BY id').all()).toEqual([
-    { id: 'ambiguous', status: 'completed' },
     { id: 'interrupted', status: 'running' },
+    { id: 'older', status: 'completed' },
     { id: 'previous', status: 'completed' }
   ])
-  expect(observer.prepare('SELECT COUNT(*) AS count FROM entries').get()?.count).toBe(4)
+  expect(observer.prepare('SELECT COUNT(*) AS count FROM entries').get()?.count).toBe(6)
 })
 
 test.each(['before commit', 'before acknowledgment'])(
@@ -1359,6 +1381,8 @@ test.each(['before commit', 'before acknowledgment'])(
     const client = wrap(worker)
     await client.initialize(databasePath)
     await client.recoverStorage()
+    const older = await preparePublication(client, lifecycleScan('older'))
+    await client.publishScan(older, root.id)
     const previous = await preparePublication(client, lifecycleScan('previous'))
     await client.publishScan(previous, root.id)
     const next = await preparePublication(client, lifecycleScan('next'))
@@ -1372,20 +1396,29 @@ test.each(['before commit', 'before acknowledgment'])(
     const reopened = bundled()
     await reopened.initialize(databasePath)
     await reopened.recoverStorage()
-    const [retained, removed] = point === 'before commit' ? [previous, next] : [next, previous]
-    await expect(reopened.getPublishedScan()).resolves.toEqual(retained)
-    await expect(reopened.getEntry(retained.id, file.id)).resolves.toEqual({
-      ...file,
-      scanId: retained.id
-    })
-    await expect(reopened.getScan(removed.id)).resolves.toBeNull()
-    await expect(reopened.getEntry(removed.id, file.id)).resolves.toBeNull()
-    await expect(reopened.discardBuildingScan(removed.id)).rejects.toThrow('not a building scan')
-    await expect(reopened.getPublishedScan()).resolves.toEqual(retained)
+    const committed = point === 'before acknowledgment'
+    const retained = committed ? [older, previous, next] : [older, previous]
+    for (const saved of retained) {
+      await expect(reopened.getScan(saved.id)).resolves.toEqual(saved)
+      await expect(reopened.getEntry(saved.id, file.id)).resolves.toEqual({
+        ...file,
+        scanId: saved.id
+      })
+    }
+    if (!committed) {
+      await expect(reopened.getScan(next.id)).resolves.toBeNull()
+      await expect(reopened.getEntry(next.id, file.id)).resolves.toBeNull()
+    }
+    await expect(reopened.discardBuildingScan(next.id)).rejects.toThrow('not a building scan')
+    await expect(reopened.getPublishedScan()).resolves.toEqual(retained.at(-1))
+    using observer = new DatabaseSync(databasePath, { readOnly: true })
+    expect(
+      observer.prepare('SELECT last_sequence FROM scan_publication_counter').get()?.last_sequence
+    ).toBe(retained.length)
   }
 )
 
-test('publishes over the worker boundary after commit and reopens the replacement', async () => {
+test('publishes over the worker boundary and reopens all committed snapshots', async () => {
   const client = bundled()
   await client.initialize(databasePath)
   await expect(client.getPublishedScan()).resolves.toBeNull()
@@ -1409,13 +1442,16 @@ test('publishes over the worker boundary after commit and reopens the replacemen
 
   const observer = new DatabaseSync(databasePath, { readOnly: true })
   try {
-    expect(observer.prepare('SELECT id, status FROM scans').all()).toEqual([
+    expect(
+      observer.prepare('SELECT id, status FROM scans ORDER BY publication_sequence').all()
+    ).toEqual([
+      { id: previous.id, status: 'completed' },
       { id: next.id, status: 'completed' }
     ])
     expect(
       observer.prepare('SELECT COUNT(*) AS count FROM entries WHERE scan_id = ?').get(previous.id)
         ?.count
-    ).toBe(0)
+    ).toBe(2)
   } finally {
     observer.close()
   }
@@ -1423,8 +1459,51 @@ test('publishes over the worker boundary after commit and reopens the replacemen
 
   const reopened = bundled()
   await reopened.initialize(databasePath)
+  await reopened.recoverStorage()
   await expect(reopened.getPublishedScan()).resolves.toEqual(next)
   await expect(reopened.getEntry(next.id, file.id)).resolves.toEqual({ ...file, scanId: next.id })
+  await expect(reopened.getEntry(previous.id, file.id)).resolves.toEqual({
+    ...file,
+    scanId: previous.id
+  })
+})
+
+test('rejects direct inserts and scanner writes to retained snapshots and discards only the building scan', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  const previous = await preparePublication(client, lifecycleScan('older'))
+  await client.publishScan(previous, root.id)
+  const latest = await preparePublication(client, lifecycleScan('latest'))
+  await client.publishScan(latest, root.id)
+  const abandoned = await preparePublication(client, lifecycleScan('abandoned'))
+  await expect(client.beginScan(lifecycleScan('second-building'))).rejects.toThrow('already active')
+
+  for (const { id } of [previous, latest]) {
+    const extraFile = { ...file, scanId: id, id: 'extra' }
+    await expect(client.insertEntry(extraFile)).rejects.toThrow(
+      'cannot be added to a completed scan'
+    )
+    await expect(client.applyBatch(id, [{ type: 'entry', entry: extraFile }])).rejects.toThrow(
+      'not running'
+    )
+    await expect(
+      client.applyBatch(id, [
+        {
+          type: 'directory-finalized',
+          entry: { ...root, scanId: id, type: 'directory', aggregatedSizeBytes: 1 }
+        }
+      ])
+    ).rejects.toThrow('not running')
+    await expect(client.getEntry(id, extraFile.id)).resolves.toBeNull()
+  }
+  await client.discardBuildingScan(abandoned.id)
+  await expect(client.getScan(abandoned.id)).resolves.toBeNull()
+  await expect(client.getEntry(abandoned.id, file.id)).resolves.toBeNull()
+  await expect(client.getPublishedScan()).resolves.toEqual(latest)
+  for (const saved of [previous, latest]) {
+    await expect(client.getScan(saved.id)).resolves.toEqual(saved)
+    await expect(client.getEntry(saved.id, file.id)).resolves.toEqual({ ...file, scanId: saved.id })
+  }
 })
 
 test('validates lifecycle payloads and scopes discard and stale requests to their scan', async () => {

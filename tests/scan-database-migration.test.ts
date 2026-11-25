@@ -54,7 +54,9 @@ function readLegacyRows(sql: DatabaseSync): unknown {
 
 function readSequences(): unknown {
   using sql = new DatabaseSync(path, { readOnly: true })
-  const rows = sql.prepare("SELECT id, publication_sequence FROM scans WHERE status = 'completed'")
+  const rows = sql.prepare(
+    "SELECT id, publication_sequence FROM scans WHERE status = 'completed' ORDER BY publication_sequence"
+  )
   const counter = sql.prepare('SELECT last_sequence FROM scan_publication_counter')
   rows.setReadBigInts(true)
   counter.setReadBigInts(true)
@@ -173,10 +175,11 @@ test('allocates in commit order across time ties, clock changes, reopen, and del
     const second = readyScan(db, 'second')
     db.publishScan(second, legacyEntries.root.id)
     expect(db.getPublishedScan()).toEqual(second)
-    expect(readSequences()).toEqual({
-      last: 2n,
-      rows: [{ id: second.id, publication_sequence: 2n }]
-    })
+    const retained = [
+      { id: legacyScan.id, publication_sequence: 1n },
+      { id: second.id, publication_sequence: 2n }
+    ]
+    expect(readSequences()).toEqual({ last: 2n, rows: retained })
     db.close()
     db = new ScanDatabase(path)
     db.recoverStorage()
@@ -185,7 +188,7 @@ test('allocates in commit order across time ties, clock changes, reopen, and del
     expect(db.getPublishedScan()).toEqual(third)
     expect(readSequences()).toEqual({
       last: 3n,
-      rows: [{ id: third.id, publication_sequence: 3n }]
+      rows: [...retained, { id: third.id, publication_sequence: 3n }]
     })
     db.close()
     {
@@ -194,12 +197,14 @@ test('allocates in commit order across time ties, clock changes, reopen, and del
     }
     db = new ScanDatabase(path)
     db.recoverStorage()
-    expect(db.getPublishedScan()).toBeNull()
+    expect(db.getPublishedScan()).toEqual(second)
+    expect(db.getScan(legacyScan.id)).toEqual(legacyScan)
+    for (const entry of entries) expect(db.getEntry(legacyScan.id, entry.id)).toEqual(entry)
     const fourth = readyScan(db, 'fourth')
     db.publishScan(fourth, legacyEntries.root.id)
     expect(readSequences()).toEqual({
       last: 4n,
-      rows: [{ id: fourth.id, publication_sequence: 4n }]
+      rows: [...retained, { id: fourth.id, publication_sequence: 4n }]
     })
   } finally {
     db.close()
@@ -257,22 +262,23 @@ test.each([
   ['counter behind', 'UPDATE scan_publication_counter SET last_sequence = 0', 'counter is behind'],
   [
     'invalid sequence',
-    "UPDATE scans SET publication_sequence = 0 WHERE status = 'completed'",
+    "UPDATE scans SET publication_sequence = 0 WHERE id = 'older'",
     'Invalid scan publication sequence'
   ],
   [
     'missing sequence',
-    "UPDATE scans SET publication_sequence = NULL WHERE status = 'completed'",
+    "UPDATE scans SET publication_sequence = NULL WHERE id = 'older'",
     'Invalid scan publication sequence'
   ],
   [
     'sequence on running scan',
-    "UPDATE scans SET publication_sequence = 2 WHERE status = 'running'",
+    "UPDATE scans SET publication_sequence = 3 WHERE status = 'running'",
     'Invalid scan publication sequence'
   ]
-])('fails safely on v2 corruption: %s', (_name, corruption, error) => {
+])('fails safely on v2 corruption: %s', (problem, corruption, error) => {
   const db = new ScanDatabase(path)
   try {
+    db.publishScan(readyScan(db, 'older'), legacyEntries.root.id)
     db.publishScan(readyScan(db, 'saved'), legacyEntries.root.id)
     readyScan(db, 'interrupted')
     using sql = new DatabaseSync(path)
@@ -285,13 +291,17 @@ test.each([
     sql.exec(corruption)
     sql.exec(trigger)
 
+    if (problem === 'invalid sequence' || problem === 'missing sequence') {
+      expect(() => db.getScan('older')).toThrow(error)
+    }
     expect(() => db.recoverStorage()).toThrow(error)
     expect(() => new ScanDatabase(path)).toThrow(error)
     expect(sql.prepare('SELECT id FROM scans ORDER BY id').all()).toEqual([
       { id: 'interrupted' },
+      { id: 'older' },
       { id: 'saved' }
     ])
-    expect(sql.prepare('SELECT COUNT(*) AS count FROM entries').get()?.count).toBe(2)
+    expect(sql.prepare('SELECT COUNT(*) AS count FROM entries').get()?.count).toBe(3)
   } finally {
     db.close()
   }

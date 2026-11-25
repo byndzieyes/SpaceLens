@@ -177,7 +177,7 @@ test('reuses all computed sources, full ranking pages, and the observation resul
   expect(kinds).toEqual(['extensions', 'sizeDistribution', 'categories', 'files', 'directories'])
 })
 
-test('preserves warm results through building, failed promotion and cancellation, then invalidates on replacement and restart', () => {
+test('keeps warm results during building, failure and cancellation, then invalidates on Latest change and restart', () => {
   const prev = seed('previous', Array(20).fill(0))
   const executed = measureSql().kinds
   const previous = db.getInsightsObservations(prev.id)
@@ -193,6 +193,7 @@ test('preserves warm results through building, failed promotion and cancellation
   expect(db.getInsightsObservations(prev.id)).toBe(previous)
   expect(executed).toEqual(['sizeDistribution'])
   const next = seed('replacement', [0, null])
+  expect(db.getScan(prev.id)).toEqual(prev)
   expect(() => db.getInsightsObservations(prev.id)).toThrow(
     expect.objectContaining({ code: 'SNAPSHOT_EXPIRED' })
   )
@@ -202,6 +203,7 @@ test('preserves warm results through building, failed promotion and cancellation
   db.close()
   db = new ScanDatabase(databasePath)
   db.recoverStorage()
+  expect(db.getScan(prev.id)).toEqual(prev)
   expect(db.getInsightsObservations(next.id)).toEqual(replacement)
   expect(executed).toEqual(['sizeDistribution', 'sizeDistribution', 'sizeDistribution'])
 })

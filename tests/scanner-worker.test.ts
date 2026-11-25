@@ -294,7 +294,13 @@ test('runs live scans through SQLite and keeps the prior publication through can
         .every(({ entry }) => entry.scanId === second.id)
     ).toBe(true)
     expect(await storage.getPublishedScan()).toEqual(second)
-    expect(await storage.getScan(first.id)).toBeNull()
+    expect(await storage.getScan(first.id)).toEqual(first)
+    expect(await storage.getEntry(first.id, empty.id)).toEqual(empty)
+    await expect(
+      storage.getScanEntry({ scanId: first.id, entryId: empty.id })
+    ).rejects.toMatchObject({
+      code: 'SNAPSHOT_EXPIRED'
+    })
     const saved = (await requests.read(signal, (db) => db.getScanSnapshot())).snapshot!
     expect(saved.entries.scanId).toBe(second.id)
     expect(saved.entryCount).toBe(132)

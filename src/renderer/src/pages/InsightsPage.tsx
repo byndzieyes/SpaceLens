@@ -17,7 +17,7 @@ import { useInsights } from '../features/insights/useInsights'
 import { formatScanDate } from '../features/overview/recentScanUtils'
 
 const errorMessages = {
-  expired: 'The saved scan was replaced. Reload to see the latest completed scan.',
+  expired: 'The latest scan changed. Reload to see the current results.',
   unavailable: 'This saved scan is no longer available. Reload to check for a completed scan.',
   read: 'SpaceLens couldn’t load the saved scan. Try again.'
 }
