@@ -391,6 +391,77 @@ async function preparePublication(
   return readyMetadata(pending)
 }
 
+test('reads bounded comparison matches through the bundled Worker queue and rebuilds them after restart', async () => {
+  const client = bundled()
+  await client.initialize(databasePath)
+  await client.recoverStorage()
+  const storage = new ScanStorageCoordinator(Promise.resolve(client))
+  const { signal } = new AbortController()
+  const before = await preparePublication(storage, lifecycleScan('before'))
+  await storage.publishScan(before, root.id)
+  const target = lifecycleScan('target')
+  const targetFile = { ...file, id: 'different-id', scanId: target.id, modifiedAt: null }
+  await storage.beginScan(target)
+  await storage.applyBatch(target.id, [
+    { type: 'entry', entry: { ...root, scanId: target.id } },
+    { type: 'entry', entry: targetFile },
+    {
+      type: 'directory-finalized',
+      entry: { ...root, scanId: target.id, type: 'directory', aggregatedSizeBytes: 0 }
+    }
+  ])
+  await storage.publishScan(
+    { ...readyMetadata(target), summary: { ...readyMetadata(target).summary, errorCount: 1 } },
+    root.id
+  )
+  const pair = { baselineScanId: before.id, targetScanId: target.id }
+  await expect(client.listComparisonMatches({ ...pair, limit: 101 })).rejects.toMatchObject({
+    code: 'INVALID_REQUEST'
+  })
+  const firstPage = await storage.read(signal, (db) =>
+    db.listComparisonMatches({ ...pair, limit: 1 })
+  )
+  expect(firstPage.nextAfter).toBe('')
+  expect(firstPage.compatibility).toMatchObject({
+    pair,
+    coverage: { baseline: 'complete', target: 'incomplete' }
+  })
+  expect(firstPage.rows).toMatchObject([
+    {
+      relativePath: '',
+      baseline: { scanId: before.id, id: root.id },
+      target: { scanId: target.id, id: root.id }
+    }
+  ])
+  const cursor = { ...pair, after: '', limit: 1 }
+  const saved = await storage.read(signal, (db) => db.listComparisonMatches(cursor))
+  expect(saved.rows).toMatchObject([
+    { relativePath: fileName, baseline: { scanId: before.id, id: file.id }, target: targetFile }
+  ])
+  expect(saved.nextAfter).toBeNull()
+  const reversed = await storage.read(signal, (db) =>
+    db.listComparisonMatches({
+      baselineScanId: target.id,
+      targetScanId: before.id,
+      after: ''
+    })
+  )
+  expect(reversed.rows).toMatchObject([
+    { relativePath: fileName, baseline: targetFile, target: { scanId: before.id, id: file.id } }
+  ])
+  await client.dispose()
+
+  const reopened = bundled()
+  await reopened.initialize(databasePath)
+  await reopened.recoverStorage()
+  await expect(reopened.listComparisonMatches(cursor)).resolves.toEqual(saved)
+  await reopened.deleteSnapshot({ scanId: before.id })
+  await expect(reopened.listComparisonMatches(cursor)).rejects.toMatchObject({
+    code: 'SNAPSHOT_EXPIRED'
+  })
+  await expect(reopened.getPublishedScan()).resolves.toMatchObject({ id: target.id })
+})
+
 test('coordinates a real Worker after startup and prioritizes publication over Explorer and Insights reads', async () => {
   const client = bundled()
   const ready = Promise.withResolvers<StorageWorkerClient>()

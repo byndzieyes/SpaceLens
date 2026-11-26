@@ -16,6 +16,7 @@ import type {
   InsightsSizeDistribution
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
+import type { ComparisonMatchPage, ComparisonMatchQuery } from './comparisonMatchContracts'
 import type {
   ScanDirectoryPage,
   ScanDirectoryRequest,
@@ -137,6 +138,10 @@ export class StorageWorkerClient {
 
   getScanHistoryMetadata(request: ScanHistoryMetadataRequest): Promise<ScanHistoryItem> {
     return this.run('getScanHistoryMetadata', request)
+  }
+
+  listComparisonMatches(query: ComparisonMatchQuery): Promise<ComparisonMatchPage> {
+    return this.run('listComparisonMatches', query)
   }
 
   async deleteSnapshot(request: SnapshotDeletionRequest): Promise<CommittedSnapshotDeletion> {

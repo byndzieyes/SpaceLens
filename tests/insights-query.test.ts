@@ -21,6 +21,7 @@ const queries = {
   requireValidatedScan: vi.fn<StorageWorkerClient['requireValidatedScan']>(),
   listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
   getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
+  listComparisonMatches: vi.fn<StorageWorkerClient['listComparisonMatches']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
   getInsightsSizeDistribution: vi.fn<StorageWorkerClient['getInsightsSizeDistribution']>(),
   getInsightsObservations: vi.fn<StorageWorkerClient['getInsightsObservations']>(),

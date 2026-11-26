@@ -17,6 +17,11 @@ import type {
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
+  comparisonMetadataForStoredScan,
+  evaluateComparisonCompatibility
+} from '../comparison/compatibility'
+import { isComparisonPathKey } from '../comparison/paths'
+import {
   MAX_SCAN_TREEMAP_ENTRIES,
   type ScanDirectoryPage,
   type ScanDirectoryRequest,
@@ -59,8 +64,14 @@ import {
 import { initializeSchema } from './schema'
 import { bindFilesystemText, readFilesystemText } from './filesystemText'
 import { PublishedAnalytics } from './publishedAnalytics'
+import {
+  ComparisonStorageError,
+  readComparisonMatchQuery,
+  type ComparisonMatchPage
+} from './comparisonMatchContracts'
+import { ComparisonWorkspace } from './comparisonWorkspace'
+import { entryColumns, MAX_SAFE_INTEGER, readEntry, readInteger, readText } from './entryRows'
 
-const MAX_SAFE_INTEGER = BigInt(Number.MAX_SAFE_INTEGER)
 const SQLITE_PAGE_CACHE_KIB = 64 * 1024
 const SCAN_COLUMNS = `id, root_path, status, started_at, finished_at, total_bytes, file_count,
          directory_count, error_count`
@@ -73,9 +84,7 @@ const HISTORY_ORDER: Record<ScanHistorySort, string> = {
   'size-asc': 'total_bytes ASC, publication_sequence DESC',
   'size-desc': 'total_bytes DESC, publication_sequence DESC'
 }
-const ENTRY_COLUMNS = `entry.scan_id, entry.id, entry.parent_id, entry.name, entry.path, entry.type,
-         entry.size_bytes, entry.aggregated_size_bytes, entry.created_at, entry.modified_at
-`
+const ENTRY_COLUMNS = entryColumns('entry')
 const SELECT_ENTRY = `SELECT ${ENTRY_COLUMNS} FROM entries AS entry`
 const DEEP_DIRECTORY_OFFSET = 10_000
 const MAX_VALIDATED_SNAPSHOTS = 8
@@ -94,18 +103,6 @@ function bindInteger(value: number, column: string): bigint {
     throw new RangeError(`${column} must be a non-negative safe integer.`)
   }
   return BigInt(value)
-}
-
-function readInteger(value: SQLOutputValue, column: string): number {
-  if (typeof value !== 'bigint' || value < 0n || value > MAX_SAFE_INTEGER) {
-    throw new RangeError(`Stored ${column} is outside the non-negative safe integer range.`)
-  }
-  return Number(value)
-}
-
-function readText(value: SQLOutputValue, column: string): string {
-  if (typeof value !== 'string') throw new TypeError(`Stored ${column} must be text.`)
-  return value
 }
 
 function readScan(row: Record<string, SQLOutputValue>): ScanSession {
@@ -131,34 +128,6 @@ function readScan(row: Record<string, SQLOutputValue>): ScanSession {
       return { ...scan, status: row.status, finishedAt: readText(row.finished_at, 'finishedAt') }
     default:
       throw new Error('Stored scan has an invalid status.')
-  }
-}
-
-function readEntry(row: Record<string, SQLOutputValue>): FileEntry {
-  const { type } = row
-  if (
-    type !== 'file' &&
-    type !== 'directory' &&
-    type !== 'symlink' &&
-    type !== 'other' &&
-    type !== 'unknown'
-  ) {
-    throw new Error('Stored entry has an invalid type.')
-  }
-  return {
-    id: readText(row.id, 'entry ID'),
-    scanId: readText(row.scan_id, 'scan ID'),
-    parentId: row.parent_id === null ? null : readText(row.parent_id, 'parent ID'),
-    name: readFilesystemText(row.name, 'name'),
-    path: readFilesystemText(row.path, 'path'),
-    type,
-    sizeBytes: row.size_bytes === null ? null : readInteger(row.size_bytes, 'sizeBytes'),
-    aggregatedSizeBytes:
-      row.aggregated_size_bytes === null
-        ? null
-        : readInteger(row.aggregated_size_bytes, 'aggregatedSizeBytes'),
-    createdAt: row.created_at === null ? null : readText(row.created_at, 'createdAt'),
-    modifiedAt: row.modified_at === null ? null : readText(row.modified_at, 'modifiedAt')
   }
 }
 
@@ -296,6 +265,7 @@ function inTransaction(
 export class ScanDatabase {
   private readonly connection: DatabaseSync
   private readonly analytics: PublishedAnalytics
+  private readonly comparison: ComparisonWorkspace
   private readonly insertScanStatement: StatementSync
   private readonly selectScanStatement: StatementSync
   private readonly selectLatestScanStatement: StatementSync
@@ -332,6 +302,7 @@ export class ScanDatabase {
       }
       // A bounded connection-local cache limits page churn while scanning and recovering.
       this.connection.exec(`PRAGMA main.cache_size = -${SQLITE_PAGE_CACHE_KIB}`)
+      this.connection.exec('PRAGMA temp_store = FILE')
       inTransaction(this.connection, () =>
         initializeSchema(this.connection, () => {
           const legacy = this.connection.prepare(
@@ -344,6 +315,7 @@ export class ScanDatabase {
         })
       )
       this.analytics = new PublishedAnalytics(this.connection)
+      this.comparison = new ComparisonWorkspace(this.connection)
       // BLOB byte offsets can split UTF-16 code units. Match decoded text at code-unit boundaries.
       this.connection.function(
         'history_path_contains',
@@ -673,6 +645,7 @@ export class ScanDatabase {
     if (deleted) {
       this.validatedSnapshots.delete(scanId)
       this.analytics.invalidate(scanId)
+      this.comparison.invalidate(scanId)
     }
     if (deletedLatest) this.validatedLatestId = undefined
     return deleted
@@ -747,6 +720,55 @@ export class ScanDatabase {
       'BEGIN'
     )
     return item
+  }
+
+  /** Internal keyset page of observations. All source reads belong to the same transaction. */
+  listComparisonMatches(request: unknown): ComparisonMatchPage {
+    this.requireOpen()
+    const query = readComparisonMatchQuery(request)
+    const { baselineScanId, targetScanId, after } = query
+    const pair = { baselineScanId, targetScanId }
+    if (baselineScanId === targetScanId) {
+      throw new ComparisonStorageError(
+        'INCOMPATIBLE_SNAPSHOTS',
+        'Comparing the same snapshot is unsupported (SAME_SNAPSHOT).'
+      )
+    }
+
+    let page!: ComparisonMatchPage
+    let validated: readonly [ScanSnapshot, ScanSnapshot] | undefined
+    inTransaction(
+      this.connection,
+      () => {
+        const baseline = this.requireCompletedMetadata(baselineScanId)
+        const target = this.requireCompletedMetadata(targetScanId)
+        const compatibility = evaluateComparisonCompatibility(
+          pair,
+          comparisonMetadataForStoredScan(baseline),
+          comparisonMetadataForStoredScan(target)
+        )
+        if (compatibility.status === 'incompatible') {
+          throw new ComparisonStorageError(
+            'INCOMPATIBLE_SNAPSHOTS',
+            `These saved scans are incompatible (${compatibility.reason.code}).`
+          )
+        }
+        if (after !== undefined && !isComparisonPathKey(after, compatibility.pathStyle)) {
+          throw new SnapshotAccessError('INVALID_REQUEST', 'The comparison cursor is invalid.')
+        }
+        if (!this.comparison.matches(pair)) {
+          validated = [this.resolveSavedSnapshot(baseline), this.resolveSavedSnapshot(target)]
+          this.comparison.prepare(compatibility, ...validated)
+        }
+        page = this.comparison.list(compatibility, query)
+      },
+      'BEGIN'
+    )
+    if (validated) {
+      this.comparison.commit(pair)
+      for (const snapshot of validated) this.rememberValidatedSnapshot(snapshot)
+    }
+    return page
   }
 
   private getLatestScanId(): string | null {

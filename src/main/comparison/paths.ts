@@ -6,7 +6,7 @@ function validComponent(component: string, style: ComparisonPathStyle): boolean 
   if (!component || component === '.' || component === '..') return false
   return (
     style === 'posix' ||
-    (!/[<>:"|?*]/.test(component) &&
+    (!/[\\<>:"|?*]/.test(component) &&
       !/[. ]$/.test(component) &&
       !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(component) &&
       ![...component].some((character) => character.charCodeAt(0) < 32))
@@ -54,13 +54,31 @@ export function comparisonPathKey(
   entry: Pick<FileEntry, 'path' | 'parentId' | 'type'>,
   style: ComparisonPathStyle
 ): ComparisonPathKey | null {
+  return createComparisonPathKey(rootPath, style)?.(entry) ?? null
+}
+
+/** Normalize the root once for callers deriving several keys from the same snapshot. */
+export function createComparisonPathKey(
+  rootPath: string,
+  style: ComparisonPathStyle
+): ((entry: Pick<FileEntry, 'path' | 'parentId' | 'type'>) => ComparisonPathKey | null) | null {
   const root = normalizeComparisonRoot(rootPath, style)
-  const isRoot = entry.parentId === null
-  const path = absolutePath(entry.path, style, isRoot)
-  if (root === null || path === null) return null
-  if (isRoot) return path === root && entry.type === 'directory' ? '' : null
+  if (root === null) return null
   const prefix = root.endsWith('/') ? root : root + '/'
-  return path.startsWith(prefix) && path.length > prefix.length ? path.slice(prefix.length) : null
+  return (entry) => {
+    const isRoot = entry.parentId === null
+    const path = absolutePath(entry.path, style, isRoot)
+    if (path === null) return null
+    if (isRoot) return path === root && entry.type === 'directory' ? '' : null
+    return path.startsWith(prefix) && path.length > prefix.length ? path.slice(prefix.length) : null
+  }
+}
+
+export function isComparisonPathKey(key: string, style: ComparisonPathStyle): boolean {
+  return (
+    key === '' ||
+    (!key.includes('\0') && key.split('/').every((part) => validComponent(part, style)))
+  )
 }
 
 /** Find an ambiguous key in one snapshot's sorted stream, without collecting the tree. */
