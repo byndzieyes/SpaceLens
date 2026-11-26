@@ -9,6 +9,7 @@ import type {
   SnapshotView
 } from '../../shared/snapshotSelection'
 import type { ScanSnapshot } from '../../shared/snapshot'
+import { ComparisonSelection, type ComparisonStorage } from './comparisonSelection'
 import { StorageUnavailableError, type ScanStorageCoordinator } from './coordinator'
 import { isSnapshotId, record } from './payloads'
 import { SnapshotAccessError } from './snapshotAccess'
@@ -84,12 +85,15 @@ export function readSelectionView(value: unknown): SnapshotView {
 
 /** One owner per supported view and one provisional replacement per owner. */
 export class ViewSnapshotSelections {
+  readonly comparison: ComparisonSelection
   private readonly views = new Map<SnapshotView, ViewSelection>()
 
   constructor(
-    private readonly storage: Pick<ScanStorageCoordinator, 'read' | 'createSnapshotOwner'>,
+    private readonly storage: Pick<ScanStorageCoordinator, 'read' | 'createSnapshotOwner'> &
+      ComparisonStorage,
     private readonly document: AbortSignal
   ) {
+    this.comparison = new ComparisonSelection(storage, document)
     document.addEventListener(
       'abort',
       () => {

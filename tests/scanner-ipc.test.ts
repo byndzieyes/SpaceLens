@@ -61,6 +61,7 @@ let cancel: ReturnType<typeof vi.fn>
 let dispose: ReturnType<typeof vi.fn>
 let unsubscribe: ReturnType<typeof vi.fn>
 const queries = {
+  getScan: vi.fn<StorageWorkerClient['getScan']>(),
   requireValidatedScan: vi.fn<StorageWorkerClient['requireValidatedScan']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
   getInsightsSizeDistribution: vi.fn<StorageWorkerClient['getInsightsSizeDistribution']>(),
@@ -82,6 +83,9 @@ const queries = {
 }
 const storage = {
   read: (async (_signal, query) => query(queries)) as ScanStorageCoordinator['read'],
+  readPair: (async (_signal, query) => query(queries)) as ScanStorageCoordinator['readPair'],
+  protectComparisonPair: vi.fn<ScanStorageCoordinator['protectComparisonPair']>(),
+  readSignal: new AbortController().signal,
   deleteSnapshot: vi.fn<ScanStorageCoordinator['deleteSnapshot']>(),
   createSnapshotOwner: vi.fn<ScanStorageCoordinator['createSnapshotOwner']>()
 }
@@ -1790,7 +1794,17 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.prepareSnapshotSelection)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.adoptSnapshotSelection)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.releaseSnapshotSelection)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(23)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.evaluateComparisonCompatibility)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.prepareComparisonSelection)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.adoptComparisonSelection)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(
+    IPC_CHANNELS.discardPreparedComparisonSelection
+  )
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.releaseComparisonSelection)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getComparisonSummary)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listComparisonFileChanges)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listComparisonDirectoryChanges)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(31)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

@@ -99,7 +99,7 @@ Temporary storage uses SQLite's file-backed mode with a 4 MiB suggested temporar
 
 The Worker checks both snapshots in the same read transaction as each comparison. Only a successful commit makes a replacement workspace reusable. A failed build rolls back its candidate data. A committed source deletion clears its workspace identity immediately, and the next successful build clears the old temporary rows. Closing the connection or restarting the Worker clears the table. Publication and unrelated deletion leave the workspace valid. The workspace itself holds no view or request leases.
 
-Cold preparation runs in one synchronous Worker request. The coordinator still prioritizes queued scanner writes ahead of queued reads once the active request finishes. Key generation yields no opportunity to preempt the active SQLite request. Scanner acknowledgements can therefore wait for validation and preparation, within the existing storage deadlines. Task 5.16 will add pair authorization and reserve both snapshots for the view and for each scheduled request.
+Cold workspace preparation runs in one synchronous Worker request. The coordinator prioritizes queued scanner writes ahead of queued reads once the active request finishes. Key generation holds the Worker until the SQLite request completes, so scanner acknowledgements can wait behind workspace preparation. The public comparison path authorizes the adopted pair and reserves both snapshots for each scheduled request.
 
 In a disposable Windows run through the production Worker, two historical snapshots had 100,013 entries each. The fixtures included 75,000 matching file paths with independently assigned IDs, 25,000 side-only files per scan, both directions of file and directory replacement, nested directories, Unicode and case variants, and a 70,000-file sibling group. `EXPLAIN QUERY PLAN` showed an indexed `(scan_id, id)` seek for each preparation batch, indexed parent lookups, and a temporary primary-key seek followed by two indexed entry lookups for each page. Both first and cursor pages used that plan without a sort.
 
@@ -180,13 +180,44 @@ The Windows production Worker benchmark used 98,429 entries and 16,925 directori
 
 In the profiled warm-workspace preparation, seeding and parent resolution took 250 ms, direct file aggregation took 511 ms, and reading key batches and rolling them up took 202 ms. The indexed root reconciliation read took 0.023 ms before comparison of the totals. Sampled Worker heap peaked at 24 MiB cold, 10 MiB while preparing directories after the summary, and 11 MiB on warm pages. Matching used 6.73 MiB of SQLite pages on this fixture, compared with Task 5.14's 7.11 MiB on its fixture. Directory state added 5.24 MiB of SQLite pages, for 11.96 MiB total. This excludes temporary grouping and ranking work areas.
 
-Scanner batches acknowledged after 2.44 s during cold directory preparation and 911 ms when the matching workspace already existed, versus 9–10 ms uncontended. They committed ahead of the waiting read. Task 5.14's reference summary took 1.65 s cold and 263 ms on a warm workspace, with scanner acknowledgements of 1.77 s and 274 ms. Directory preparation remains synchronous, and the measured runs completed within the existing deadline. Tasks 5.16 and 5.23 should account for this added Worker occupation when scheduling and benchmarking larger comparisons.
+Scanner batches acknowledged after 2.44 s during cold directory preparation and 911 ms when the matching workspace already existed, versus 9–10 ms uncontended. They committed ahead of the waiting read. Task 5.14's reference summary took 1.65 s cold and 263 ms on a warm workspace, with scanner acknowledgements of 1.77 s and 274 ms.
 
-### Planned authorization and protection
+### Comparison IPC, selection, and protection
 
-Task 5.16 will authorize the exact adopted ordered pair and its adoption identity in Main. Use one registry owner for the adopted pair and one for a single prepared replacement. Each owner holds up to two snapshots, so even a disjoint replacement can validate both candidates while the adopted pair stays protected. Swap only after both candidates validate and the renderer adopts their ticket. Failure, expiry, supersession, view exit, document invalidation, and shutdown release the corresponding owners. This uses at most two of the eight owner slots for Comparison.
+The preload exposes metadata compatibility, prepare and adopt, ticket discard and selection release, Summary, and bounded File and Directory Changes pages. Compatibility uses stored metadata and carries coverage warnings. Preparation atomically reserves both scan IDs, checks compatibility, and validates each saved tree through the historical cache. Main issues one expiring, single-use ticket for the authorized renderer document. Adoption keeps the pair directional and assigns a new selection ID each time. An analytical request must match both IDs and the current adoption, including when the Worker can serve cached data. Publication leaves an explicit pair selected.
 
-Comparison reads will independently reserve both scan IDs from bounded queue admission until the Worker settles or exits. A failed second reservation must release the first. The current 16 queued reads plus one active read would hold at most 34 request leases, alongside up to 16 owner leases, within the 64-ID retention exclusion limit. Publication keeps the pair fixed. A changed adoption invalidates outstanding replies, and a handoff to Explorer keeps the source pair protected until the destination acquires the exact selected snapshot or the handoff ends.
+Comparison uses one owner for the adopted pair and another for one provisional replacement. A disjoint replacement can hold four distinct snapshots. Explorer and Insights each use one owner for up to two snapshots. Across the three views this is four of the eight existing owner slots and up to eight view leases. One active and 16 queued reads can hold up to 34 additional request leases. Even if all eight owner slots were allocated, 50 leases would fit under the 64-ID retention exclusion limit. Both sides reject manual deletion while protected and are excluded from retention pruning. Releasing the last lease lets deferred retention resume. Explorer can prepare and adopt a side through the existing historical selection flow while Comparison retains both sources for the duration of the handoff.
+
+Every admitted comparison read independently reserves both sides. The coordinator removes obsolete queued requests immediately and keeps dispatched holds until the Worker replies or exits. Supersession, view exit, document invalidation, ticket expiry, and shutdown release the affected view owners. Storage exit also invalidates the selection. The shared queue retains its 10-second queue-wait deadline, the Worker retains its 10-second per-command deadline, and preparation tickets expire after 10 seconds. Scanner writes have dispatch priority and their acknowledgements still follow commit.
+
+### Scheduling and Task 5.23
+
+Pair preparation schedules metadata compatibility and each historical validation separately, giving scanner writes a dispatch opportunity between validations. The cold analytical request still builds the matching workspace inside a synchronous transaction. The first directory query can also build its rollup within a single request. The existing SQL batches share a transaction with the workspace and its cache state, so yielding between those batches would let unrelated writes enter an open transaction or require exposing partially built state.
+
+The Task 5.16 benchmark used Node 24.21 on Windows, the production Worker bundle, the real Main IPC handlers, and a simulated Electron sender. The fixture held 98,426 and 98,427 entries, including 16,924 and 16,925 directories. Two newer small publications made both sources historical. The scanner submitted 128-entry batches while comparison operations ran.
+
+| Operation                          |  IPC elapsed | Worker execution | Competing scanner ACK |
+| ---------------------------------- | -----------: | ---------------: | --------------------: |
+| Compatibility                      |       9.2 ms |           1.9 ms |                       |
+| Prepare both historical trees      |       1.18 s |           1.11 s |                629 ms |
+| Adopt                              |      0.94 ms |                  |                       |
+| Cold Summary                       |       8.62 s |           8.61 s |                8.68 s |
+| First File Changes page            |      21.5 ms |          13.3 ms |                       |
+| First Directory Changes page       |       4.05 s |           4.04 s |                4.12 s |
+| Warm Summary, files, directories   | 2.6/17/11 ms |      1.3/13/7 ms |                       |
+| Filtered files, sorted by delta    |       869 ms |           864 ms |                       |
+| Cached preparation in reverse      |       8.1 ms |           3.5 ms |                       |
+| Disjoint replacement prepare/adopt |  13.6/0.5 ms |           8.1 ms |                       |
+| Reversed cold Summary              |       9.06 s |           9.06 s |                9.14 s |
+| Abandon before dispatch            |       3.1 ms |                  |                       |
+
+Warm rows report medians of five calls. Uncontended scanner acknowledgement took 31 ms. The scanner committed between the 566 ms and 541 ms tree validations. Routine dispatch gaps were under 4 ms in this run. A deliberately queued warm request spent 43 ms waiting for dispatch and 1.1 ms executing. SQLite TEMP allocation was 8.36 MiB after matching and 13.66 MiB after directory preparation. Sampled JavaScript heap peaked at 19.13 MiB during comparison work. These samples cover allocated TEMP pages and JavaScript heap.
+
+Timing varied between runs on the same large entry fixture. An earlier run with the Target still Latest measured 1.20 s for cold Summary and 683 ms for first Directory Changes, with scanner acknowledgements of 1.21 s and 694 ms. Both runs completed the representative workflow within the current deadlines. The slower run left less than one second of execution headroom on reversal.
+
+The stress fixture held 210,551 and 210,552 entries, including 35,324 and 35,325 directories. Pair preparation took 2.88 s and its scanner batch acknowledged in 1.50 s. Cold Summary hit the Worker deadline at 10.01 s and returned `UNAVAILABLE`. The queued scanner batch failed before dispatch, and the run ended before the detail queries. The representative results establish a measured performance limit for this implementation.
+
+For Task 5.23, give one candidate workspace an identity tied to the Worker and pair, and retain both source reservations across all of its stages. Build and validate ordered path ranges and roll up directories from children to parents in separately dispatched, measured chunks that each close their transaction. Keep the candidate inaccessible to analytical queries until an atomic promotion checks the pair and candidate identity. Discard stale or failed candidates once dispatched work settles. Benchmark both stage duration and scanner acknowledgement delay on the same fixtures, including contention and deadline cases, before choosing chunk sizes.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 

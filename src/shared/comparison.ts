@@ -63,6 +63,32 @@ export type ComparisonCompatibility = { readonly pair: ComparisonPair } & (
   | { readonly status: 'incompatible'; readonly reason: ComparisonIncompatibility }
 )
 
+export type CompatiblePair = Exclude<ComparisonCompatibility, { status: 'incompatible' }>
+
+export interface ComparisonPreparationTicket {
+  readonly ticket: string
+}
+
+export interface PreparedComparisonSelection extends ComparisonPreparationTicket {
+  readonly compatibility: CompatiblePair
+}
+
+export interface AdoptedComparisonSelection {
+  /** A new identity is issued for every adoption, including readoption of the same pair. */
+  readonly selectionId: string
+  readonly compatibility: CompatiblePair
+}
+
+export interface ComparisonSelectionRelease {
+  /** Use null to leave Comparison while the initial pair is still pending. */
+  readonly selectionId: string | null
+}
+
+export interface ComparisonReadRequest<Query extends ComparisonPair = ComparisonPair> {
+  readonly selectionId: string
+  readonly query: Query
+}
+
 /** Empty for the root only. Descendants use slash-delimited, exact UTF-16 components. */
 export type ComparisonPathKey = string
 
@@ -129,7 +155,7 @@ export interface ComparisonFileSummary extends ComparisonFileTotals {
 
 export interface ComparisonSummary {
   readonly pair: ComparisonPair
-  readonly compatibility: Exclude<ComparisonCompatibility, { status: 'incompatible' }>
+  readonly compatibility: CompatiblePair
   readonly baseline: CompletedScanMetadata
   readonly target: CompletedScanMetadata
   readonly fileCountDelta: number
@@ -204,6 +230,10 @@ interface ComparisonPage<Item> {
 
 export type ComparisonFilePage = ComparisonPage<ComparisonFileChange>
 export type ComparisonDirectoryPage = ComparisonPage<ComparisonDirectoryChange>
+export type ComparisonFileResult = ComparisonFilePage & { readonly compatibility: CompatiblePair }
+export type ComparisonDirectoryResult = ComparisonDirectoryPage & {
+  readonly compatibility: CompatiblePair
+}
 
 export type ComparisonErrorCode =
   | Extract<

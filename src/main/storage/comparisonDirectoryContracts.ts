@@ -1,7 +1,7 @@
 import {
   MAX_COMPARISON_PAGE_SIZE,
   type ComparisonDirectoryObservation,
-  type ComparisonDirectoryPage
+  type ComparisonDirectoryResult
 } from '../../shared/comparison'
 import { isComparisonPathKey } from '../comparison/paths'
 import {
@@ -9,14 +9,12 @@ import {
   readComparisonFileQuery,
   type ResolvedComparisonFileQuery
 } from './comparisonFileContracts'
-import { isCompatiblePair, type CompatiblePair } from './comparisonMatchContracts'
+import { isCompatiblePair } from './comparisonMatchContracts'
 import { isComparisonFileSummary } from './comparisonSummaryContracts'
 import { integer, isSnapshotId, record } from './payloads'
 import { SnapshotAccessError } from './snapshotAccess'
 
-export type ComparisonDirectoryResult = ComparisonDirectoryPage & {
-  readonly compatibility: CompatiblePair
-}
+export type { ComparisonDirectoryResult } from '../../shared/comparison'
 export type ResolvedComparisonDirectoryQuery = ResolvedComparisonFileQuery & {
   readonly includeRoot: boolean
 }

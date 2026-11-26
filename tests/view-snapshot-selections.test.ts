@@ -70,6 +70,7 @@ function fixture(): Fixture {
   }))
   const prune = vi.fn<StorageWorkerClient['pruneSnapshot']>(async () => null)
   const worker = Object.assign(state, {
+    waitForExit: () => new Promise<void>(() => {}),
     getScanHistoryMetadata: metadata,
     getScanSnapshot: discovery,
     openSavedSnapshot: openSnapshot,

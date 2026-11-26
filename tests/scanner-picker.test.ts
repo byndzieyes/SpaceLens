@@ -95,7 +95,14 @@ beforeEach(async () => {
       dispose: async () => {}
     } as unknown as ScanSessionManager,
     url,
-    { read: vi.fn(), deleteSnapshot: vi.fn(), createSnapshotOwner: vi.fn() },
+    {
+      read: vi.fn(),
+      deleteSnapshot: vi.fn(),
+      createSnapshotOwner: vi.fn(),
+      readPair: vi.fn(),
+      protectComparisonPair: vi.fn(),
+      readSignal: new AbortController().signal
+    },
     Promise.resolve(null)
   )
   boundary.attachRenderer(renderer as unknown as WebContents)

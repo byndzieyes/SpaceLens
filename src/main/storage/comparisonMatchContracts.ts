@@ -1,7 +1,7 @@
 import {
   DEFAULT_COMPARISON_PAGE_SIZE,
   MAX_COMPARISON_PAGE_SIZE,
-  type ComparisonCompatibility,
+  type CompatiblePair,
   type ComparisonErrorCode,
   type ComparisonPair,
   type ComparisonPathKey,
@@ -18,7 +18,7 @@ export interface ComparisonMatchQuery extends ComparisonPair {
 }
 
 export type ResolvedComparisonMatchQuery = ComparisonMatchQuery & { readonly limit: number }
-export type CompatiblePair = Exclude<ComparisonCompatibility, { status: 'incompatible' }>
+export type { CompatiblePair } from '../../shared/comparison'
 
 export interface ComparisonMatchRow {
   readonly relativePath: ComparisonPathKey

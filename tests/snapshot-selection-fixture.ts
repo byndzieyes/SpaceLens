@@ -1,14 +1,26 @@
 import { vi } from 'vitest'
-import type { SpaceLensAPI } from '../src/shared/ipc'
+import type { ComparisonAPI, SpaceLensAPI } from '../src/shared/ipc'
 
 /** Forward the selection path to each existing page fixture's Latest read. */
 export function mockSnapshotSelection(readLatest: SpaceLensAPI['getScanSnapshot']): {
   [
-    K in 'prepareSnapshotSelection' | 'adoptSnapshotSelection' | 'releaseSnapshotSelection'
+    K in
+      | keyof ComparisonAPI
+      | 'prepareSnapshotSelection'
+      | 'adoptSnapshotSelection'
+      | 'releaseSnapshotSelection'
   ]: ReturnType<typeof vi.fn<SpaceLensAPI[K]>>
 } {
   let sequence = 0
   return {
+    evaluateComparisonCompatibility: vi.fn(),
+    prepareComparisonSelection: vi.fn(),
+    adoptComparisonSelection: vi.fn(),
+    discardPreparedComparisonSelection: vi.fn(),
+    releaseComparisonSelection: vi.fn(),
+    getComparisonSummary: vi.fn(),
+    listComparisonFileChanges: vi.fn(),
+    listComparisonDirectoryChanges: vi.fn(),
     prepareSnapshotSelection: vi.fn(async ({ selection }) => {
       if (selection.mode !== 'follow-latest')
         throw new Error('Expected Follow Latest in this fixture.')

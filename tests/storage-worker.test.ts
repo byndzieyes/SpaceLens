@@ -34,10 +34,20 @@ import {
 import type { createStorageWorkerClient } from '../src/main/storage/workerRunner'
 import type { StorageRequest } from '../src/main/storage/workerProtocol'
 import type { FileEntry, ScanSession } from '../src/shared/scan'
-import { IPC_CHANNELS, type ScannerIpcResult, type ScanStateSnapshot } from '../src/shared/ipc'
+import {
+  IPC_CHANNELS,
+  type ComparisonAPI,
+  type ScannerIpcResult,
+  type ScanStateSnapshot
+} from '../src/shared/ipc'
 import type { ScanSessionSubscriber } from '../src/main/scanner/sessionManager'
 import type { ScanHistoryItem, ScanHistoryPage } from '../src/shared/history'
 import type { InsightsRankingPage } from '../src/shared/insights'
+import type {
+  AdoptedComparisonSelection,
+  ComparisonErrorCode,
+  ComparisonPair
+} from '../src/shared/comparison'
 import {
   followLatest,
   type PreparedSnapshotSelection,
@@ -390,6 +400,204 @@ async function preparePublication(
   ])
   return readyMetadata(pending)
 }
+
+const bundledIpcHandlers = new Map<
+  string,
+  (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown
+>()
+const bundledIpcMain = Object.assign(new EventEmitter(), {
+  handle: (channel: string, handle: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown) =>
+    bundledIpcHandlers.set(channel, handle),
+  removeHandler: (channel: string) => bundledIpcHandlers.delete(channel)
+})
+
+function mockBundledElectron(): {
+  ipcMain: typeof bundledIpcMain
+  handlers: typeof bundledIpcHandlers
+} {
+  bundledIpcMain.removeAllListeners()
+  bundledIpcHandlers.clear()
+  vi.doMock('electron', () => ({ ipcMain: bundledIpcMain, app: {}, BrowserWindow: {}, dialog: {} }))
+  return { ipcMain: bundledIpcMain, handlers: bundledIpcHandlers }
+}
+
+test('serves public Comparison queries through the bundled Worker across publication, pruning, and reopen', async () => {
+  const { handlers } = mockBundledElectron()
+  const { registerScannerIpc } = await import('../src/main/scannerIpc')
+  const url = 'file:///comparison/index.html'
+  const renderer = Object.assign(new EventEmitter(), {
+    isDestroyed: () => false,
+    mainFrame: { url },
+    send: vi.fn()
+  })
+  const event = {
+    sender: renderer,
+    senderFrame: renderer.mainFrame
+  } as unknown as IpcMainInvokeEvent
+  const manager = {
+    getState: () => null,
+    subscribe: () => () => {},
+    dispose: async () => {}
+  } as unknown as Parameters<typeof registerScannerIpc>[0]
+  const open = async (): Promise<{
+    client: StorageWorkerClient
+    storage: ScanStorageCoordinator
+    retention: HistoryRetention
+    close: () => Promise<void>
+  }> => {
+    const client = bundled()
+    await client.initialize(databasePath)
+    await client.recoverStorage()
+    const latest = await client.getPublishedScan()
+    const storage = new ScanStorageCoordinator(Promise.resolve(client))
+    const retention = new HistoryRetention(
+      storage,
+      new RetentionSettingsStore(join(dirname(databasePath), 'comparison-retention.json'))
+    )
+    const boundary = registerScannerIpc(manager, url, storage, Promise.resolve(latest), retention)
+    boundary.attachRenderer(renderer as unknown as WebContents)
+    const close = async (): Promise<void> => {
+      await boundary.dispose()
+      await retention.stop()
+      await client.dispose()
+    }
+    return { client, storage, retention, close }
+  }
+  const response = (method: keyof typeof IPC_CHANNELS, request: unknown): Promise<unknown> =>
+    Promise.resolve(handlers.get(IPC_CHANNELS[method])!(event, request))
+  type ComparisonValue<K extends keyof ComparisonAPI> = Extract<
+    Awaited<ReturnType<ComparisonAPI[K]>>,
+    { ok: true }
+  >['value']
+  const invoke = async <K extends keyof ComparisonAPI>(
+    method: K,
+    request: Parameters<ComparisonAPI[K]>[0]
+  ): Promise<ComparisonValue<K>> => {
+    const result = (await response(method, request)) as ScannerIpcResult<
+      ComparisonValue<K>,
+      ComparisonErrorCode
+    >
+    if (!result.ok) throw new Error(result.error.code)
+    return result.value
+  }
+  const select = async (pair: ComparisonPair): Promise<AdoptedComparisonSelection> => {
+    const { ticket } = await invoke('prepareComparisonSelection', pair)
+    return invoke('adoptComparisonSelection', { ticket })
+  }
+  let opened = await open()
+  try {
+    const publish = async (id: string, bytes: number, errorCount = 0): Promise<void> => {
+      const pending = lifecycleScan(id)
+      await opened.storage.beginScan(pending)
+      await opened.storage.applyBatch(id, [
+        { type: 'entry', entry: { ...root, scanId: id } },
+        { type: 'entry', entry: { ...file, scanId: id, sizeBytes: bytes } },
+        {
+          type: 'directory-finalized',
+          entry: { ...root, scanId: id, type: 'directory', aggregatedSizeBytes: bytes }
+        }
+      ])
+      await opened.storage.publishScan(
+        {
+          ...readyMetadata(pending),
+          summary: { ...readyMetadata(pending).summary, totalBytes: bytes, errorCount }
+        },
+        root.id
+      )
+    }
+    await publish('baseline', 4)
+    await publish('target', 10, 1)
+    await publish('newer', 6)
+    const older = { baselineScanId: 'baseline', targetScanId: 'target' }
+    await expect(invoke('evaluateComparisonCompatibility', older)).resolves.toMatchObject({
+      status: 'compatible-with-warnings',
+      warnings: [{ code: 'INCOMPLETE_COVERAGE', side: 'target' }]
+    })
+    const { selectionId } = await select(older)
+    const req = { selectionId, query: older }
+    const summary = await invoke('getComparisonSummary', req)
+    expect(summary.files).toMatchObject({
+      counts: { added: 0, removed: 0, modified: 1, unchanged: 0, indeterminate: 0 },
+      netKnownDeltaBytes: 6
+    })
+    const files = await invoke('listComparisonFileChanges', {
+      ...req,
+      query: { ...older, kinds: ['modified'], limit: 1, sort: 'delta-desc' }
+    })
+    expect(files).toMatchObject({
+      totalCount: 1,
+      items: [
+        {
+          deltaBytes: 6,
+          baseline: {
+            entry: {
+              scanId: 'baseline',
+              entryId: file.id
+            }
+          },
+          target: { entry: { scanId: 'target', entryId: file.id } }
+        }
+      ]
+    })
+    const dirs = await invoke('listComparisonDirectoryChanges', {
+      ...req,
+      query: { ...older, includeRoot: true, limit: 1, sort: 'delta-desc' }
+    })
+    expect(dirs.items).toMatchObject([{ relativePath: '', subtreeFiles: summary.files }])
+    await publish('latest', 8)
+    await expect(invoke('getComparisonSummary', req)).resolves.toEqual(summary)
+    for (const scanId of ['baseline', 'target']) {
+      await expect(response('deleteSnapshot', { scanId })).resolves.toMatchObject({
+        ok: false,
+        error: { code: 'SNAPSHOT_IN_USE' }
+      })
+    }
+    const newer = { baselineScanId: 'newer', targetScanId: 'latest' }
+    const next = await invoke('prepareComparisonSelection', newer)
+    expect(
+      ['baseline', 'target', 'newer', 'latest'].every((id) =>
+        opened.storage.isSnapshotProtected(id)
+      )
+    ).toBe(true)
+    await opened.retention.setSettings({ maxCompletedSnapshots: 2 })
+    await expect.poll(() => opened.retention.status).toBe('protected')
+    const replacement = await invoke('adoptComparisonSelection', { ticket: next.ticket })
+    await expect(response('getComparisonSummary', req)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'SNAPSHOT_EXPIRED' }
+    })
+    const nextRequest = { selectionId: replacement.selectionId, query: newer }
+    const newerSummary = await invoke('getComparisonSummary', nextRequest)
+    expect(newerSummary.files.netKnownDeltaBytes).toBe(2)
+    await invoke('releaseComparisonSelection', { selectionId: replacement.selectionId })
+    await expect
+      .poll(async () =>
+        (
+          await opened.storage.read(new AbortController().signal, (client) =>
+            client.listScanHistory({})
+          )
+        ).items.map(({ id }) => id)
+      )
+      .toEqual(['latest', 'newer'])
+    await opened.close()
+    opened = await open()
+    await expect(response('getComparisonSummary', nextRequest)).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'SNAPSHOT_UNAVAILABLE' }
+    })
+    const live = await select(newer)
+    await expect(
+      invoke('getComparisonSummary', { selectionId: live.selectionId, query: newer })
+    ).resolves.toEqual(newerSummary)
+    await opened.client.dispose()
+    await opened.client.waitForExit()
+    expect(opened.storage.isSnapshotProtected('newer')).toBe(false)
+    expect(opened.storage.isSnapshotProtected('latest')).toBe(false)
+  } finally {
+    await opened.close()
+    vi.doUnmock('electron')
+  }
+})
 
 test('reads bounded comparison matches through the bundled Worker queue and rebuilds them after restart', async () => {
   const client = bundled()
@@ -1606,15 +1814,7 @@ test('reads completed history through the worker and coordinator across publicat
   ).resolves.toEqual(saved.items[0])
 
   // Exercise the actual IPC handler against the bundled worker and coordinator.
-  const handlers = new Map<string, (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown>()
-  const ipcMain = Object.assign(new EventEmitter(), {
-    handle: (
-      channel: string,
-      handler: (event: IpcMainInvokeEvent, ...args: unknown[]) => unknown
-    ) => handlers.set(channel, handler),
-    removeHandler: (channel: string) => handlers.delete(channel)
-  })
-  vi.doMock('electron', () => ({ ipcMain, app: {}, BrowserWindow: {}, dialog: {} }))
+  const { ipcMain, handlers } = mockBundledElectron()
   try {
     const { registerScannerIpc } = await import('../src/main/scannerIpc')
     let notify: ScanSessionSubscriber | undefined

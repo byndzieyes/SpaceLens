@@ -33,10 +33,14 @@ function emit(revision: number): void {
 test('exposes only the typed application API and uses fixed invoke channels', async () => {
   expect(contextBridge.exposeInMainWorld).toHaveBeenCalledWith('spaceLens', api)
   expect(Object.keys(api).sort()).toEqual([
+    'adoptComparisonSelection',
     'adoptSnapshotSelection',
     'cancelScan',
     'deleteSnapshot',
+    'discardPreparedComparisonSelection',
+    'evaluateComparisonCompatibility',
     'getAppInfo',
+    'getComparisonSummary',
     'getInsightsCategories',
     'getInsightsObservations',
     'getInsightsSizeDistribution',
@@ -47,13 +51,17 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'getScanHistoryMetadata',
     'getScanSnapshot',
     'getScanState',
+    'listComparisonDirectoryChanges',
+    'listComparisonFileChanges',
     'listInsightsExtensions',
     'listInsightsLargestDirectories',
     'listInsightsLargestFiles',
     'listScanDirectory',
     'listScanHistory',
     'onScanStateChanged',
+    'prepareComparisonSelection',
     'prepareSnapshotSelection',
+    'releaseComparisonSelection',
     'releaseSnapshotSelection',
     'selectScanDirectory',
     'setRetentionSettings',
@@ -169,6 +177,38 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     IPC_CHANNELS.releaseSnapshotSelection,
     release
   )
+})
+
+test('forwards only the public Comparison commands and their typed payloads', async () => {
+  const response = { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Selection expired.' } }
+  vi.mocked(ipcRenderer.invoke).mockResolvedValue(response)
+  const pair = { baselineScanId: 'left', targetScanId: 'right' }
+  const ticket = { ticket: 'a-ticket' }
+  const selection = { selectionId: 'an-adoption' }
+  const summary = { ...selection, query: pair }
+  const files = { ...selection, query: { ...pair, limit: 100, kinds: ['added'] as const } }
+  const directories = {
+    ...selection,
+    query: { ...pair, includeRoot: true, sort: 'delta-desc' as const }
+  }
+  expect(await api.evaluateComparisonCompatibility(pair)).toBe(response)
+  expect(await api.prepareComparisonSelection(pair)).toBe(response)
+  expect(await api.adoptComparisonSelection(ticket)).toBe(response)
+  expect(await api.discardPreparedComparisonSelection(ticket)).toBe(response)
+  expect(await api.getComparisonSummary(summary)).toBe(response)
+  expect(await api.listComparisonFileChanges(files)).toBe(response)
+  expect(await api.listComparisonDirectoryChanges(directories)).toBe(response)
+  expect(await api.releaseComparisonSelection(selection)).toBe(response)
+  expect(vi.mocked(ipcRenderer.invoke).mock.calls).toEqual([
+    [IPC_CHANNELS.evaluateComparisonCompatibility, pair],
+    [IPC_CHANNELS.prepareComparisonSelection, pair],
+    [IPC_CHANNELS.adoptComparisonSelection, ticket],
+    [IPC_CHANNELS.discardPreparedComparisonSelection, ticket],
+    [IPC_CHANNELS.getComparisonSummary, summary],
+    [IPC_CHANNELS.listComparisonFileChanges, files],
+    [IPC_CHANNELS.listComparisonDirectoryChanges, directories],
+    [IPC_CHANNELS.releaseComparisonSelection, selection]
+  ])
 })
 
 test('deduplicates subscribers, strips Electron events, and supports idempotent unsubscription', () => {

@@ -19,6 +19,8 @@ import {
 import type { RecentScanSummary, ScanSessionState } from '../shared/scan'
 import type { ScanDirectoryRequest, ScanEntryRequest } from '../shared/snapshot'
 import { InsightsQueryService } from './insights/queryService'
+import { registerComparisonIpc } from './comparisonIpc'
+import type { ComparisonStorage } from './storage/comparisonSelection'
 import {
   SnapshotAccessError,
   readScanHistoryQuery,
@@ -164,7 +166,8 @@ function publicationSummary(
 export function registerScannerIpc(
   manager: ScanSessionManager,
   rendererUrl: string,
-  storage: Pick<ScanStorageCoordinator, 'read' | 'deleteSnapshot' | 'createSnapshotOwner'>,
+  storage: Pick<ScanStorageCoordinator, 'read' | 'deleteSnapshot' | 'createSnapshotOwner'> &
+    ComparisonStorage,
   restoredPublication: Promise<CompletedScan | null>,
   retention?: Pick<HistoryRetention, 'getSettings' | 'setSettings' | 'onPruned'>
 ): { attachRenderer: (renderer: WebContents) => void; dispose: () => Promise<void> } {
@@ -220,6 +223,11 @@ export function registerScannerIpc(
   }
   const authorized = (event: IpcMainEvent | IpcMainInvokeEvent): boolean =>
     authorizedRenderer() && event.sender === renderer && event.senderFrame === renderer!.mainFrame
+  const removeComparisonHandlers = registerComparisonIpc(
+    (event) =>
+      !disposed && !documentNavigating && authorized(event) ? viewSelections.comparison : undefined,
+    () => disposed
+  )
 
   const capture = (state: ScanSessionState | null): ScanStateSnapshot => {
     if (revision === Number.MAX_SAFE_INTEGER) throw new Error('Scan state revision exhausted.')
@@ -696,6 +704,7 @@ export function registerScannerIpc(
       for (const channel of channels) ipcMain.removeHandler(channel)
       for (const channel of snapshotChannels) ipcMain.removeHandler(channel)
       for (const channel of selectionChannels) ipcMain.removeHandler(channel)
+      removeComparisonHandlers()
       ipcMain.removeHandler(IPC_CHANNELS.selectScanDirectory)
       ipcMain.removeListener(IPC_CHANNELS.acknowledgeScanState, onAck)
       disposal = manager.dispose()

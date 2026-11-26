@@ -46,6 +46,37 @@ export class SnapshotProtection {
     }
   }
 
+  reservePair(baselineScanId: string, targetScanId: string): () => void {
+    const releaseBaseline = this.reserve(baselineScanId)
+    try {
+      const releaseTarget = this.reserve(targetScanId)
+      return () => {
+        releaseBaseline()
+        releaseTarget()
+      }
+    } catch (error) {
+      releaseBaseline()
+      throw error
+    }
+  }
+
+  createPairOwner(signal: AbortSignal, baselineScanId: string, targetScanId: string): () => void {
+    const releaseOwner = this.claimOwner(signal)
+    try {
+      const releasePair = this.reservePair(baselineScanId, targetScanId)
+      const dispose = (): void => {
+        signal.removeEventListener('abort', dispose)
+        releaseOwner()
+        releasePair()
+      }
+      signal.addEventListener('abort', dispose, { once: true })
+      return dispose
+    } catch (error) {
+      releaseOwner()
+      throw error
+    }
+  }
+
   assertDeletable(scanId: string): void {
     if (this.isProtected(scanId) || this.deleting === scanId)
       throw new SnapshotAccessError('SNAPSHOT_IN_USE', 'This snapshot is in use.')
@@ -67,9 +98,7 @@ export class SnapshotProtection {
     signal: AbortSignal,
     validate: (scanId: string, signal: AbortSignal) => Promise<T>
   ): SnapshotProtectionOwner<T> {
-    if (signal.aborted || this.owners >= MAX_OWNERS)
-      throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'Snapshot protection is unavailable.')
-    this.owners++
+    const releaseOwner = this.claimOwner(signal)
     const owned = new Map<string, { release: () => void; ready: Promise<T> }>()
     let disposed = false
     const inactive = (): SnapshotAccessError =>
@@ -83,7 +112,7 @@ export class SnapshotProtection {
       disposed = true
       signal.removeEventListener('abort', dispose)
       for (const scanId of owned.keys()) release(scanId)
-      this.owners--
+      releaseOwner()
     }
     signal.addEventListener('abort', dispose, { once: true })
     return {
@@ -117,6 +146,18 @@ export class SnapshotProtection {
       },
       release,
       dispose
+    }
+  }
+
+  private claimOwner(signal: AbortSignal): () => void {
+    if (signal.aborted || this.owners >= MAX_OWNERS)
+      throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'Snapshot protection is unavailable.')
+    this.owners++
+    let released = false
+    return () => {
+      if (released) return
+      released = true
+      this.owners--
     }
   }
 }

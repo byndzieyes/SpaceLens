@@ -51,6 +51,21 @@ const api: SpaceLensAPI = {
     ipcRenderer.invoke(IPC_CHANNELS.adoptSnapshotSelection, request),
   releaseSnapshotSelection: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.releaseSnapshotSelection, request),
+  evaluateComparisonCompatibility: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.evaluateComparisonCompatibility, request),
+  prepareComparisonSelection: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.prepareComparisonSelection, request),
+  adoptComparisonSelection: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.adoptComparisonSelection, request),
+  discardPreparedComparisonSelection: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.discardPreparedComparisonSelection, request),
+  releaseComparisonSelection: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.releaseComparisonSelection, request),
+  getComparisonSummary: (request) => ipcRenderer.invoke(IPC_CHANNELS.getComparisonSummary, request),
+  listComparisonFileChanges: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.listComparisonFileChanges, request),
+  listComparisonDirectoryChanges: (request) =>
+    ipcRenderer.invoke(IPC_CHANNELS.listComparisonDirectoryChanges, request),
   listScanHistory: (query) => ipcRenderer.invoke(IPC_CHANNELS.listScanHistory, query),
   getScanHistoryMetadata: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.getScanHistoryMetadata, request),

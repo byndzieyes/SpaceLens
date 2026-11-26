@@ -2,18 +2,18 @@ import {
   DEFAULT_COMPARISON_PAGE_SIZE,
   MAX_COMPARISON_PAGE_SIZE,
   type ComparisonCoverage,
-  type ComparisonFilePage,
+  type ComparisonFileResult,
   type ComparisonFileQuery,
   type ComparisonPathObservation,
   type EntryChangeKind,
   type FileChangeClassification
 } from '../../shared/comparison'
 import { isComparisonPathKey } from '../comparison/paths'
-import { isCompatiblePair, type CompatiblePair } from './comparisonMatchContracts'
+import { isCompatiblePair } from './comparisonMatchContracts'
 import { integer, isSnapshotId, nullableString, record } from './payloads'
 import { SnapshotAccessError } from './snapshotAccess'
 
-export type ComparisonFileResult = ComparisonFilePage & { readonly compatibility: CompatiblePair }
+export type { ComparisonFileResult } from '../../shared/comparison'
 
 export type ResolvedComparisonFileQuery = ComparisonFileQuery &
   Required<Pick<ComparisonFileQuery, 'limit' | 'offset' | 'sort'>>

@@ -43,7 +43,28 @@ export interface AppInfo {
   platform: string
 }
 
-export interface SpaceLensAPI {
+type ComparisonCall<Request, Result> = (
+  request: Request
+) => Promise<ScannerIpcResult<Result, ComparisonErrorCode>>
+
+export interface ComparisonAPI {
+  evaluateComparisonCompatibility: ComparisonCall<ComparisonPair, ComparisonCompatibility>
+  prepareComparisonSelection: ComparisonCall<ComparisonPair, PreparedComparisonSelection>
+  adoptComparisonSelection: ComparisonCall<ComparisonPreparationTicket, AdoptedComparisonSelection>
+  discardPreparedComparisonSelection: ComparisonCall<ComparisonPreparationTicket, null>
+  releaseComparisonSelection: ComparisonCall<ComparisonSelectionRelease, null>
+  getComparisonSummary: ComparisonCall<ComparisonReadRequest, ComparisonSummary>
+  listComparisonFileChanges: ComparisonCall<
+    ComparisonReadRequest<ComparisonFileQuery>,
+    ComparisonFileResult
+  >
+  listComparisonDirectoryChanges: ComparisonCall<
+    ComparisonReadRequest<ComparisonDirectoryQuery>,
+    ComparisonDirectoryResult
+  >
+}
+
+export interface SpaceLensAPI extends ComparisonAPI {
   getAppInfo: () => Promise<AppInfo>
   selectScanDirectory: () => Promise<ScannerIpcResult<ScanDirectorySelection>>
   startScan: (request: StartScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
@@ -106,6 +127,14 @@ export const IPC_CHANNELS = {
   prepareSnapshotSelection: 'spacelens:prepare-snapshot-selection',
   adoptSnapshotSelection: 'spacelens:adopt-snapshot-selection',
   releaseSnapshotSelection: 'spacelens:release-snapshot-selection',
+  evaluateComparisonCompatibility: 'spacelens:evaluate-comparison-compatibility',
+  prepareComparisonSelection: 'spacelens:prepare-comparison-selection',
+  adoptComparisonSelection: 'spacelens:adopt-comparison-selection',
+  discardPreparedComparisonSelection: 'spacelens:discard-prepared-comparison-selection',
+  releaseComparisonSelection: 'spacelens:release-comparison-selection',
+  getComparisonSummary: 'spacelens:get-comparison-summary',
+  listComparisonFileChanges: 'spacelens:list-comparison-file-changes',
+  listComparisonDirectoryChanges: 'spacelens:list-comparison-directory-changes',
   listScanHistory: 'spacelens:list-scan-history',
   getScanHistoryMetadata: 'spacelens:get-scan-history-metadata',
   deleteSnapshot: 'spacelens:delete-snapshot',
@@ -176,3 +205,18 @@ export interface ScanStateSnapshot {
 export interface ScanAccepted {
   readonly scanId: string
 }
+import type {
+  AdoptedComparisonSelection,
+  ComparisonCompatibility,
+  ComparisonDirectoryQuery,
+  ComparisonDirectoryResult,
+  ComparisonErrorCode,
+  ComparisonFileQuery,
+  ComparisonFileResult,
+  ComparisonPair,
+  ComparisonPreparationTicket,
+  ComparisonReadRequest,
+  ComparisonSelectionRelease,
+  ComparisonSummary,
+  PreparedComparisonSelection
+} from './comparison'

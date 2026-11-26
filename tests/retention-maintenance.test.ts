@@ -24,6 +24,7 @@ class Fixture {
   readonly storage = new ScanStorageCoordinator(
     Promise.resolve({
       isReady: true,
+      waitForExit: () => new Promise<void>(() => {}),
       beginScan: this.begin,
       applyBatch: async (scanId, entries) => this.db.applyBatch(scanId, entries),
       publishScan: async (scan, rootId) => this.db.publishScan(scan, rootId),
@@ -35,6 +36,7 @@ class Fixture {
     } satisfies Pick<
       StorageWorkerClient,
       | 'isReady'
+      | 'waitForExit'
       | 'beginScan'
       | 'applyBatch'
       | 'publishScan'

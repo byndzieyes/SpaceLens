@@ -1,5 +1,6 @@
 import type { ScanPersistence } from '../scanner/persistence'
 import type { ScanHistoryItem, SnapshotDeletionRequest } from '../../shared/history'
+import type { ComparisonPair } from '../../shared/comparison'
 import type {
   BuildingScan,
   CompletedScan,
@@ -44,6 +45,15 @@ type SnapshotQueries = Pick<
   | 'listInsightsLargestDirectories'
 >
 
+export type ComparisonQueries = Pick<
+  StorageWorkerClient,
+  | 'getScan'
+  | 'requireValidatedScan'
+  | 'getComparisonSummary'
+  | 'listComparisonFileChanges'
+  | 'listComparisonDirectoryChanges'
+>
+
 /** A request that could not be sent, or a read whose reply can no longer be used. */
 export class StorageUnavailableError extends StorageWorkerError {
   constructor(message = 'Saved scan storage is unavailable.') {
@@ -72,15 +82,33 @@ export class ScanStorageCoordinator implements ScanPersistence {
   private buildingScanId: string | undefined
   private readonly reads: Job[] = []
   private readsStopped = false
+  private readonly readLifetime = new AbortController()
 
   constructor(ready: Promise<StorageWorkerClient>) {
     void ready.then(
       (client) => {
         this.client = client
+        void client.waitForExit().then(() => this.fail())
         this.drain()
       },
       () => this.fail()
     )
+  }
+
+  get readSignal(): AbortSignal {
+    return this.readLifetime.signal
+  }
+
+  readPair<T>(
+    signal: AbortSignal,
+    query: (client: ComparisonQueries) => Promise<T>,
+    pair: ComparisonPair
+  ): Promise<T> {
+    return this.enqueue(query, signal, pair)
+  }
+
+  protectComparisonPair(signal: AbortSignal, pair: ComparisonPair): () => void {
+    return this.protection.createPairOwner(signal, pair.baselineScanId, pair.targetScanId)
   }
 
   read<T>(
@@ -230,6 +258,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
   /** Drop read requests before scanner shutdown, which may still need a final write. */
   stopReads(): void {
     this.readsStopped = true
+    this.readLifetime.abort()
     const error = new StorageUnavailableError('Saved scan storage is shutting down.')
     for (const job of this.reads.splice(0)) job.drop(error)
     if (this.active?.read) this.active.reject(error)
@@ -238,7 +267,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
   private enqueue<T>(
     operation: (client: StorageWorkerClient) => Promise<T>,
     signal?: AbortSignal,
-    scanId?: string,
+    source?: string | ComparisonPair,
     deletion = false
   ): Promise<T> {
     if (this.client && !this.client.isReady) this.fail()
@@ -257,7 +286,9 @@ export class ScanStorageCoordinator implements ScanPersistence {
 
     let release: (() => void) | undefined
     try {
-      if (scanId !== undefined) release = this.protection.reserve(scanId)
+      if (typeof source === 'string') release = this.protection.reserve(source)
+      else if (source)
+        release = this.protection.reservePair(source.baselineScanId, source.targetScanId)
     } catch (error) {
       return Promise.reject(error)
     }
@@ -351,6 +382,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
 
   private fail(): void {
     this.failure ??= new StorageUnavailableError()
+    this.readLifetime.abort()
     for (const job of this.reads.splice(0)) job.drop(this.failure)
     this.write?.reject(this.failure)
     this.write = undefined
