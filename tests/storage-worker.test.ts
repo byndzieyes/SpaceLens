@@ -29,6 +29,7 @@ import type {
 import {
   STORAGE_REQUEST_TIMEOUT_MS,
   STORAGE_SHUTDOWN_TIMEOUT_MS,
+  StorageRequestTimeoutError,
   StorageWorkerClient
 } from '../src/main/storage/workerClient'
 import type { createStorageWorkerClient } from '../src/main/storage/workerRunner'
@@ -626,8 +627,10 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
   await expect(client.listComparisonMatches({ ...pair, limit: 101 })).rejects.toMatchObject({
     code: 'INVALID_REQUEST'
   })
-  const firstPage = await storage.read(signal, (db) =>
-    db.listComparisonMatches({ ...pair, limit: 1 })
+  const firstPage = await storage.readPair(
+    signal,
+    (db) => db.listComparisonMatches({ ...pair, limit: 1 }),
+    pair
   )
   expect(firstPage.nextAfter).toBe('')
   expect(firstPage.compatibility).toMatchObject({
@@ -642,18 +645,21 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
     }
   ])
   const cursor = { ...pair, after: '', limit: 1 }
-  const saved = await storage.read(signal, (db) => db.listComparisonMatches(cursor))
+  const saved = await storage.readPair(signal, (db) => db.listComparisonMatches(cursor), pair)
   expect(saved.rows).toMatchObject([
     { relativePath: fileName, baseline: { scanId: before.id, id: file.id }, target: targetFile }
   ])
   expect(saved.nextAfter).toBeNull()
-  const fileChanges = await storage.read(signal, (db) =>
-    db.listComparisonFileChanges({
-      ...pair,
-      kinds: ['indeterminate'],
-      sort: 'delta-desc',
-      limit: 1
-    })
+  const fileChanges = await storage.readPair(
+    signal,
+    (db) =>
+      db.listComparisonFileChanges({
+        ...pair,
+        kinds: ['indeterminate'],
+        sort: 'delta-desc',
+        limit: 1
+      }),
+    pair
   )
   expect(fileChanges).toMatchObject({
     totalCount: 1,
@@ -673,7 +679,7 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
       }
     ]
   })
-  const summary = await storage.read(signal, (db) => db.getComparisonSummary(pair))
+  const summary = await storage.readPair(signal, (db) => db.getComparisonSummary(pair), pair)
   expect(summary).toMatchObject({
     pair,
     baseline: { id: before.id, summary: { fileCount: 1, errorCount: 0 } },
@@ -690,8 +696,10 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
   await expect(client.getComparisonSummary(pair)).resolves.toEqual(summary)
   await expect(client.listComparisonFileChanges(pair)).resolves.toMatchObject({ totalCount: 1 })
   const directoryQuery = { ...pair, includeRoot: true, limit: 1 }
-  const directories = await storage.read(signal, (db) =>
-    db.listComparisonDirectoryChanges(directoryQuery)
+  const directories = await storage.readPair(
+    signal,
+    (db) => db.listComparisonDirectoryChanges(directoryQuery),
+    pair
   )
   expect(directories).toMatchObject({
     totalCount: 1,
@@ -715,12 +723,15 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
   await expect(client.listComparisonFileChanges({ ...pair, limit: 101 })).rejects.toMatchObject({
     code: 'INVALID_REQUEST'
   })
-  const reversed = await storage.read(signal, (db) =>
-    db.listComparisonMatches({
-      baselineScanId: target.id,
-      targetScanId: before.id,
-      after: ''
-    })
+  const reversePair = { baselineScanId: target.id, targetScanId: before.id }
+  const reversed = await storage.readPair(
+    signal,
+    (db) =>
+      db.listComparisonMatches({
+        ...reversePair,
+        after: ''
+      }),
+    reversePair
   )
   expect(reversed.rows).toMatchObject([
     { relativePath: fileName, baseline: targetFile, target: { scanId: before.id, id: file.id } }
@@ -776,6 +787,94 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
   })
   await expect(reopened.getPublishedScan()).resolves.toMatchObject({ id: target.id })
 })
+
+test.each(['legacy overlap', 'guarded admission'] as const)(
+  'models a dispatched comparison deadline with %s on the bundled Worker',
+  async (mode) => {
+    const worker = start(`
+      const { parentPort } = require('node:worker_threads')
+      const gate = new Int32Array(new SharedArrayBuffer(4))
+      parentPort.on('message', ({ operation }) => {
+        if (operation === 'getComparisonSummary') Atomics.wait(gate, 0, 0)
+      })
+      require(${JSON.stringify(workerPath)})
+    `)
+    const client = wrap(worker)
+    await client.initialize(databasePath)
+    await client.recoverStorage()
+    const before = await preparePublication(client, lifecycleScan('before'))
+    await client.publishScan(before, root.id)
+    const target = await preparePublication(client, lifecycleScan('target'))
+    await client.publishScan(target, root.id)
+    const pending = lifecycleScan('building')
+    // Model the old overlap by seeding an already-running scan outside coordinator admission.
+    if (mode === 'legacy overlap') await client.beginScan(pending)
+    const storage = new ScanStorageCoordinator(Promise.resolve(client))
+    await Promise.resolve()
+    const sent = vi.spyOn(worker, 'postMessage')
+    const terminate = worker.terminate.bind(worker)
+    const canExit = Promise.withResolvers<void>()
+    vi.spyOn(worker, 'terminate').mockImplementation(() => canExit.promise.then(terminate))
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const pair = { baselineScanId: before.id, targetScanId: target.id }
+      const query = storage.readPair(
+        new AbortController().signal,
+        (db) => db.getComparisonSummary(pair),
+        pair
+      )
+      const rejected = expect(query).rejects.toBeInstanceOf(StorageRequestTimeoutError)
+      const operations = (): string[] =>
+        sent.mock.calls.map(([msg]) => (msg as StorageRequest).operation)
+      expect(operations()).toEqual(['getComparisonSummary'])
+      let batch: Promise<unknown> | undefined
+      if (mode === 'legacy overlap') {
+        batch = expect(
+          storage.applyBatch(pending.id, [
+            { type: 'entry', entry: { ...root, scanId: pending.id } }
+          ])
+        ).rejects.toBeInstanceOf(StorageUnavailableError)
+      } else {
+        for (let i = 0; i < 2; i++) {
+          await expect(storage.beginScan(pending)).rejects.toMatchObject({
+            code: 'SCAN_COMPARISON_BUSY'
+          })
+        }
+      }
+      await vi.advanceTimersByTimeAsync(STORAGE_REQUEST_TIMEOUT_MS)
+      await rejected
+      expect(operations()).toEqual(['getComparisonSummary'])
+      expect(storage.isSnapshotProtected(before.id)).toBe(true)
+      expect(storage.isSnapshotProtected(target.id)).toBe(true)
+      expect(worker.threadId).not.toBe(-1)
+      if (mode === 'guarded admission')
+        await expect(storage.beginScan(pending)).rejects.toBeInstanceOf(StorageUnavailableError)
+      canExit.resolve()
+      await client.waitForExit()
+      await batch
+      expect(storage.isSnapshotProtected(before.id)).toBe(false)
+      expect(storage.isSnapshotProtected(target.id)).toBe(false)
+      expect(operations()).toEqual(['getComparisonSummary'])
+    } finally {
+      canExit.resolve()
+      vi.useRealTimers()
+    }
+    const reopened = bundled()
+    await reopened.initialize(databasePath)
+    if (mode === 'legacy overlap') {
+      await expect(reopened.getScan(pending.id)).resolves.toEqual(pending)
+      await expect(reopened.getEntry(pending.id, root.id)).resolves.toBeNull()
+    } else {
+      await expect(reopened.getScan(pending.id)).resolves.toBeNull()
+    }
+    await reopened.recoverStorage()
+    await expect(reopened.getScan(pending.id)).resolves.toBeNull()
+    await expect(reopened.getPublishedScan()).resolves.toEqual(target)
+    const healthy = new ScanStorageCoordinator(Promise.resolve(reopened))
+    const next = await preparePublication(healthy, lifecycleScan('retry'))
+    await expect(healthy.publishScan(next, root.id)).resolves.toEqual(next)
+  }
+)
 
 test('coordinates a real Worker after startup and prioritizes publication over Explorer and Insights reads', async () => {
   const client = bundled()

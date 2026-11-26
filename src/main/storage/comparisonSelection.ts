@@ -21,7 +21,7 @@ import { STORAGE_REQUEST_TIMEOUT_MS } from './workerClient'
 
 export type ComparisonStorage = Pick<
   ScanStorageCoordinator,
-  'readPair' | 'protectComparisonPair' | 'readSignal'
+  'assertComparisonAvailable' | 'readPair' | 'protectComparisonPair' | 'readSignal'
 >
 
 interface PendingPair {
@@ -89,6 +89,7 @@ export class ComparisonSelection {
 
   async prepare(pair: ComparisonPair): Promise<SelectionReply<PreparedComparisonSelection>> {
     if (this.lifetime.aborted) throw inactive()
+    this.storage.assertComparisonAvailable()
     this.discardPending()
     if (pair.baselineScanId === pair.targetScanId)
       throw new ComparisonStorageError('INCOMPATIBLE_SNAPSHOTS', 'Choose two different scans.')

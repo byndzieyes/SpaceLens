@@ -36,7 +36,11 @@ import {
   verifyScanDirectory,
   type DirectoryApproval
 } from './scanner/directoryApproval'
-import { StorageUnavailableError, type ScanStorageCoordinator } from './storage/coordinator'
+import {
+  StorageSchedulingError,
+  StorageUnavailableError,
+  type ScanStorageCoordinator
+} from './storage/coordinator'
 import { StorageWorkerError } from './storage/workerClient'
 import type { HistoryRetention } from './storage/historyRetention'
 import { RetentionSettingsError } from './storage/retentionSettings'
@@ -644,6 +648,11 @@ export function registerScannerIpc(
               } catch (error) {
                 if (error instanceof ScanStartRejected) return failure(error.code, error.message)
                 if (error instanceof ScanStorageError) {
+                  if (
+                    error.cause instanceof StorageSchedulingError &&
+                    error.cause.code === 'SCAN_COMPARISON_BUSY'
+                  )
+                    return failure('SCAN_COMPARISON_BUSY', error.cause.message)
                   console.error('Scan persistence could not start.', error)
                   return failure('UNAVAILABLE', error.message)
                 }

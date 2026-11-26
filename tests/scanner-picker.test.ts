@@ -100,6 +100,7 @@ beforeEach(async () => {
       deleteSnapshot: vi.fn(),
       createSnapshotOwner: vi.fn(),
       readPair: vi.fn(),
+      assertComparisonAvailable: vi.fn(),
       protectComparisonPair: vi.fn(),
       readSignal: new AbortController().signal
     },

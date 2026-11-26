@@ -14,6 +14,7 @@ import { verifyScanDirectory } from '../src/main/scanner/directoryApproval'
 import { ScanStorageError } from '../src/main/scanner/persistence'
 import { ScanDatabase } from '../src/main/storage/database'
 import {
+  StorageSchedulingError,
   StorageUnavailableError,
   type ScanStorageCoordinator
 } from '../src/main/storage/coordinator'
@@ -82,6 +83,7 @@ const queries = {
   getScanDirectoryTreemap: vi.fn<StorageWorkerClient['getScanDirectoryTreemap']>()
 }
 const storage = {
+  assertComparisonAvailable: vi.fn(),
   read: (async (_signal, query) => query(queries)) as ScanStorageCoordinator['read'],
   readPair: (async (_signal, query) => query(queries)) as ScanStorageCoordinator['readPair'],
   protectComparisonPair: vi.fn<ScanStorageCoordinator['protectComparisonPair']>(),
@@ -1497,6 +1499,23 @@ test('rejects a storage admission failure without returning a scan ID or exposin
   })
   expect(state).toBeNull()
   expect(renderer.send).not.toHaveBeenCalled()
+})
+
+test('returns a recoverable comparison busy result without consuming the approved scanner start', async () => {
+  await invoke(IPC_CHANNELS.selectScanDirectory)
+  start.mockRejectedValueOnce(
+    new ScanStorageError('starting the scan', new StorageSchedulingError('SCAN_COMPARISON_BUSY'))
+  )
+  await expect(invoke(IPC_CHANNELS.startScan, [{ rootPath }])).resolves.toMatchObject({
+    ok: false,
+    error: { code: 'SCAN_COMPARISON_BUSY' }
+  })
+  expect(state).toBeNull()
+  await expect(invoke(IPC_CHANNELS.startScan, [{ rootPath }])).resolves.toEqual({
+    ok: true,
+    value: { scanId: id }
+  })
+  settle(state!)
 })
 
 test('keeps admission pending and rechecks authorization after the building row is ready', async () => {

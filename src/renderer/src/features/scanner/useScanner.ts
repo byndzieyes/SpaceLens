@@ -32,6 +32,8 @@ function requestError(code: ScannerIpcErrorCode): string {
       return 'This directory is no longer approved or accessible. Select the directory again.'
     case 'SCAN_ACTIVE':
       return 'A scan is already active. Wait for it to finish before starting another.'
+    case 'SCAN_COMPARISON_BUSY':
+      return 'A comparison is using saved scan storage. Try starting the scan again when it finishes.'
     case 'PICKER_BUSY':
       return 'A folder picker is already open. Finish that selection first.'
     case 'PICKER_FAILED':

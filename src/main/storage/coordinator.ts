@@ -13,6 +13,7 @@ import { SnapshotProtection, type SnapshotProtectionOwner } from './snapshotProt
 import {
   isUncertainStorageWrite,
   STORAGE_REQUEST_TIMEOUT_MS,
+  StorageRequestTimeoutError,
   StorageWorkerError,
   type StorageWorkerClient
 } from './workerClient'
@@ -33,10 +34,6 @@ type SnapshotQueries = Pick<
   | 'requireValidatedScan'
   | 'listScanHistory'
   | 'getScanHistoryMetadata'
-  | 'listComparisonMatches'
-  | 'listComparisonFileChanges'
-  | 'getComparisonSummary'
-  | 'listComparisonDirectoryChanges'
   | 'getInsightsCategories'
   | 'getInsightsSizeDistribution'
   | 'getInsightsObservations'
@@ -49,6 +46,7 @@ export type ComparisonQueries = Pick<
   StorageWorkerClient,
   | 'getScan'
   | 'requireValidatedScan'
+  | 'listComparisonMatches'
   | 'getComparisonSummary'
   | 'listComparisonFileChanges'
   | 'listComparisonDirectoryChanges'
@@ -61,11 +59,26 @@ export class StorageUnavailableError extends StorageWorkerError {
   }
 }
 
+export class StorageSchedulingError extends StorageWorkerError {
+  constructor(code: 'SCAN_COMPARISON_BUSY' | 'COMPARISON_SCAN_ACTIVE') {
+    super({
+      name: 'StorageSchedulingError',
+      code,
+      message:
+        code === 'SCAN_COMPARISON_BUSY'
+          ? 'A comparison is using saved scan storage. Retry the scan when it finishes.'
+          : 'Comparison is available after the scan finishes.',
+      sqliteCode: null
+    })
+  }
+}
+
 interface Job {
   readonly read: boolean
+  readonly comparison: boolean
   readonly run: (client: StorageWorkerClient) => Promise<void>
-  readonly reject: (error: StorageUnavailableError) => void
-  readonly drop: (error: StorageUnavailableError) => void
+  readonly reject: (error: Error) => void
+  readonly drop: (error: Error) => void
 }
 
 /** One lane for the initialized Worker. Queued writes precede the bounded FIFO read queue. */
@@ -80,6 +93,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
   )
   private retentionListener: ((opportunity: RetentionOpportunity) => void) | undefined
   private buildingScanId: string | undefined
+  private startingScan = false
   private readonly reads: Job[] = []
   private readsStopped = false
   private readonly readLifetime = new AbortController()
@@ -109,6 +123,11 @@ export class ScanStorageCoordinator implements ScanPersistence {
 
   protectComparisonPair(signal: AbortSignal, pair: ComparisonPair): () => void {
     return this.protection.createPairOwner(signal, pair.baselineScanId, pair.targetScanId)
+  }
+
+  assertComparisonAvailable(): void {
+    if (this.startingScan || this.buildingScanId !== undefined)
+      throw new StorageSchedulingError('COMPARISON_SCAN_ACTIVE')
   }
 
   read<T>(
@@ -144,6 +163,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
       !this.readsStopped &&
       !this.active &&
       !this.write &&
+      !this.startingScan &&
       !this.protection.deletionPending &&
       !this.reads.length &&
       this.buildingScanId === undefined
@@ -228,11 +248,29 @@ export class ScanStorageCoordinator implements ScanPersistence {
     }
   }
 
-  beginScan(scan: BuildingScan): Promise<void> {
-    return this.enqueue(async (client) => {
-      await client.beginScan(scan)
-      this.buildingScanId = scan.id
-    })
+  async beginScan(scan: BuildingScan): Promise<void> {
+    if (this.readsStopped) throw new StorageUnavailableError('Saved scan storage is shutting down.')
+    if (this.client && !this.client.isReady) this.fail()
+    if (this.failure) throw this.failure
+    if (this.active?.comparison) throw new StorageSchedulingError('SCAN_COMPARISON_BUSY')
+    if (this.startingScan || this.write)
+      throw new StorageUnavailableError('Saved scan storage is busy. Retry the request.')
+
+    // Hold admission before enqueueing beginScan, including when unrelated work is in flight.
+    this.startingScan = true
+    try {
+      for (let index = this.reads.length - 1; index >= 0; index--) {
+        if (this.reads[index].comparison)
+          this.reads.splice(index, 1)[0].drop(new StorageSchedulingError('COMPARISON_SCAN_ACTIVE'))
+      }
+      await this.enqueue(async (client) => {
+        await client.beginScan(scan)
+        this.buildingScanId = scan.id
+      })
+    } finally {
+      this.startingScan = false
+      this.notifyIdle()
+    }
   }
 
   applyBatch(scanId: string, operations: readonly StorageBatchOperation[]): Promise<void> {
@@ -273,19 +311,15 @@ export class ScanStorageCoordinator implements ScanPersistence {
     if (this.client && !this.client.isReady) this.fail()
     if (this.failure) return Promise.reject(this.failure)
     const read = signal !== undefined
+    const comparison = source !== undefined && typeof source !== 'string'
     if (read && (signal.aborted || this.readsStopped)) {
       return Promise.reject(new StorageUnavailableError('The storage request is no longer active.'))
     }
-    if (
-      read ? this.reads.length >= MAX_QUEUED_EXPLORER_READS : !deletion && this.write !== undefined
-    ) {
-      return Promise.reject(
-        new StorageUnavailableError('Saved scan storage is busy. Retry the request.')
-      )
-    }
-
     let release: (() => void) | undefined
     try {
+      if (comparison) this.assertComparisonAvailable()
+      if (read ? this.reads.length >= MAX_QUEUED_EXPLORER_READS : !deletion && this.write)
+        throw new StorageUnavailableError('Saved scan storage is busy. Retry the request.')
       if (typeof source === 'string') release = this.protection.reserve(source)
       else if (source)
         release = this.protection.reservePair(source.baselineScanId, source.targetScanId)
@@ -298,25 +332,27 @@ export class ScanStorageCoordinator implements ScanPersistence {
       clearTimeout(timer)
       signal?.removeEventListener('abort', abort)
     }
-    const cancelRead = (message: string): void => {
+    const cancelRead = (error: Error): void => {
       const index = this.reads.indexOf(job)
-      const error = new StorageUnavailableError(message)
       if (index < 0) job.reject(error)
       else {
         this.reads.splice(index, 1)
         job.drop(error)
       }
     }
-    const abort = (): void => cancelRead('The storage request is no longer active.')
+    const abort = (): void =>
+      cancelRead(new StorageUnavailableError('The storage request is no longer active.'))
     const job: Job = {
       read,
+      comparison,
       run: async (client) => {
         clearTimeout(timer)
         try {
           resolve(await operation(client))
         } catch (error) {
           // Preserve the original error for a dispatched write whose outcome may be unknown.
-          reject(read && !client.isReady ? new StorageUnavailableError() : error)
+          const timedOut = comparison && error instanceof StorageRequestTimeoutError
+          reject(read && !client.isReady && !timedOut ? new StorageUnavailableError() : error)
         } finally {
           clearReadHandlers()
           if (release && !client.isReady) await client.waitForExit()
@@ -334,10 +370,14 @@ export class ScanStorageCoordinator implements ScanPersistence {
     }
     if (signal) {
       signal.addEventListener('abort', abort, { once: true })
-      timer = setTimeout(
-        () => cancelRead('Waiting for saved scan storage timed out. Retry the request.'),
-        STORAGE_REQUEST_TIMEOUT_MS
-      )
+      timer = setTimeout(() => {
+        const message = 'Waiting for saved scan storage timed out. Retry the request.'
+        cancelRead(
+          comparison
+            ? new StorageRequestTimeoutError(message)
+            : new StorageUnavailableError(message)
+        )
+      }, STORAGE_REQUEST_TIMEOUT_MS)
       this.reads.push(job)
     } else if (deletion) {
       this.deletion = job

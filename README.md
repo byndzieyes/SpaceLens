@@ -190,9 +190,9 @@ Comparison uses one owner for the adopted pair and another for one provisional r
 
 Every admitted comparison read independently reserves both sides. The coordinator removes obsolete queued requests immediately and keeps dispatched holds until the Worker replies or exits. Supersession, view exit, document invalidation, ticket expiry, and shutdown release the affected view owners. Storage exit also invalidates the selection. The shared queue retains its 10-second queue-wait deadline, the Worker retains its 10-second per-command deadline, and preparation tickets expire after 10 seconds. Scanner writes have dispatch priority and their acknowledgements still follow commit.
 
-### Scheduling and Task 5.23
+### Task 5.16 baseline and failure
 
-Pair preparation schedules metadata compatibility and each historical validation separately, giving scanner writes a dispatch opportunity between validations. The cold analytical request still builds the matching workspace inside a synchronous transaction. The first directory query can also build its rollup within a single request. The existing SQL batches share a transaction with the workspace and its cache state, so yielding between those batches would let unrelated writes enter an open transaction or require exposing partially built state.
+The cold analytical request builds the matching workspace inside a synchronous transaction. The first directory query can also build its rollup within a single request. The existing SQL batches share a transaction with the workspace and its cache state, so yielding between those batches would let unrelated writes enter an open transaction or require exposing partially built state.
 
 The Task 5.16 benchmark used Node 24.21 on Windows, the production Worker bundle, the real Main IPC handlers, and a simulated Electron sender. The fixture held 98,426 and 98,427 entries, including 16,924 and 16,925 directories. Two newer small publications made both sources historical. The scanner submitted 128-entry batches while comparison operations ran.
 
@@ -215,9 +215,38 @@ Warm rows report medians of five calls. Uncontended scanner acknowledgement took
 
 Timing varied between runs on the same large entry fixture. An earlier run with the Target still Latest measured 1.20 s for cold Summary and 683 ms for first Directory Changes, with scanner acknowledgements of 1.21 s and 694 ms. Both runs completed the representative workflow within the current deadlines. The slower run left less than one second of execution headroom on reversal.
 
-The stress fixture held 210,551 and 210,552 entries, including 35,324 and 35,325 directories. Pair preparation took 2.88 s and its scanner batch acknowledged in 1.50 s. Cold Summary hit the Worker deadline at 10.01 s and returned `UNAVAILABLE`. The queued scanner batch failed before dispatch, and the run ended before the detail queries. The representative results establish a measured performance limit for this implementation.
+The stress fixture held 210,551 and 210,552 entries, including 35,324 and 35,325 directories. Pair preparation took 2.88 s and its scanner batch acknowledged in 1.50 s. In Task 5.16, the dispatched cold Summary hit its Worker deadline at 10.01 s. The client marked storage failed and requested Worker termination. The synchronous SQLite operation could continue until the Worker exited. The queued scanner batch had never been dispatched and had no Worker execution timer or successful acknowledgement. The coordinator rejected it when storage failed.
+
+In a scanner session, rejection of that batch fails the pre-acknowledgement callback and ends the scan. There is no batch retry. The session attempts to discard the incomplete scan because the batch was never sent, but the failed Worker cannot accept the discard. Startup recovery removes the building snapshot. The previous completed publication remains committed and becomes readable again when storage reopens.
+
+### Task 5.16a scheduling safety
+
+`beginScan` reserves scanner admission in the existing coordinator before the building write queues. It drops queued Comparison reads and holds admission through building creation, ingestion, publication, or cancellation cleanup. While the scanner holds admission, storage-backed compatibility, historical pair validation, Summary, and File and Directory Changes return `COMPARISON_SCAN_ACTIVE` without dispatching. Filtered counts, delta sorts, and historical validation can occupy the Worker even on an already prepared pair. The same-snapshot compatibility check, adopting a prepared ticket, and releasing or discarding a selection remain Main-side operations. Snapshot protection and workspace reuse still apply.
+
+If a Comparison job has dispatched, a scanner start returns `SCAN_COMPARISON_BUSY` without creating a building snapshot or scheduling a retry. The caller can retry after the job settles. Queue priority alone cannot preempt the synchronous Worker operation. Explorer, Insights, history, and deletion continue through their existing coordinator paths.
+
+An obsolete Comparison reply can be discarded before the Worker settles. Its dispatch reservation and both request leases survive until the reply or confirmed Worker exit. Comparison queue and Worker timeouts surface as `COMPARISON_TIMEOUT`. A Worker execution timeout makes subsequent storage requests unavailable until recovery, and a queued timeout leaves the Worker running. Worker failure, compatibility, and snapshot errors retain their separate outcomes.
+
+The Task 5.16a benchmark used the production Scanner and Storage Worker bundles, Main IPC handlers with a simulated Electron sender, and disposable databases on Windows. Each scanner run traversed 300 files and published after three acknowledged batches. Both admission orders were exercised on the two Task 5.16 fixtures.
+
+| Measurement                             | 98,000 entries per snapshot | 210,000 entries per snapshot |
+| --------------------------------------- | --------------------------: | ---------------------------: |
+| Scanner-first startup / completion      |                 65 / 507 ms |                  31 / 554 ms |
+| Scanner-first batch acknowledgements    |                    19–36 ms |                     23–81 ms |
+| Scanner-first rejected Comparison reads |                           5 |                            5 |
+| Comparison-first cold Summary IPC       |                      8.94 s |           10.01 s to timeout |
+| Comparison queue wait                   |                     0.64 ms |                      0.73 ms |
+| Scanner busy reply                      |                     4.64 ms |                      4.70 ms |
+| Scanner retry startup / completion      |                 32 / 501 ms |                  62 / 563 ms |
+| Scanner retry batch acknowledgements    |                    24–59 ms |                     20–79 ms |
+
+The scanner-first runs queued zero Comparison commands. The first batch spent 5.16 ms and 6.31 ms waiting, including the benchmark gate used to send the conflicting requests. Retry batches waited at most 0.03 ms. In Comparison-first runs, the busy response and a duplicate-start rejection produced zero building writes. The representative Summary spent 8.94 s executing on the Worker, and the scanner retried on that Worker. In the stress case, the benchmark held termination briefly to verify that both request leases survived the timeout, then observed zero leases 52 ms after allowing exit. Recovery preserved the previous publication and both source snapshots. An explicit scanner retry then published after reopening storage.
+
+### Task 5.23 optimization plan
 
 For Task 5.23, give one candidate workspace an identity tied to the Worker and pair, and retain both source reservations across all of its stages. Build and validate ordered path ranges and roll up directories from children to parents in separately dispatched, measured chunks that each close their transaction. Keep the candidate inaccessible to analytical queries until an atomic promotion checks the pair and candidate identity. Discard stale or failed candidates once dispatched work settles. Benchmark both stage duration and scanner acknowledgement delay on the same fixtures, including contention and deadline cases, before choosing chunk sizes.
+
+Keep mutual exclusion for workloads with unpredictable duration. Before permitting overlap, establish bounds for historical validation, cache misses, filtered counts, delta sorting, and directory rollups. Rerun both scanner-first and comparison-first scenarios with the same deadlines and verify publication and cancellation cleanup under contention.
 
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
 

@@ -176,6 +176,7 @@ export type ScannerIpcErrorCode =
   | 'PICKER_FAILED'
   | 'DIRECTORY_UNAVAILABLE'
   | 'SCAN_ACTIVE'
+  | 'SCAN_COMPARISON_BUSY'
   | 'SCAN_MISMATCH'
   | 'NOT_RUNNING'
   | 'UNAVAILABLE'

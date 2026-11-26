@@ -10,13 +10,15 @@ import { readComparisonFileQuery } from './storage/comparisonFileContracts'
 import { ComparisonStorageError } from './storage/comparisonMatchContracts'
 import type { ComparisonSelection } from './storage/comparisonSelection'
 import { readComparisonPair } from './storage/comparisonSummaryContracts'
-import { StorageUnavailableError } from './storage/coordinator'
+import { StorageSchedulingError, StorageUnavailableError } from './storage/coordinator'
 import { record } from './storage/payloads'
 import { SnapshotAccessError } from './storage/snapshotAccess'
-import { StorageWorkerError } from './storage/workerClient'
+import { StorageRequestTimeoutError, StorageWorkerError } from './storage/workerClient'
 
 const messages = {
   UNAUTHORIZED: 'Comparison access is not authorized.',
+  COMPARISON_SCAN_ACTIVE: 'Comparison is available after the scan finishes.',
+  COMPARISON_TIMEOUT: 'The comparison request timed out.',
   UNAVAILABLE:
     'Saved scan storage or the comparison request is no longer available. Retry the request.',
   INTERNAL_ERROR: 'The comparison request could not be processed.',
@@ -35,6 +37,9 @@ function failure(code: ComparisonErrorCode): ScannerIpcResult<never, ComparisonE
 }
 
 function comparisonFailure(error: unknown): ScannerIpcResult<never, ComparisonErrorCode> {
+  if (error instanceof StorageRequestTimeoutError) return failure('COMPARISON_TIMEOUT')
+  if (error instanceof StorageSchedulingError && error.code === 'COMPARISON_SCAN_ACTIVE')
+    return failure('COMPARISON_SCAN_ACTIVE')
   if (error instanceof StorageUnavailableError) return failure('UNAVAILABLE')
   if (
     error instanceof SnapshotAccessError ||

@@ -182,6 +182,24 @@ test.each(['PATH_NOT_AUTHORIZED', 'DIRECTORY_UNAVAILABLE'] as const)(
   }
 )
 
+test('shows a recoverable comparison conflict and allows another scan attempt', async () => {
+  latest = snapshot(1, 'completed')
+  vi.mocked(api.startScan).mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'SCAN_COMPARISON_BUSY', message: 'Internal diagnostic' }
+  })
+  render(<OverviewPage />)
+  await screen.findByText('Scan completed')
+  const button = screen.getByRole('button', { name: 'Scan Folder' })
+  fireEvent.click(button)
+  await screen.findByText(/A comparison is using saved scan storage/)
+  expect(screen.getByText('Scan completed')).toBeVisible()
+  expect(screen.queryByText('Internal diagnostic')).not.toBeInTheDocument()
+  expect(button).toBeEnabled()
+  fireEvent.click(button)
+  await waitFor(() => expect(api.startScan).toHaveBeenCalledTimes(2))
+})
+
 test('shows cumulative real progress, small sizes and long paths without a percentage', async () => {
   await mount()
   const running = snapshot(1)

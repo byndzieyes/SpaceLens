@@ -55,6 +55,8 @@ import {
 export const STORAGE_REQUEST_TIMEOUT_MS = 10_000
 export const STORAGE_SHUTDOWN_TIMEOUT_MS = 2_000
 
+export class StorageRequestTimeoutError extends Error {}
+
 interface PendingRequest {
   readonly operation: StorageOperation
   readonly timeout: ReturnType<typeof setTimeout>
@@ -306,7 +308,7 @@ export class StorageWorkerClient {
       operation,
       reject,
       timeout: setTimeout(() => {
-        this.fail(new Error(`Storage worker ${operation} request timed out.`))
+        this.fail(new StorageRequestTimeoutError(`Storage worker ${operation} request timed out.`))
       }, STORAGE_REQUEST_TIMEOUT_MS),
       respond: (value) => {
         const response = parseStorageResponse(value, requestId, operation)
