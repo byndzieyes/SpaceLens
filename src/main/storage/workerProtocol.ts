@@ -30,10 +30,16 @@ import {
   type ComparisonFileResult
 } from './comparisonFileContracts'
 import type {
+  ComparisonDirectoryQuery,
   ComparisonFileQuery,
   ComparisonPair,
   ComparisonSummary
 } from '../../shared/comparison'
+import {
+  isComparisonDirectoryResult,
+  readComparisonDirectoryQuery,
+  type ComparisonDirectoryResult
+} from './comparisonDirectoryContracts'
 import { isComparisonSummary, readComparisonPair } from './comparisonSummaryContracts'
 import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
@@ -93,6 +99,10 @@ interface StorageCommands {
   listComparisonMatches: { payload: ComparisonMatchQuery; result: ComparisonMatchPage }
   listComparisonFileChanges: { payload: ComparisonFileQuery; result: ComparisonFileResult }
   getComparisonSummary: { payload: ComparisonPair; result: ComparisonSummary }
+  listComparisonDirectoryChanges: {
+    payload: ComparisonDirectoryQuery
+    result: ComparisonDirectoryResult
+  }
   deleteSnapshot: { payload: SnapshotDeletionRequest; result: CommittedSnapshotDeletion }
   getRetentionCandidate: { payload: RetentionCandidateRequest; result: RetentionCandidate }
   pruneSnapshot: { payload: PruneSnapshotRequest; result: CommittedSnapshotDeletion | null }
@@ -202,6 +212,8 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       return { requestId, operation, payload: readComparisonFileQuery(payload) }
     case 'getComparisonSummary':
       return { requestId, operation, payload: readComparisonPair(payload) }
+    case 'listComparisonDirectoryChanges':
+      return { requestId, operation, payload: readComparisonDirectoryQuery(payload) }
     case 'getRetentionCandidate':
     case 'pruneSnapshot': {
       if (
@@ -669,6 +681,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     listComparisonMatches: isComparisonMatchPage,
     listComparisonFileChanges: isComparisonFileResult,
     getComparisonSummary: isComparisonSummary,
+    listComparisonDirectoryChanges: isComparisonDirectoryResult,
     deleteSnapshot: isCommittedDeletion,
     getRetentionCandidate: isRetentionCandidate,
     pruneSnapshot: (value): value is CommittedSnapshotDeletion | null =>

@@ -9,6 +9,7 @@ import type {
 import type {
   ComparisonCoverage,
   ComparisonFileChange,
+  ComparisonFileSummary,
   ComparisonPathStyle
 } from '../src/shared/comparison'
 import type { FileEntry } from '../src/shared/scan'
@@ -161,4 +162,26 @@ export function oracle(
     )
     return change ? [change] : []
   })
+}
+
+export function expectedFiles(changes: readonly ComparisonFileChange[]): ComparisonFileSummary {
+  const known = changes.flatMap(({ deltaBytes }) => (deltaBytes === null ? [] : [deltaBytes]))
+  const sum = (values: readonly number[]): number =>
+    values.reduce((total, bytes) => total + bytes, 0)
+  const confirmed = changes.filter(({ kind }) => kind !== 'indeterminate')
+  const counts = { added: 0, removed: 0, modified: 0, unchanged: 0, indeterminate: 0 }
+  for (const { kind } of changes) counts[kind]++
+  return {
+    counts,
+    totalCount: changes.length,
+    knownDeltaCount: known.length,
+    unknownDeltaCount: changes.length - known.length,
+    positiveDeltaBytes: sum(known.filter((bytes) => bytes > 0)),
+    negativeDeltaBytes: sum(known.filter((bytes) => bytes < 0)),
+    netKnownDeltaBytes: sum(known),
+    confirmedKnownDeltaBytes: sum(
+      confirmed.flatMap(({ deltaBytes }) => (deltaBytes === null ? [] : [deltaBytes]))
+    ),
+    confirmedUnknownDeltaCount: confirmed.filter(({ deltaBytes }) => deltaBytes === null).length
+  }
 }

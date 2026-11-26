@@ -26,7 +26,7 @@ const reasons: Readonly<Record<EntryChangeKind, readonly FileChangeClassificatio
   indeterminate: ['unknown-presence', 'unknown-entry-type', 'unknown-metadata']
 }
 
-function isChangeKind(value: unknown): value is EntryChangeKind {
+export function isChangeKind(value: unknown): value is EntryChangeKind {
   return typeof value === 'string' && Object.hasOwn(reasons, value)
 }
 
@@ -42,7 +42,10 @@ function invalidQuery(): SnapshotAccessError {
   return new SnapshotAccessError('INVALID_REQUEST', 'Invalid file change query.')
 }
 
-export function readComparisonFileQuery(value: unknown): ResolvedComparisonFileQuery {
+export function readComparisonFileQuery(
+  value: unknown,
+  invalid = invalidQuery
+): ResolvedComparisonFileQuery {
   if (
     !record(value) ||
     Object.keys(value).some(
@@ -62,7 +65,7 @@ export function readComparisonFileQuery(value: unknown): ResolvedComparisonFileQ
     !isSnapshotId(value.baselineScanId) ||
     !isSnapshotId(value.targetScanId)
   )
-    throw invalidQuery()
+    throw invalid()
 
   const offset = Object.hasOwn(value, 'offset') ? value.offset : 0
   const limit = Object.hasOwn(value, 'limit') ? value.limit : DEFAULT_COMPARISON_PAGE_SIZE
@@ -74,7 +77,7 @@ export function readComparisonFileQuery(value: unknown): ResolvedComparisonFileQ
     limit > MAX_COMPARISON_PAGE_SIZE ||
     (sort !== 'path' && sort !== 'delta-asc' && sort !== 'delta-desc')
   )
-    throw invalidQuery()
+    throw invalid()
 
   const query = {
     baselineScanId: value.baselineScanId,
@@ -86,13 +89,13 @@ export function readComparisonFileQuery(value: unknown): ResolvedComparisonFileQ
   const relativeDirectory = Object.hasOwn(value, 'relativeDirectory') ? value.relativeDirectory : ''
   // POSIX key shape is common to both styles. The workspace also checks the source style.
   if (typeof relativeDirectory !== 'string' || !isComparisonPathKey(relativeDirectory, 'posix'))
-    throw invalidQuery()
+    throw invalid()
   const scope = relativeDirectory ? { relativeDirectory } : {}
   if (!Object.hasOwn(value, 'kinds')) return { ...query, ...scope }
-  if (!Array.isArray(value.kinds)) throw invalidQuery()
+  if (!Array.isArray(value.kinds)) throw invalid()
   const kinds = new Set<EntryChangeKind>()
   for (const kind of value.kinds as unknown[]) {
-    if (!isChangeKind(kind)) throw invalidQuery()
+    if (!isChangeKind(kind)) throw invalid()
     kinds.add(kind)
   }
   return { ...query, ...scope, kinds: [...kinds] }

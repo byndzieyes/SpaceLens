@@ -12,9 +12,9 @@ import {
   type ResolvedComparisonFileQuery
 } from './comparisonFileContracts'
 import type { CompatiblePair } from './comparisonMatchContracts'
-import { MATCHED_ENTRIES } from './comparisonSql'
+import { MATCHED_ENTRIES, subtreeBindings, subtreeScope } from './comparisonSql'
 import { MAX_SAFE_INTEGER, readEntryType, readText } from './entryRows'
-import { bindFilesystemText, readFilesystemText } from './filesystemText'
+import { readFilesystemText } from './filesystemText'
 import { SnapshotAccessError } from './snapshotAccess'
 
 const order: Readonly<Record<ComparisonSort, string>> = {
@@ -51,13 +51,11 @@ function logicalBytes(side: ComparisonSide): string {
 
 /** One file-centric relation for pages, counts, and subsequent comparison summaries. */
 export function comparisonFileChangesCte(subtree = false): string {
-  const scope = subtree
-    ? `matched.path_key >= $directory AND matched.path_key < $directoryEnd
-       AND (matched.path_key = $directory OR matched.path_key >= $descendants)`
-    : "matched.path_key > X''"
+  const scope = subtree ? subtreeScope('matched.path_key') : "matched.path_key > X''"
   return `
     WITH observed_files AS (
       SELECT matched.path_key, baseline.id AS baseline_id, baseline.type AS baseline_type,
+             baseline.parent_id AS baseline_parent_id, target.parent_id AS target_parent_id,
              baseline.size_bytes AS baseline_size, baseline.modified_at AS baseline_modified_at,
              target.id AS target_id, target.type AS target_type,
              target.size_bytes AS target_size, target.modified_at AS target_modified_at
@@ -179,12 +177,7 @@ export function readComparisonFileChanges(
   if (kinds?.length === 0) return { ...base, items: [], totalCount: 0, nextOffset: null }
 
   const values: Record<string, SQLInputValue> = comparisonFileBindings(compatibility)
-  if (relativeDirectory) {
-    values.$directory = bindFilesystemText(relativeDirectory)
-    values.$descendants = bindFilesystemText(relativeDirectory + '/')
-    // '0' immediately follows '/' in UTF-16, bounding all descendants of the prefix.
-    values.$directoryEnd = bindFilesystemText(relativeDirectory + '0')
-  }
+  if (relativeDirectory) Object.assign(values, subtreeBindings(relativeDirectory))
   const bindings = kinds?.map((kind, i) => {
     const binding = `$kind${i}`
     values[binding] = kind

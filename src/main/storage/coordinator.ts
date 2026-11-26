@@ -35,6 +35,7 @@ type SnapshotQueries = Pick<
   | 'listComparisonMatches'
   | 'listComparisonFileChanges'
   | 'getComparisonSummary'
+  | 'listComparisonDirectoryChanges'
   | 'getInsightsCategories'
   | 'getInsightsSizeDistribution'
   | 'getInsightsObservations'

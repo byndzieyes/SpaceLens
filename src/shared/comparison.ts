@@ -160,8 +160,12 @@ export interface ComparisonDirectoryChange {
   readonly baseline: ComparisonDirectoryObservation
   readonly target: ComparisonDirectoryObservation
   readonly observedDeltaBytes: ComparisonByteDelta
+  /** Known non-directory at this exact path on the opposite side. */
+  readonly typeReplacement: boolean
+  /** Coverage, classification, or byte accounting is incomplete. */
+  readonly uncertain: boolean
   /** Each descendant file path contributes once. Rows for nested directories overlap. */
-  readonly subtreeFiles: ComparisonFileTotals
+  readonly subtreeFiles: ComparisonFileSummary
 }
 
 export const DEFAULT_COMPARISON_PAGE_SIZE = 20
@@ -184,7 +188,10 @@ interface ComparisonPageQuery extends ComparisonPair {
 }
 
 export type ComparisonFileQuery = ComparisonPageQuery
-export type ComparisonDirectoryQuery = ComparisonPageQuery
+export type ComparisonDirectoryQuery = ComparisonPageQuery & {
+  /** Include the root in an unscoped query. Defaults to false. */
+  readonly includeRoot?: boolean
+}
 
 interface ComparisonPage<Item> {
   readonly pair: ComparisonPair

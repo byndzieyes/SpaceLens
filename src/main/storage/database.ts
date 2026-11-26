@@ -72,6 +72,15 @@ import {
 } from './comparisonMatchContracts'
 import { readComparisonFileQuery, type ComparisonFileResult } from './comparisonFileContracts'
 import { readComparisonFileChanges } from './comparisonFileChanges'
+import {
+  readComparisonDirectoryQuery,
+  type ComparisonDirectoryResult
+} from './comparisonDirectoryContracts'
+import {
+  listComparisonDirectories,
+  prepareComparisonDirectories,
+  reconcileDirectoryRoot
+} from './comparisonDirectoryAnalysis'
 import { readComparisonSummary } from './comparisonSummary'
 import { readComparisonPair } from './comparisonSummaryContracts'
 import { ComparisonWorkspace } from './comparisonWorkspace'
@@ -753,12 +762,39 @@ export class ScanDatabase {
     const summary = this.withComparisonWorkspace(
       pair,
       undefined,
-      (compatibility, baseline, target) =>
-        this.comparison.summary ??
-        readComparisonSummary(this.connection, compatibility, baseline, target)
+      (compatibility, baseline, target) => {
+        if (this.comparison.summary) return this.comparison.summary
+        const summary = readComparisonSummary(this.connection, compatibility, baseline, target)
+        if (this.comparison.hasDirectories) reconcileDirectoryRoot(this.connection, summary.files)
+        return summary
+      }
     )
     this.comparison.rememberSummary(summary)
     return summary
+  }
+
+  listComparisonDirectoryChanges(request: unknown): ComparisonDirectoryResult {
+    const query = readComparisonDirectoryQuery(request)
+    let prepared = false
+    const page = this.withComparisonWorkspace(
+      query,
+      query.relativeDirectory,
+      (compatibility, baseline, target) => {
+        if (!this.comparison.hasDirectories && query.kinds?.length !== 0) {
+          prepareComparisonDirectories(
+            this.connection,
+            compatibility,
+            baseline,
+            target,
+            this.comparison.summary?.files
+          )
+          prepared = true
+        }
+        return listComparisonDirectories(this.connection, compatibility, query)
+      }
+    )
+    if (prepared) this.comparison.rememberDirectories(page.pair)
+    return page
   }
 
   private withComparisonWorkspace<T>(

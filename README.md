@@ -109,7 +109,7 @@ The isolated instrumented run measured 318 ms in historical integrity queries an
 
 ### File change queries
 
-The Storage Worker computes file changes from the same path workspace. One SQL relation excludes the root and paths without a regular file, then computes the reason, kind, proven byte contributions, and signed delta. It validates canonical UTC millisecond timestamps, including expanded years supported by the scanner, and preserves stored metadata in the returned observations. Compatibility warnings accompany every page. Task 5.15 can reuse the same classification and byte rules.
+The Storage Worker computes file changes from the same path workspace. One SQL relation excludes the root and paths without a regular file, then computes the reason, kind, proven byte contributions, and signed delta. It validates canonical UTC millisecond timestamps, including expanded years supported by the scanner, and preserves stored metadata in the returned observations. Compatibility warnings accompany every page. Directory analysis shares this relation and its byte rules.
 
 The internal query uses the shared offset and total-count contract. Pages default to 20 rows and allow up to 100. An omitted kind filter includes all kinds, an empty list matches none, and repeating a kind has the same effect as selecting it once. A subtree filter includes the exact key and its descendants within component boundaries. Path order uses UTF-16BE keys. Signed delta sorts place unknown deltas last and break ties by ascending key. The SQL count and page share one transaction, so a past-end offset returns an empty page and the filtered total.
 
@@ -152,6 +152,35 @@ The Windows benchmark used snapshots of 100,013 entries each. The partial pair e
 The profiled cold request took 2.43 s, including 172 ms of historical validation, 1.86 s of workspace inserts, and 384 ms of aggregation. Warm aggregate SQL took 386 ms. The warm file count before summary reuse took 170 ms under profiling, close to Task 5.13's 172 ms. Task 5.13's uninstrumented reference took 2.58 s cold and 162 ms for the warm default page with a count. Sampled Worker heap peaked at 23 MiB cold, 10 MiB during warm aggregation, and 38 MiB during the profiled pair switch. The workspace stayed at 1,821 pages, about 7.11 MiB. That page count excludes the grouping work area.
 
 A 128-entry scanner batch acknowledged in 1.77 s during cold summary preparation and 274 ms during warm uncached aggregation, versus 8–9 ms uncontended. Task 5.13 measured 2.65 s queued cold and 465 ms during a warm delta sort. In both summary scenarios the scanner write committed before the waiting read. Active aggregation remains synchronous. The measured runs completed within the existing 10-second deadline.
+
+### Directory change analysis
+
+Directory queries reuse the prepared path workspace and each validated directory's persisted aggregate for observed size differences. A confirmed missing directory or a known non-directory replacement contributes zero directory bytes. An uncertain missing directory leaves the observed delta unknown. Navigation references identify directory entries in the exact saved snapshot. The type-replacement flag identifies a known non-directory at the same key.
+
+Presence determines the status for a directory observed on one side. A confirmed absence or known type replacement yields Added or Removed, and an uncertain opposite side yields Indeterminate. A directory observed on both sides is Modified when any strict descendant has a confirmed file change or directory addition or removal. This includes timestamp-only file changes and empty directory changes with a zero-byte delta. Otherwise the directory is Indeterminate when coverage, descendant classification, or byte accounting is incomplete. Unchanged means the available file metadata and directory structure establish no change under these rules. Directory timestamps and the contents of known non-directory special entries are outside this classification. The uncertainty flag also applies to confirmed changes, including changes recorded during a globally incomplete scan.
+
+One temporary row per directory stores its canonical BLOB primary key, side-specific directory IDs, parent link, observations, and rollup totals. Two partial indexes map scan-scoped directory IDs to these keys. SQL groups classified files by immediate parent and kind before folding those groups into the directory rows. The Worker then visits directories in descending key order in batches of up to 512 keys. A parent sorts after its descendants in that order, so one indexed update per child adds the completed totals to its parent. This avoids a separate file scan per directory and an ancestor-by-descendant table. JavaScript holds only one key batch and a bounded result page.
+
+Subtree file counts include strict descendants. A file involved in an exact-key directory replacement belongs to the parent directory's totals. Nested rows overlap intentionally, so ranking rows cannot be added to derive global change. Root statistics include files directly under the root and reconcile with the independent Comparison Summary. Complete subtrees with known deltas reconcile with the observed size difference. The Worker checks numeric ranges before serializing totals.
+
+Directory pages use the existing kind and subtree filters, exact counts, and offsets. Subtree filtering includes the selected key and its descendants. The root is opt-in through `includeRoot`. Signed growth and reduction sorts rank unknown deltas last, breaking ties by ascending UTF-16BE key. The directory table becomes reusable only after a successful transaction. Source deletion, pair replacement, and Worker disposal invalidate it alongside the matching workspace. Unrelated mutations leave the prepared pair and its summary usable.
+
+The Windows production Worker benchmark used 98,429 entries and 16,925 directories per snapshot, including 45,000 file siblings, 16,000 directory siblings, and a 120-level branch. It exercised complete and incomplete pairs, empty directory changes, type replacements, and positive, negative, zero, and unknown contributions. The pair had 17,725 non-root directory records. The query plan showed one workspace scan to seed directory facts and one classified file pass with two grouping steps. Parent resolution used the side-specific ID indexes. Each rollup update looked up its child and parent by primary key. Path and subtree pages sought over the BLOB index, and delta sorts used a temporary B-tree.
+
+| Production Worker measurement                   |           Uninstrumented result |
+| ----------------------------------------------- | ------------------------------: |
+| Cold preparation and first directory page       |                          2.43 s |
+| Cold summary followed by first directory page   | 1.93 s for summary, then 901 ms |
+| Warm path page                                  |                  3.51 ms median |
+| Warm growth / reduction page                    |           6.32 / 6.88 ms median |
+| Warm modified directories scoped to the catalog |                  5.91 ms median |
+| Offset 16,000, path / delta order               |          5.60 / 24.26 ms median |
+| Warm root page                                  |                  0.57 ms median |
+| Reverse pair / switch to complete pair          |                 3.05 s / 2.74 s |
+
+In the profiled warm-workspace preparation, seeding and parent resolution took 250 ms, direct file aggregation took 511 ms, and reading key batches and rolling them up took 202 ms. The indexed root reconciliation read took 0.023 ms before comparison of the totals. Sampled Worker heap peaked at 24 MiB cold, 10 MiB while preparing directories after the summary, and 11 MiB on warm pages. Matching used 6.73 MiB of SQLite pages on this fixture, compared with Task 5.14's 7.11 MiB on its fixture. Directory state added 5.24 MiB of SQLite pages, for 11.96 MiB total. This excludes temporary grouping and ranking work areas.
+
+Scanner batches acknowledged after 2.44 s during cold directory preparation and 911 ms when the matching workspace already existed, versus 9–10 ms uncontended. They committed ahead of the waiting read. Task 5.14's reference summary took 1.65 s cold and 263 ms on a warm workspace, with scanner acknowledgements of 1.77 s and 274 ms. Directory preparation remains synchronous, and the measured runs completed within the existing deadline. Tasks 5.16 and 5.23 should account for this added Worker occupation when scheduling and benchmarking larger comparisons.
 
 ### Planned authorization and protection
 

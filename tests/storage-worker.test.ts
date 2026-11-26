@@ -481,6 +481,29 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
   })
   await expect(client.getComparisonSummary(pair)).resolves.toEqual(summary)
   await expect(client.listComparisonFileChanges(pair)).resolves.toMatchObject({ totalCount: 1 })
+  const directoryQuery = { ...pair, includeRoot: true, limit: 1 }
+  const directories = await storage.read(signal, (db) =>
+    db.listComparisonDirectoryChanges(directoryQuery)
+  )
+  expect(directories).toMatchObject({
+    totalCount: 1,
+    nextOffset: null,
+    compatibility: summary.compatibility,
+    items: [
+      {
+        relativePath: '',
+        kind: 'indeterminate',
+        uncertain: true,
+        baseline: { presence: 'present', entry: { scanId: before.id, entryId: root.id } },
+        target: { presence: 'present', entry: { scanId: target.id, entryId: root.id } },
+        subtreeFiles: summary.files
+      }
+    ]
+  })
+  await expect(client.listComparisonDirectoryChanges(pair)).resolves.toMatchObject({
+    totalCount: 0,
+    items: []
+  })
   await expect(client.listComparisonFileChanges({ ...pair, limit: 101 })).rejects.toMatchObject({
     code: 'INVALID_REQUEST'
   })
@@ -523,6 +546,9 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
   await reopened.initialize(databasePath)
   await reopened.recoverStorage()
   await expect(reopened.getComparisonSummary(pair)).resolves.toEqual(summary)
+  await expect(reopened.listComparisonDirectoryChanges(directoryQuery)).resolves.toEqual(
+    directories
+  )
   await expect(reopened.listComparisonMatches(cursor)).resolves.toEqual(saved)
   await expect(
     reopened.listComparisonFileChanges({ ...pair, kinds: ['indeterminate'], limit: 1 })
@@ -535,6 +561,9 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
     code: 'SNAPSHOT_EXPIRED'
   })
   await expect(reopened.getComparisonSummary(pair)).rejects.toMatchObject({
+    code: 'SNAPSHOT_EXPIRED'
+  })
+  await expect(reopened.listComparisonDirectoryChanges(directoryQuery)).rejects.toMatchObject({
     code: 'SNAPSHOT_EXPIRED'
   })
   await expect(reopened.getPublishedScan()).resolves.toMatchObject({ id: target.id })

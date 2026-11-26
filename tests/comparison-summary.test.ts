@@ -1,4 +1,4 @@
-// @vitest-environment node
+﻿// @vitest-environment node
 
 import { StatementSync, type DatabaseSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
@@ -7,8 +7,7 @@ import type { CompatiblePair } from '../src/main/storage/comparisonMatchContract
 import { readComparisonSummary } from '../src/main/storage/comparisonSummary'
 import { ScanDatabase } from '../src/main/storage/database'
 import { parseStorageResponse } from '../src/main/storage/workerProtocol'
-import type { ComparisonFileChange, ComparisonFileSummary } from '../src/shared/comparison'
-import { fixture, oracle, publish, type Spec } from './comparison-fixture'
+import { expectedFiles, fixture, oracle, publish, type Spec } from './comparison-fixture'
 import { createV1Database, seedV1Scan } from './v1-scan-fixture'
 
 const pair = { baselineScanId: 'before', targetScanId: 'after' }
@@ -34,28 +33,6 @@ beforeEach(() => {
   db = new ScanDatabase(':memory:')
 })
 afterEach(() => db.close())
-
-function expectedFiles(changes: readonly ComparisonFileChange[]): ComparisonFileSummary {
-  const known = changes.flatMap(({ deltaBytes }) => (deltaBytes === null ? [] : [deltaBytes]))
-  const sum = (values: readonly number[]): number =>
-    values.reduce((total, bytes) => total + bytes, 0)
-  const confirmed = changes.filter(({ kind }) => kind !== 'indeterminate')
-  const counts = { ...emptyCounts }
-  for (const { kind } of changes) counts[kind]++
-  return {
-    counts,
-    totalCount: changes.length,
-    knownDeltaCount: known.length,
-    unknownDeltaCount: changes.length - known.length,
-    positiveDeltaBytes: sum(known.filter((bytes) => bytes > 0)),
-    negativeDeltaBytes: sum(known.filter((bytes) => bytes < 0)),
-    netKnownDeltaBytes: sum(known),
-    confirmedKnownDeltaBytes: sum(
-      confirmed.flatMap(({ deltaBytes }) => (deltaBytes === null ? [] : [deltaBytes]))
-    ),
-    confirmedUnknownDeltaCount: confirmed.filter(({ deltaBytes }) => deltaBytes === null).length
-  }
-}
 
 test.each([
   { entries: [] },

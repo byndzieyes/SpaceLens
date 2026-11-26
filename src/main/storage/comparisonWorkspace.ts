@@ -31,6 +31,7 @@ function invalidPath(cause?: unknown): ComparisonStorageError {
 export class ComparisonWorkspace {
   private pair: ComparisonPair | undefined
   private cachedSummary: ComparisonSummary | undefined
+  private directoriesPrepared = false
   private preparation:
     | {
         keyForEntry: NonNullable<ReturnType<typeof createComparisonPathKey>>
@@ -60,6 +61,7 @@ export class ComparisonWorkspace {
   clear(): void {
     this.pair = undefined
     this.cachedSummary = undefined
+    this.directoriesPrepared = false
     this.firstPage = undefined
     this.nextPage = undefined
   }
@@ -72,6 +74,15 @@ export class ComparisonWorkspace {
   rememberSummary(summary: ComparisonSummary): void {
     if (!this.matches(summary.pair)) throw new Error('Comparison workspace changed.')
     this.cachedSummary = summary
+  }
+
+  get hasDirectories(): boolean {
+    return this.directoriesPrepared
+  }
+
+  rememberDirectories(pair: ComparisonPair): void {
+    if (!this.matches(pair)) throw new Error('Comparison workspace changed.')
+    this.directoriesPrepared = true
   }
 
   /** Run inside the caller's transaction. A failed attempt leaves no usable workspace. */

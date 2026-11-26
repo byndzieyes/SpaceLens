@@ -8,7 +8,7 @@ import {
 } from './comparisonFileChanges'
 import type { CompatiblePair } from './comparisonMatchContracts'
 import { isComparisonSummary } from './comparisonSummaryContracts'
-import { MAX_SAFE_INTEGER } from './entryRows'
+import { FILE_KIND_TOTALS_SQL } from './comparisonFileAggregates'
 import { readFileAggregateRows } from './fileAggregation'
 import { SnapshotAccessError } from './snapshotAccess'
 
@@ -26,13 +26,7 @@ export function readComparisonSummary(
   // Group once by the shared kind. SQLite returns at most five rows, with no file details.
   const statement = connection.prepare(`
     ${comparisonFileChangesCte()}
-    SELECT kind, COUNT(*) AS path_count, COUNT(delta_bytes) AS known_count,
-           COUNT(*) FILTER (WHERE delta_bytes IS NULL) AS unknown_count,
-           COALESCE(SUM(delta_bytes) FILTER (WHERE delta_bytes > 0), 0) AS positive_bytes,
-           COALESCE(SUM(delta_bytes) FILTER (WHERE delta_bytes < 0), 0) AS negative_bytes,
-           COALESCE(SUM(delta_bytes), 0) AS net_bytes,
-           COUNT(*) FILTER (WHERE baseline_bytes NOT BETWEEN 0 AND ${MAX_SAFE_INTEGER}
-                               OR target_bytes NOT BETWEEN 0 AND ${MAX_SAFE_INTEGER}) AS invalid_sizes
+    SELECT kind, ${FILE_KIND_TOTALS_SQL}
     FROM file_changes
     GROUP BY kind
   `)

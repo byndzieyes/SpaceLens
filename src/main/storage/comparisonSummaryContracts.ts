@@ -1,4 +1,8 @@
-import type { ComparisonPair, ComparisonSummary } from '../../shared/comparison'
+import type {
+  ComparisonFileSummary,
+  ComparisonPair,
+  ComparisonSummary
+} from '../../shared/comparison'
 import type { CompletedScanMetadata } from '../../shared/scan'
 import { isCompatiblePair } from './comparisonMatchContracts'
 import { integer, isSnapshotId, isStorageScan, record } from './payloads'
@@ -40,8 +44,7 @@ export function isComparisonSummary(value: unknown): value is ComparisonSummary 
     !isCompletedMetadata(baseline, pair.baselineScanId) ||
     !isCompletedMetadata(target, pair.targetScanId) ||
     !record(observed) ||
-    !record(files) ||
-    !record(files.counts)
+    !isComparisonFileSummary(files)
   )
     return false
 
@@ -54,10 +57,22 @@ export function isComparisonSummary(value: unknown): value is ComparisonSummary 
     observed.target !== after.totalBytes ||
     observed.delta !== after.totalBytes - before.totalBytes ||
     value.fileCountDelta !== after.fileCount - before.fileCount ||
-    value.directoryCountDelta !== after.directoryCount - before.directoryCount
+    value.directoryCountDelta !== after.directoryCount - before.directoryCount ||
+    files.positiveDeltaBytes > after.totalBytes ||
+    files.negativeDeltaBytes < -before.totalBytes
   )
     return false
 
+  return (
+    coverage.baseline !== 'complete' ||
+    coverage.target !== 'complete' ||
+    files.unknownDeltaCount !== 0 ||
+    files.netKnownDeltaBytes === observed.delta
+  )
+}
+
+export function isComparisonFileSummary(files: unknown): files is ComparisonFileSummary {
+  if (!record(files) || !record(files.counts)) return false
   const {
     counts,
     totalCount,
@@ -97,18 +112,12 @@ export function isComparisonSummary(value: unknown): value is ComparisonSummary 
     totalCount - knownDeltaCount === unknownDeltaCount &&
     negativeDeltaBytes <= 0 &&
     netKnownDeltaBytes === positiveDeltaBytes + negativeDeltaBytes &&
-    positiveDeltaBytes <= after.totalBytes &&
-    negativeDeltaBytes >= -before.totalBytes &&
     (knownDeltaCount !== 0 || (positiveDeltaBytes === 0 && negativeDeltaBytes === 0)) &&
     unchanged <= knownDeltaCount &&
     confirmedKnownDeltaBytes >= negativeDeltaBytes &&
     confirmedKnownDeltaBytes <= positiveDeltaBytes &&
     (indeterminate !== 0 || confirmedKnownDeltaBytes === netKnownDeltaBytes) &&
     uncertainUnknownCount >= 0 &&
-    uncertainUnknownCount <= indeterminate &&
-    (coverage.baseline !== 'complete' ||
-      coverage.target !== 'complete' ||
-      unknownDeltaCount !== 0 ||
-      netKnownDeltaBytes === observed.delta)
+    uncertainUnknownCount <= indeterminate
   )
 }
