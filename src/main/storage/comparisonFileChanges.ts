@@ -112,7 +112,7 @@ export function comparisonFileChangesCte(subtree = false): string {
   `
 }
 
-function safeBytes(value: SQLOutputValue, signed: boolean): number {
+export function readComparisonInteger(value: SQLOutputValue, signed: boolean): number {
   if (
     typeof value !== 'bigint' ||
     value < (signed ? -MAX_SAFE_INTEGER : 0n) ||
@@ -141,7 +141,7 @@ function observation(
         side === 'baseline' ? compatibility.pair.baselineScanId : compatibility.pair.targetScanId,
       entryId: readText(id, 'comparison entry ID'),
       type: readEntryType(row[`${side}_type`]),
-      sizeBytes: bytes === null ? null : safeBytes(bytes, false),
+      sizeBytes: bytes === null ? null : readComparisonInteger(bytes, false),
       modifiedAt: modifiedAt === null ? null : readText(modifiedAt, 'comparison modification time')
     },
     coverage
@@ -159,7 +159,7 @@ function readChange(
     relativePath: readFilesystemText(row.path_key, 'comparison key'),
     baseline: observation(row, compatibility, 'baseline'),
     target: observation(row, compatibility, 'target'),
-    deltaBytes: row.delta_bytes === null ? null : safeBytes(row.delta_bytes, true)
+    deltaBytes: row.delta_bytes === null ? null : readComparisonInteger(row.delta_bytes, true)
   }
 }
 
@@ -172,17 +172,13 @@ function readStatement(connection: DatabaseSync, sql: string): StatementSync {
 export function readComparisonFileChanges(
   connection: DatabaseSync,
   compatibility: CompatiblePair,
-  { offset, limit, sort, kinds, relativeDirectory }: ResolvedComparisonFileQuery
+  { offset, limit, sort, kinds, relativeDirectory }: ResolvedComparisonFileQuery,
+  unfilteredCount?: number
 ): ComparisonFileResult {
   const base = { pair: compatibility.pair, compatibility, offset, limit }
   if (kinds?.length === 0) return { ...base, items: [], totalCount: 0, nextOffset: null }
 
-  const values: Record<string, SQLInputValue> = {
-    $baseline: compatibility.pair.baselineScanId,
-    $target: compatibility.pair.targetScanId,
-    $baselineComplete: Number(compatibility.coverage.baseline === 'complete'),
-    $targetComplete: Number(compatibility.coverage.target === 'complete')
-  }
+  const values: Record<string, SQLInputValue> = comparisonFileBindings(compatibility)
   if (relativeDirectory) {
     values.$directory = bindFilesystemText(relativeDirectory)
     values.$descendants = bindFilesystemText(relativeDirectory + '/')
@@ -196,11 +192,14 @@ export function readComparisonFileChanges(
   })
   const filter = bindings ? `WHERE kind IN (${bindings.join(', ')})` : ''
   const relation = comparisonFileChangesCte(Boolean(relativeDirectory))
-  const count = readStatement(
-    connection,
-    `${relation} SELECT COUNT(*) AS total FROM file_changes ${filter}`
-  )
-  const totalCount = safeBytes(count.get(values)?.total ?? null, false)
+  let totalCount = !kinds && !relativeDirectory ? unfilteredCount : undefined
+  if (totalCount === undefined) {
+    const count = readStatement(
+      connection,
+      `${relation} SELECT COUNT(*) AS total FROM file_changes ${filter}`
+    )
+    totalCount = readComparisonInteger(count.get(values)?.total ?? null, false)
+  }
   if (offset >= totalCount) return { ...base, items: [], totalCount, nextOffset: null }
 
   const select = readStatement(
@@ -219,4 +218,15 @@ export function readComparisonFileChanges(
     .map((row) => readChange(row, compatibility))
   const end = offset + items.length
   return { ...base, items, totalCount, nextOffset: end < totalCount ? end : null }
+}
+
+export function comparisonFileBindings(
+  compatibility: CompatiblePair
+): Record<string, string | bigint> {
+  return {
+    $baseline: compatibility.pair.baselineScanId,
+    $target: compatibility.pair.targetScanId,
+    $baselineComplete: BigInt(compatibility.coverage.baseline === 'complete'),
+    $targetComplete: BigInt(compatibility.coverage.target === 'complete')
+  }
 }

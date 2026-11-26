@@ -465,6 +465,22 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
       }
     ]
   })
+  const summary = await storage.read(signal, (db) => db.getComparisonSummary(pair))
+  expect(summary).toMatchObject({
+    pair,
+    baseline: { id: before.id, summary: { fileCount: 1, errorCount: 0 } },
+    target: { id: target.id, summary: { fileCount: 1, errorCount: 1 } },
+    compatibility: { coverage: { baseline: 'complete', target: 'incomplete' } },
+    files: {
+      counts: { added: 0, removed: 0, modified: 0, unchanged: 0, indeterminate: 1 },
+      totalCount: 1,
+      knownDeltaCount: 1,
+      unknownDeltaCount: 0,
+      netKnownDeltaBytes: 0
+    }
+  })
+  await expect(client.getComparisonSummary(pair)).resolves.toEqual(summary)
+  await expect(client.listComparisonFileChanges(pair)).resolves.toMatchObject({ totalCount: 1 })
   await expect(client.listComparisonFileChanges({ ...pair, limit: 101 })).rejects.toMatchObject({
     code: 'INVALID_REQUEST'
   })
@@ -506,6 +522,7 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
   const reopened = bundled()
   await reopened.initialize(databasePath)
   await reopened.recoverStorage()
+  await expect(reopened.getComparisonSummary(pair)).resolves.toEqual(summary)
   await expect(reopened.listComparisonMatches(cursor)).resolves.toEqual(saved)
   await expect(
     reopened.listComparisonFileChanges({ ...pair, kinds: ['indeterminate'], limit: 1 })
@@ -515,6 +532,9 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
     code: 'SNAPSHOT_EXPIRED'
   })
   await expect(reopened.listComparisonFileChanges(pair)).rejects.toMatchObject({
+    code: 'SNAPSHOT_EXPIRED'
+  })
+  await expect(reopened.getComparisonSummary(pair)).rejects.toMatchObject({
     code: 'SNAPSHOT_EXPIRED'
   })
   await expect(reopened.getPublishedScan()).resolves.toMatchObject({ id: target.id })

@@ -1,5 +1,5 @@
 import type { ScanHistoryErrorCode } from './history'
-import type { FileEntry, ScanSession, ScanSummary } from './scan'
+import type { CompletedScanMetadata, FileEntry, ScanSession, ScanSummary } from './scan'
 import type { ScanEntryRequest, SnapshotAccessErrorCode } from './snapshot'
 
 /** Ordered IDs of two distinct retained publications. Latest is irrelevant. */
@@ -116,16 +116,32 @@ export interface ComparisonFileTotals {
   readonly confirmedUnknownDeltaCount: number
 }
 
+export interface ComparisonFileSummary extends ComparisonFileTotals {
+  readonly totalCount: number
+  /** Includes known zero deltas and known deltas on indeterminate rows. */
+  readonly knownDeltaCount: number
+  readonly unknownDeltaCount: number
+  readonly positiveDeltaBytes: number
+  /** Sum of negative deltas, kept signed. */
+  readonly negativeDeltaBytes: number
+  readonly netKnownDeltaBytes: number
+}
+
 export interface ComparisonSummary {
   readonly pair: ComparisonPair
   readonly compatibility: Exclude<ComparisonCompatibility, { status: 'incompatible' }>
+  readonly baseline: CompletedScanMetadata
+  readonly target: CompletedScanMetadata
+  readonly fileCountDelta: number
+  /** Includes the root in each snapshot count. */
+  readonly directoryCountDelta: number
   /** Snapshot accounting only. With incomplete coverage this can differ from actual growth. */
   readonly observedSnapshotBytes: {
     readonly baseline: number
     readonly target: number
     readonly delta: number
   }
-  readonly files: ComparisonFileTotals
+  readonly files: ComparisonFileSummary
 }
 
 export type ComparisonDirectoryObservation =

@@ -75,6 +75,8 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().listComparisonMatches(request.payload)
     case 'listComparisonFileChanges':
       return requireDatabase().listComparisonFileChanges(request.payload)
+    case 'getComparisonSummary':
+      return requireDatabase().getComparisonSummary(request.payload)
     case 'deleteSnapshot':
       return writableDatabase().deleteSnapshot(request.payload)
     case 'getRetentionCandidate':

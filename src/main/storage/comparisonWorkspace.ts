@@ -1,5 +1,5 @@
 import type { DatabaseSync, SQLOutputValue, StatementSync } from 'node:sqlite'
-import type { ComparisonPair, ComparisonSide } from '../../shared/comparison'
+import type { ComparisonPair, ComparisonSide, ComparisonSummary } from '../../shared/comparison'
 import type { ScanSnapshot } from '../../shared/snapshot'
 import { createComparisonPathKey } from '../comparison/paths'
 import {
@@ -30,6 +30,7 @@ function invalidPath(cause?: unknown): ComparisonStorageError {
 /** Single connection-local path union. Its identity is published only after commit. */
 export class ComparisonWorkspace {
   private pair: ComparisonPair | undefined
+  private cachedSummary: ComparisonSummary | undefined
   private preparation:
     | {
         keyForEntry: NonNullable<ReturnType<typeof createComparisonPathKey>>
@@ -53,15 +54,29 @@ export class ComparisonWorkspace {
   }
 
   invalidate(scanId: string): void {
-    if (scanId === this.pair?.baselineScanId || scanId === this.pair?.targetScanId)
-      this.pair = undefined
+    if (scanId === this.pair?.baselineScanId || scanId === this.pair?.targetScanId) this.clear()
+  }
+
+  clear(): void {
+    this.pair = undefined
+    this.cachedSummary = undefined
+    this.firstPage = undefined
+    this.nextPage = undefined
+  }
+
+  get summary(): ComparisonSummary | undefined {
+    return this.cachedSummary
+  }
+
+  /** Store a summary only after its source transaction commits. */
+  rememberSummary(summary: ComparisonSummary): void {
+    if (!this.matches(summary.pair)) throw new Error('Comparison workspace changed.')
+    this.cachedSummary = summary
   }
 
   /** Run inside the caller's transaction. A failed attempt leaves no usable workspace. */
   prepare(compatibility: CompatiblePair, baseline: ScanSnapshot, target: ScanSnapshot): void {
-    this.pair = undefined
-    this.firstPage = undefined
-    this.nextPage = undefined
+    this.clear()
     this.connection.exec(`
       CREATE TEMP TABLE IF NOT EXISTS comparison_paths (
         path_key BLOB PRIMARY KEY,

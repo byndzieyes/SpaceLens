@@ -109,7 +109,7 @@ The isolated instrumented run measured 318 ms in historical integrity queries an
 
 ### File change queries
 
-The Storage Worker computes file changes from the same path workspace. One SQL relation excludes the root and paths without a regular file, then computes the reason, kind, proven byte contributions, and signed delta. It validates canonical UTC millisecond timestamps, including expanded years supported by the scanner, and preserves stored metadata in the returned observations. Compatibility warnings accompany every page. Task 5.14 can aggregate this relation directly in SQL, and Task 5.15 can reuse its classification and byte rules.
+The Storage Worker computes file changes from the same path workspace. One SQL relation excludes the root and paths without a regular file, then computes the reason, kind, proven byte contributions, and signed delta. It validates canonical UTC millisecond timestamps, including expanded years supported by the scanner, and preserves stored metadata in the returned observations. Compatibility warnings accompany every page. Task 5.15 can reuse the same classification and byte rules.
 
 The internal query uses the shared offset and total-count contract. Pages default to 20 rows and allow up to 100. An omitted kind filter includes all kinds, an empty list matches none, and repeating a kind has the same effect as selecting it once. A subtree filter includes the exact key and its descendants within component boundaries. Path order uses UTF-16BE keys. Signed delta sorts place unknown deltas last and break ties by ascending key. The SQL count and page share one transaction, so a past-end offset returns an empty page and the filtered total.
 
@@ -130,6 +130,28 @@ The production Worker benchmark used two 100,013-entry snapshots with 125,010 fi
 Cold preparation plus the first classified page took 2.58 s, compared with 2.49–4.62 s for Task 5.12's raw match benchmark. Reversing the large pair took 2.50 s, and switching to the large snapshot paired with a root-only snapshot took 1.28 s. The profiled run measured 340 ms of snapshot validation, 2.22 s executing workspace inserts, and 150 ms for the initial count. For warm default pages, SQL medians were 172 ms for the count and 1.81 ms for the page. A kind-filtered count took 284–323 ms. Sampled peak Worker heap was about 22 MiB cold and 14 MiB on warm queries. The workspace stayed at 1,821 SQLite pages, about 7.11 MiB on this fixture. Temporary space used by the delta sort is outside that page count.
 
 A queued 128-entry scanner batch acknowledged in 2.65 s during cold preparation and 465 ms during a warm growth sort, versus 17 ms when uncontended. In both cases it committed ahead of the next queued read. The initial benchmark attempt reached the existing 10-second deadline. Separate uninstrumented and profiled reruns completed with that deadline in place.
+
+### Comparison summary
+
+The summary includes both completed-snapshot records, compatibility warnings, and signed Target-minus-Baseline changes in stored logical bytes, file count, and directory count. The persisted directory counts include the roots. The stored byte difference measures the difference between the snapshots' observed known logical sizes. It may diverge from the net of calculable file deltas when coverage or sizes are incomplete.
+
+SQLite groups the shared file classification relation in one pass, returning at most five aggregate rows. Counts include zero-byte changes and explicit zeroes for missing kinds. The summary distinguishes positive, signed negative, and net known deltas from the confirmed-only aggregates, which exclude Indeterminate records. Known zeroes count as known deltas. Unknown deltas have their own count. The Worker keeps aggregate arithmetic exact with SQLite integers and BigInt, checks the safe-integer range and reconciliation, and only then serializes numbers. Complete pairs with fully known contributions must reconcile with the observed snapshot delta.
+
+The Worker retains one successful summary in the current directional workspace after the transaction commits. Metadata, compatibility, and source availability are checked on each retrieval. Replacement, source deletion, and Worker disposal clear the cached summary. Unrelated publication and deletion leave it available. Unfiltered file pages can reuse its exact count across sorts and offsets. Kind and subtree filters still count in SQL.
+
+The Windows benchmark used snapshots of 100,013 entries each. The partial pair exercised all five kinds, with 95,008 known and 30,002 unknown deltas. Its observed byte delta was +439,995 bytes and its net known file delta was +1,332,203 bytes. The separate complete pair reconciled exactly. The summary plan used one workspace primary-key range scan and two indexed entry lookups, with a temporary B-tree for grouping. A same-Worker probe produced equivalent totals with a sort-free conditional aggregate. Its median was 635 ms versus 260 ms for grouping, so the grouped implementation keeps one classification pass and returns at most five rows.
+
+| Production Worker measurement                  |        Uninstrumented result |
+| ---------------------------------------------- | ---------------------------: |
+| Cold preparation plus first summary            |                       1.65 s |
+| Warm workspace, first summary                  |                       263 ms |
+| Cached summary median                          |                      0.20 ms |
+| Unfiltered 100-row page before / after summary | 95 ms / 2.15 ms median after |
+| Reverse partial pair / switch to complete pair |              1.49 s / 2.28 s |
+
+The profiled cold request took 2.43 s, including 172 ms of historical validation, 1.86 s of workspace inserts, and 384 ms of aggregation. Warm aggregate SQL took 386 ms. The warm file count before summary reuse took 170 ms under profiling, close to Task 5.13's 172 ms. Task 5.13's uninstrumented reference took 2.58 s cold and 162 ms for the warm default page with a count. Sampled Worker heap peaked at 23 MiB cold, 10 MiB during warm aggregation, and 38 MiB during the profiled pair switch. The workspace stayed at 1,821 pages, about 7.11 MiB. That page count excludes the grouping work area.
+
+A 128-entry scanner batch acknowledged in 1.77 s during cold summary preparation and 274 ms during warm uncached aggregation, versus 8–9 ms uncontended. Task 5.13 measured 2.65 s queued cold and 465 ms during a warm delta sort. In both summary scenarios the scanner write committed before the waiting read. Active aggregation remains synchronous. The measured runs completed within the existing 10-second deadline.
 
 ### Planned authorization and protection
 

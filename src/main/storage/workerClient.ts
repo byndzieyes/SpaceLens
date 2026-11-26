@@ -17,7 +17,11 @@ import type {
 } from '../../shared/insights'
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import type { ComparisonMatchPage, ComparisonMatchQuery } from './comparisonMatchContracts'
-import type { ComparisonFileQuery } from '../../shared/comparison'
+import type {
+  ComparisonFileQuery,
+  ComparisonPair,
+  ComparisonSummary
+} from '../../shared/comparison'
 import type { ComparisonFileResult } from './comparisonFileContracts'
 import type {
   ScanDirectoryPage,
@@ -148,6 +152,10 @@ export class StorageWorkerClient {
 
   listComparisonFileChanges(query: ComparisonFileQuery): Promise<ComparisonFileResult> {
     return this.run('listComparisonFileChanges', query)
+  }
+
+  getComparisonSummary(pair: ComparisonPair): Promise<ComparisonSummary> {
+    return this.run('getComparisonSummary', pair)
   }
 
   async deleteSnapshot(request: SnapshotDeletionRequest): Promise<CommittedSnapshotDeletion> {

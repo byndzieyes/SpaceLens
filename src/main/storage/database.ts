@@ -72,8 +72,10 @@ import {
 } from './comparisonMatchContracts'
 import { readComparisonFileQuery, type ComparisonFileResult } from './comparisonFileContracts'
 import { readComparisonFileChanges } from './comparisonFileChanges'
+import { readComparisonSummary } from './comparisonSummary'
+import { readComparisonPair } from './comparisonSummaryContracts'
 import { ComparisonWorkspace } from './comparisonWorkspace'
-import type { ComparisonPair } from '../../shared/comparison'
+import type { ComparisonPair, ComparisonSummary } from '../../shared/comparison'
 import { entryColumns, MAX_SAFE_INTEGER, readEntry, readInteger, readText } from './entryRows'
 
 const SQLITE_PAGE_CACHE_KIB = 64 * 1024
@@ -737,14 +739,32 @@ export class ScanDatabase {
   listComparisonFileChanges(request: unknown): ComparisonFileResult {
     const query = readComparisonFileQuery(request)
     return this.withComparisonWorkspace(query, query.relativeDirectory, (compatibility) =>
-      readComparisonFileChanges(this.connection, compatibility, query)
+      readComparisonFileChanges(
+        this.connection,
+        compatibility,
+        query,
+        this.comparison.summary?.files.totalCount
+      )
     )
+  }
+
+  getComparisonSummary(request: unknown): ComparisonSummary {
+    const pair = readComparisonPair(request)
+    const summary = this.withComparisonWorkspace(
+      pair,
+      undefined,
+      (compatibility, baseline, target) =>
+        this.comparison.summary ??
+        readComparisonSummary(this.connection, compatibility, baseline, target)
+    )
+    this.comparison.rememberSummary(summary)
+    return summary
   }
 
   private withComparisonWorkspace<T>(
     { baselineScanId, targetScanId }: ComparisonPair,
     path: string | undefined,
-    read: (compatibility: CompatiblePair) => T
+    read: (compatibility: CompatiblePair, baseline: CompletedScan, target: CompletedScan) => T
   ): T {
     this.requireOpen()
     const pair = { baselineScanId, targetScanId }
@@ -780,7 +800,7 @@ export class ScanDatabase {
           validated = [this.resolveSavedSnapshot(baseline), this.resolveSavedSnapshot(target)]
           this.comparison.prepare(compatibility, ...validated)
         }
-        page = read(compatibility)
+        page = read(compatibility, baseline, target)
       },
       'BEGIN'
     )
@@ -1127,6 +1147,7 @@ export class ScanDatabase {
   close(): void {
     this.analytics.clear()
     this.validatedSnapshots.clear()
+    this.comparison.clear()
     if (!this.connection.isOpen) return
     if (this.connection.isTransaction) throw new Error('Cannot close during a SQLite transaction.')
     this.connection.close()

@@ -1,20 +1,17 @@
-// @vitest-environment node
+﻿// @vitest-environment node
 
 import { StatementSync } from 'node:sqlite'
 import { afterEach, beforeEach, expect, test, vi } from 'vitest'
-import { classifyFileChange, observeComparisonPath } from '../src/main/comparison/classification'
 import { readComparisonFileChanges } from '../src/main/storage/comparisonFileChanges'
 import { ComparisonWorkspace } from '../src/main/storage/comparisonWorkspace'
 import type { CompatiblePair } from '../src/main/storage/comparisonMatchContracts'
 import { ScanDatabase } from '../src/main/storage/database'
 import type {
-  ComparisonCoverage,
   ComparisonFileChange,
   ComparisonFileQuery,
   ComparisonPair
 } from '../src/shared/comparison'
-import type { FileEntry } from '../src/shared/scan'
-import { fixture, publish, type Spec } from './comparison-fixture'
+import { fixture, oracle, publish, type Spec } from './comparison-fixture'
 import { createV1Database, seedV1Scan } from './v1-scan-fixture'
 
 const pair = { baselineScanId: 'before', targetScanId: 'after' }
@@ -52,42 +49,6 @@ test('excludes the root and paths with no known regular file on either side', ()
     nextOffset: null
   })
 })
-
-function observed(
-  entry: FileEntry | undefined,
-  coverage: ComparisonCoverage
-): ReturnType<typeof observeComparisonPath> {
-  const saved = entry
-    ? {
-        scanId: entry.scanId,
-        entryId: entry.id,
-        type: entry.type,
-        sizeBytes: entry.sizeBytes,
-        modifiedAt: entry.modifiedAt
-      }
-    : null
-  return observeComparisonPath(saved, coverage)
-}
-
-function oracle(
-  before: ReturnType<typeof fixture>,
-  after: ReturnType<typeof fixture>
-): ComparisonFileChange[] {
-  const from = new Map(
-    before.entries.map((entry) => [entry.path.slice(before.scan.rootPath.length + 1), entry])
-  )
-  const to = new Map(
-    after.entries.map((entry) => [entry.path.slice(after.scan.rootPath.length + 1), entry])
-  )
-  return [...new Set([...from.keys(), ...to.keys()])].sort().flatMap((path) => {
-    const change = classifyFileChange(
-      path,
-      observed(from.get(path), before.snapshot.incomplete ? 'incomplete' : 'complete'),
-      observed(to.get(path), after.snapshot.incomplete ? 'incomplete' : 'complete')
-    )
-    return change ? [change] : []
-  })
-}
 
 function allPages(query: ComparisonFileQuery): ComparisonFileChange[] {
   const items: ComparisonFileChange[] = []

@@ -1,11 +1,16 @@
-﻿import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
+﻿import { classifyFileChange, observeComparisonPath } from '../src/main/comparison/classification'
+import { SCANNER_BATCH_SIZE } from '../src/main/scanner/workerProtocol'
 import type { ScanDatabase } from '../src/main/storage/database'
 import type {
   BuildingScan,
   CompletedScan,
   StorageBatchOperation
 } from '../src/main/storage/payloads'
-import type { ComparisonPathStyle } from '../src/shared/comparison'
+import type {
+  ComparisonCoverage,
+  ComparisonFileChange,
+  ComparisonPathStyle
+} from '../src/shared/comparison'
 import type { FileEntry } from '../src/shared/scan'
 import type { ScanSnapshot } from '../src/shared/snapshot'
 
@@ -120,4 +125,40 @@ export function publish(db: ScanDatabase, value: ReturnType<typeof fixture>): vo
   for (let i = 0; i < operations.length; i += SCANNER_BATCH_SIZE)
     db.applyBatch(scan.id, operations.slice(i, i + SCANNER_BATCH_SIZE))
   db.publishScan(scan, entries[0].id)
+}
+
+function observed(
+  entry: FileEntry | undefined,
+  coverage: ComparisonCoverage
+): ReturnType<typeof observeComparisonPath> {
+  const saved = entry
+    ? {
+        scanId: entry.scanId,
+        entryId: entry.id,
+        type: entry.type,
+        sizeBytes: entry.sizeBytes,
+        modifiedAt: entry.modifiedAt
+      }
+    : null
+  return observeComparisonPath(saved, coverage)
+}
+
+export function oracle(
+  before: ReturnType<typeof fixture>,
+  after: ReturnType<typeof fixture>
+): ComparisonFileChange[] {
+  const from = new Map(
+    before.entries.map((entry) => [entry.path.slice(before.scan.rootPath.length + 1), entry])
+  )
+  const to = new Map(
+    after.entries.map((entry) => [entry.path.slice(after.scan.rootPath.length + 1), entry])
+  )
+  return [...new Set([...from.keys(), ...to.keys()])].sort().flatMap((path) => {
+    const change = classifyFileChange(
+      path,
+      observed(from.get(path), before.snapshot.incomplete ? 'incomplete' : 'complete'),
+      observed(to.get(path), after.snapshot.incomplete ? 'incomplete' : 'complete')
+    )
+    return change ? [change] : []
+  })
 }

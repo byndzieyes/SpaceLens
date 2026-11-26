@@ -29,7 +29,12 @@ import {
   readComparisonFileQuery,
   type ComparisonFileResult
 } from './comparisonFileContracts'
-import type { ComparisonFileQuery } from '../../shared/comparison'
+import type {
+  ComparisonFileQuery,
+  ComparisonPair,
+  ComparisonSummary
+} from '../../shared/comparison'
+import { isComparisonSummary, readComparisonPair } from './comparisonSummaryContracts'
 import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
   MAX_SCAN_TREEMAP_ENTRIES,
@@ -87,6 +92,7 @@ interface StorageCommands {
   getScanHistoryMetadata: { payload: ScanHistoryMetadataRequest; result: ScanHistoryItem }
   listComparisonMatches: { payload: ComparisonMatchQuery; result: ComparisonMatchPage }
   listComparisonFileChanges: { payload: ComparisonFileQuery; result: ComparisonFileResult }
+  getComparisonSummary: { payload: ComparisonPair; result: ComparisonSummary }
   deleteSnapshot: { payload: SnapshotDeletionRequest; result: CommittedSnapshotDeletion }
   getRetentionCandidate: { payload: RetentionCandidateRequest; result: RetentionCandidate }
   pruneSnapshot: { payload: PruneSnapshotRequest; result: CommittedSnapshotDeletion | null }
@@ -194,6 +200,8 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       return { requestId, operation, payload: readComparisonMatchQuery(payload) }
     case 'listComparisonFileChanges':
       return { requestId, operation, payload: readComparisonFileQuery(payload) }
+    case 'getComparisonSummary':
+      return { requestId, operation, payload: readComparisonPair(payload) }
     case 'getRetentionCandidate':
     case 'pruneSnapshot': {
       if (
@@ -660,6 +668,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     getScanHistoryMetadata: isHistoryItem,
     listComparisonMatches: isComparisonMatchPage,
     listComparisonFileChanges: isComparisonFileResult,
+    getComparisonSummary: isComparisonSummary,
     deleteSnapshot: isCommittedDeletion,
     getRetentionCandidate: isRetentionCandidate,
     pruneSnapshot: (value): value is CommittedSnapshotDeletion | null =>
