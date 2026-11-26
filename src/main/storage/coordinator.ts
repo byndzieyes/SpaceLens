@@ -33,6 +33,7 @@ type SnapshotQueries = Pick<
   | 'listScanHistory'
   | 'getScanHistoryMetadata'
   | 'listComparisonMatches'
+  | 'listComparisonFileChanges'
   | 'getInsightsCategories'
   | 'getInsightsSizeDistribution'
   | 'getInsightsObservations'

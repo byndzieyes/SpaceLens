@@ -91,7 +91,7 @@ The five file counts are mutually exclusive and sum to the number of distinct fi
 
 ### Storage Worker path matching
 
-The Worker validates both completed trees using its existing eight-snapshot validation cache. It prepares one connection-local `STRICT, WITHOUT ROWID` temporary table for the directional pair. Each UTF-16BE BLOB primary key holds the observed Baseline and Target entry IDs. The empty BLOB represents the root directory on both sides. Fetching a row joins the IDs back to their original scans, preserving types, nulls, and known zero bytes. A missing side represents an unobserved entry. Task 5.13 will use coverage and file metadata to classify changes.
+The Worker validates both completed trees using its existing eight-snapshot validation cache. It prepares one connection-local `STRICT, WITHOUT ROWID` temporary table for the directional pair. Each UTF-16BE BLOB primary key holds the observed Baseline and Target entry IDs. The empty BLOB represents the root directory on both sides. Fetching a row joins the IDs back to their original scans, preserving types, nulls, and known zero bytes. A missing side represents an unobserved entry.
 
 Schema v2 indexes entries by scan and entry ID, by parent, and by the scan root. These indexes narrow each source and look up its parent or entry. The stored absolute path has a different identity from the canonical relative key. Computing that key in a join or CTE would repeat normalization for future queries or need a fresh index or sort for each query. A prepared `INSERT … SELECT` statement per side seeks by entry ID in batches of up to 512. The scalar function processes one entry and its parent at a time, reuses the normalized root, and rejects invalid keys and inconsistent parent paths. Same-side conflicts leave the batch short of its expected count, which rejects the pair and rolls back preparation.
 
@@ -106,6 +106,30 @@ In a disposable Windows run through the production Worker, two historical snapsh
 Two uninstrumented runs took 2.49–4.62 s for cold preparation and the first page, 3.07–4.28 ms for the median of 24 warm 100-row reads, and 2.24–4.38 s to replace the pair with its reverse. A queued 128-entry scanner batch acknowledged after 2.57–4.64 s, ahead of a waiting read. Its uncontended acknowledgement took 18–20 ms. The existing storage deadlines still apply. One instrumented attempt reached the 10-second request deadline before an isolated instrumented rerun completed.
 
 The isolated instrumented run measured 318 ms in historical integrity queries and 2.14 s preparing the temporary workspace, including 1.19 s inside the canonical-key callbacks. The first page SQL took 0.80 ms. A repeat generated zero keys. With batches of 512, sampled Worker heap peaked at 23 MiB during cold preparation, compared with 159 MiB in the first profiled run with one statement execution per side. Sampled process RSS rose from about 86 MiB to 165 MiB in the isolated run. The temporary database occupied 1,612 pages of 4 KiB each, about 6.30 MiB of SQLite pages. That measurement covers the temporary database page footprint.
+
+### File change queries
+
+The Storage Worker computes file changes from the same path workspace. One SQL relation excludes the root and paths without a regular file, then computes the reason, kind, proven byte contributions, and signed delta. It validates canonical UTC millisecond timestamps, including expanded years supported by the scanner, and preserves stored metadata in the returned observations. Compatibility warnings accompany every page. Task 5.14 can aggregate this relation directly in SQL, and Task 5.15 can reuse its classification and byte rules.
+
+The internal query uses the shared offset and total-count contract. Pages default to 20 rows and allow up to 100. An omitted kind filter includes all kinds, an empty list matches none, and repeating a kind has the same effect as selecting it once. A subtree filter includes the exact key and its descendants within component boundaries. Path order uses UTF-16BE keys. Signed delta sorts place unknown deltas last and break ties by ascending key. The SQL count and page share one transaction, so a past-end offset returns an empty page and the filtered total.
+
+Different filters, sort orders, and offsets reuse the prepared pair. Classification adds no retained rows or indexes to the workspace. The raw match cursor remains available for bounded path inspection. File queries use offsets because they return an exact total and support several orderings. Counts can scan the matching range, and delta sorts may need a temporary SQLite sort. Only the selected page crosses into JavaScript.
+
+The production Worker benchmark used two 100,013-entry snapshots with 125,010 file changes across all five kinds. `EXPLAIN QUERY PLAN` showed indexed workspace and scan-scoped entry lookups for every count and page. Subtree queries added an upper bound to the workspace seek. Path order and counts avoided sorting. Delta order used a temporary B-tree.
+
+| Query for 100 rows                       | Uninstrumented median |
+| ---------------------------------------- | --------------------: |
+| Raw match page on the same pair          |               3.26 ms |
+| Default classified page with exact count |                162 ms |
+| Added / Removed                          |          576 / 541 ms |
+| Modified / Unchanged / Indeterminate     |    307 / 313 / 321 ms |
+| Largest growth / largest reduction       |          412 / 410 ms |
+| Offset 110,000, path / delta order       |          319 / 944 ms |
+| 5,000-file subtree, all kinds / Modified |            14 / 26 ms |
+
+Cold preparation plus the first classified page took 2.58 s, compared with 2.49–4.62 s for Task 5.12's raw match benchmark. Reversing the large pair took 2.50 s, and switching to the large snapshot paired with a root-only snapshot took 1.28 s. The profiled run measured 340 ms of snapshot validation, 2.22 s executing workspace inserts, and 150 ms for the initial count. For warm default pages, SQL medians were 172 ms for the count and 1.81 ms for the page. A kind-filtered count took 284–323 ms. Sampled peak Worker heap was about 22 MiB cold and 14 MiB on warm queries. The workspace stayed at 1,821 SQLite pages, about 7.11 MiB on this fixture. Temporary space used by the delta sort is outside that page count.
+
+A queued 128-entry scanner batch acknowledged in 2.65 s during cold preparation and 465 ms during a warm growth sort, versus 17 ms when uncontended. In both cases it committed ahead of the next queued read. The initial benchmark attempt reached the existing 10-second deadline. Separate uninstrumented and profiled reruns completed with that deadline in place.
 
 ### Planned authorization and protection
 

@@ -25,6 +25,12 @@ import {
   type ComparisonMatchQuery
 } from './comparisonMatchContracts'
 import {
+  isComparisonFileResult,
+  readComparisonFileQuery,
+  type ComparisonFileResult
+} from './comparisonFileContracts'
+import type { ComparisonFileQuery } from '../../shared/comparison'
+import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
   MAX_SCAN_TREEMAP_ENTRIES,
   knownTreemapBytes,
@@ -80,6 +86,7 @@ interface StorageCommands {
   listScanHistory: { payload: ScanHistoryQuery; result: ScanHistoryPage }
   getScanHistoryMetadata: { payload: ScanHistoryMetadataRequest; result: ScanHistoryItem }
   listComparisonMatches: { payload: ComparisonMatchQuery; result: ComparisonMatchPage }
+  listComparisonFileChanges: { payload: ComparisonFileQuery; result: ComparisonFileResult }
   deleteSnapshot: { payload: SnapshotDeletionRequest; result: CommittedSnapshotDeletion }
   getRetentionCandidate: { payload: RetentionCandidateRequest; result: RetentionCandidate }
   pruneSnapshot: { payload: PruneSnapshotRequest; result: CommittedSnapshotDeletion | null }
@@ -185,6 +192,8 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       return { requestId, operation, payload: readScanHistoryQuery(payload) }
     case 'listComparisonMatches':
       return { requestId, operation, payload: readComparisonMatchQuery(payload) }
+    case 'listComparisonFileChanges':
+      return { requestId, operation, payload: readComparisonFileQuery(payload) }
     case 'getRetentionCandidate':
     case 'pruneSnapshot': {
       if (
@@ -650,6 +659,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     listScanHistory: isHistoryPage,
     getScanHistoryMetadata: isHistoryItem,
     listComparisonMatches: isComparisonMatchPage,
+    listComparisonFileChanges: isComparisonFileResult,
     deleteSnapshot: isCommittedDeletion,
     getRetentionCandidate: isRetentionCandidate,
     pruneSnapshot: (value): value is CommittedSnapshotDeletion | null =>

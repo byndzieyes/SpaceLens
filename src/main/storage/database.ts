@@ -67,9 +67,13 @@ import { PublishedAnalytics } from './publishedAnalytics'
 import {
   ComparisonStorageError,
   readComparisonMatchQuery,
-  type ComparisonMatchPage
+  type ComparisonMatchPage,
+  type CompatiblePair
 } from './comparisonMatchContracts'
+import { readComparisonFileQuery, type ComparisonFileResult } from './comparisonFileContracts'
+import { readComparisonFileChanges } from './comparisonFileChanges'
 import { ComparisonWorkspace } from './comparisonWorkspace'
+import type { ComparisonPair } from '../../shared/comparison'
 import { entryColumns, MAX_SAFE_INTEGER, readEntry, readInteger, readText } from './entryRows'
 
 const SQLITE_PAGE_CACHE_KIB = 64 * 1024
@@ -724,9 +728,25 @@ export class ScanDatabase {
 
   /** Internal keyset page of observations. All source reads belong to the same transaction. */
   listComparisonMatches(request: unknown): ComparisonMatchPage {
-    this.requireOpen()
     const query = readComparisonMatchQuery(request)
-    const { baselineScanId, targetScanId, after } = query
+    return this.withComparisonWorkspace(query, query.after, (compatibility) =>
+      this.comparison.list(compatibility, query)
+    )
+  }
+
+  listComparisonFileChanges(request: unknown): ComparisonFileResult {
+    const query = readComparisonFileQuery(request)
+    return this.withComparisonWorkspace(query, query.relativeDirectory, (compatibility) =>
+      readComparisonFileChanges(this.connection, compatibility, query)
+    )
+  }
+
+  private withComparisonWorkspace<T>(
+    { baselineScanId, targetScanId }: ComparisonPair,
+    path: string | undefined,
+    read: (compatibility: CompatiblePair) => T
+  ): T {
+    this.requireOpen()
     const pair = { baselineScanId, targetScanId }
     if (baselineScanId === targetScanId) {
       throw new ComparisonStorageError(
@@ -735,7 +755,7 @@ export class ScanDatabase {
       )
     }
 
-    let page!: ComparisonMatchPage
+    let page!: T
     let validated: readonly [ScanSnapshot, ScanSnapshot] | undefined
     inTransaction(
       this.connection,
@@ -753,14 +773,14 @@ export class ScanDatabase {
             `These saved scans are incompatible (${compatibility.reason.code}).`
           )
         }
-        if (after !== undefined && !isComparisonPathKey(after, compatibility.pathStyle)) {
-          throw new SnapshotAccessError('INVALID_REQUEST', 'The comparison cursor is invalid.')
+        if (path !== undefined && !isComparisonPathKey(path, compatibility.pathStyle)) {
+          throw new SnapshotAccessError('INVALID_REQUEST', 'The comparison path is invalid.')
         }
         if (!this.comparison.matches(pair)) {
           validated = [this.resolveSavedSnapshot(baseline), this.resolveSavedSnapshot(target)]
           this.comparison.prepare(compatibility, ...validated)
         }
-        page = this.comparison.list(compatibility, query)
+        page = read(compatibility)
       },
       'BEGIN'
     )

@@ -73,6 +73,8 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().getScanHistoryMetadata(request.payload)
     case 'listComparisonMatches':
       return requireDatabase().listComparisonMatches(request.payload)
+    case 'listComparisonFileChanges':
+      return requireDatabase().listComparisonFileChanges(request.payload)
     case 'deleteSnapshot':
       return writableDatabase().deleteSnapshot(request.payload)
     case 'getRetentionCandidate':

@@ -8,6 +8,7 @@ import {
   type CompatiblePair,
   type ResolvedComparisonMatchQuery
 } from './comparisonMatchContracts'
+import { MATCHED_ENTRIES } from './comparisonSql'
 import { entryColumns, readEntry, readEntryType } from './entryRows'
 import { bindFilesystemText, readFilesystemText } from './filesystemText'
 import { isSnapshotId } from './payloads'
@@ -17,13 +18,6 @@ const PATH_BATCH_SIZE = 512
 
 const MATCH_COLUMNS = `matched.path_key, ${entryColumns('baseline', 'baseline_')},
        ${entryColumns('target', 'target_')}`
-
-// The path index drives ordered reads and entry metadata comes from scan-scoped lookups.
-const MATCHED_ENTRIES = `
-  FROM temp.comparison_paths AS matched
-  LEFT JOIN main.entries AS baseline ON baseline.scan_id = $baseline AND baseline.id = matched.baseline_id
-  LEFT JOIN main.entries AS target ON target.scan_id = $target AND target.id = matched.target_id
-`
 
 function invalidPath(cause?: unknown): ComparisonStorageError {
   return new ComparisonStorageError(

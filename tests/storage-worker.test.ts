@@ -439,6 +439,35 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
     { relativePath: fileName, baseline: { scanId: before.id, id: file.id }, target: targetFile }
   ])
   expect(saved.nextAfter).toBeNull()
+  const fileChanges = await storage.read(signal, (db) =>
+    db.listComparisonFileChanges({
+      ...pair,
+      kinds: ['indeterminate'],
+      sort: 'delta-desc',
+      limit: 1
+    })
+  )
+  expect(fileChanges).toMatchObject({
+    totalCount: 1,
+    nextOffset: null,
+    compatibility: { coverage: { baseline: 'complete', target: 'incomplete' } },
+    items: [
+      {
+        relativePath: fileName,
+        kind: 'indeterminate',
+        reason: 'unknown-metadata',
+        deltaBytes: 0,
+        baseline: { presence: 'present', entry: { scanId: before.id, entryId: file.id } },
+        target: {
+          presence: 'present',
+          entry: { scanId: target.id, entryId: targetFile.id, modifiedAt: null }
+        }
+      }
+    ]
+  })
+  await expect(client.listComparisonFileChanges({ ...pair, limit: 101 })).rejects.toMatchObject({
+    code: 'INVALID_REQUEST'
+  })
   const reversed = await storage.read(signal, (db) =>
     db.listComparisonMatches({
       baselineScanId: target.id,
@@ -449,14 +478,43 @@ test('reads bounded comparison matches through the bundled Worker queue and rebu
   expect(reversed.rows).toMatchObject([
     { relativePath: fileName, baseline: targetFile, target: { scanId: before.id, id: file.id } }
   ])
+  await expect(
+    client.listComparisonFileChanges({
+      baselineScanId: target.id,
+      targetScanId: before.id
+    })
+  ).resolves.toMatchObject({
+    compatibility: { coverage: { baseline: 'incomplete', target: 'complete' } },
+    items: [
+      {
+        relativePath: fileName,
+        kind: 'indeterminate',
+        deltaBytes: 0,
+        baseline: { presence: 'present', entry: { scanId: target.id, entryId: targetFile.id } }
+      }
+    ]
+  })
+  await expect(
+    client.listComparisonFileChanges({ ...pair, kinds: ['added'] })
+  ).resolves.toMatchObject({
+    items: [],
+    totalCount: 0,
+    nextOffset: null
+  })
   await client.dispose()
 
   const reopened = bundled()
   await reopened.initialize(databasePath)
   await reopened.recoverStorage()
   await expect(reopened.listComparisonMatches(cursor)).resolves.toEqual(saved)
+  await expect(
+    reopened.listComparisonFileChanges({ ...pair, kinds: ['indeterminate'], limit: 1 })
+  ).resolves.toEqual(fileChanges)
   await reopened.deleteSnapshot({ scanId: before.id })
   await expect(reopened.listComparisonMatches(cursor)).rejects.toMatchObject({
+    code: 'SNAPSHOT_EXPIRED'
+  })
+  await expect(reopened.listComparisonFileChanges(pair)).rejects.toMatchObject({
     code: 'SNAPSHOT_EXPIRED'
   })
   await expect(reopened.getPublishedScan()).resolves.toMatchObject({ id: target.id })

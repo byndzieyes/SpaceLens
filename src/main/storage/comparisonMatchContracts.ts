@@ -81,7 +81,7 @@ export function readComparisonMatchQuery(value: unknown): ResolvedComparisonMatc
   )
 }
 
-function isCompatiblePair(value: unknown): value is CompatiblePair {
+export function isCompatiblePair(value: unknown): value is CompatiblePair {
   if (!record(value) || !record(value.pair) || !record(value.coverage)) return false
   const { baselineScanId, targetScanId } = value.pair
   if (

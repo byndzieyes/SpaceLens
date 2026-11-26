@@ -22,6 +22,7 @@ const queries = {
   listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
   getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
   listComparisonMatches: vi.fn<StorageWorkerClient['listComparisonMatches']>(),
+  listComparisonFileChanges: vi.fn<StorageWorkerClient['listComparisonFileChanges']>(),
   getInsightsCategories: vi.fn<StorageWorkerClient['getInsightsCategories']>(),
   getInsightsSizeDistribution: vi.fn<StorageWorkerClient['getInsightsSizeDistribution']>(),
   getInsightsObservations: vi.fn<StorageWorkerClient['getInsightsObservations']>(),

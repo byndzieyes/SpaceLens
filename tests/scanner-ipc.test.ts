@@ -73,6 +73,7 @@ const queries = {
   listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
   getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
   listComparisonMatches: vi.fn<StorageWorkerClient['listComparisonMatches']>(),
+  listComparisonFileChanges: vi.fn<StorageWorkerClient['listComparisonFileChanges']>(),
   getScanEntry: vi.fn<StorageWorkerClient['getScanEntry']>(),
   listScanDirectory: vi.fn<StorageWorkerClient['listScanDirectory']>(),
   getScanDirectoryTreemap: vi.fn<StorageWorkerClient['getScanDirectoryTreemap']>()
