@@ -71,7 +71,9 @@ History Settings loads and saves the profile's retention target. Reducing the ta
 
 History's Comparison tab lets you choose, swap, and check two saved snapshots, including snapshots outside the first page. It suggests a recent draft using publication order. Selecting Compare snapshots validates and protects the pair until you clear it or leave the tab. Draft edits keep the active pair in place until a replacement is adopted. While a scan is active, storage-backed comparison checks wait for an explicit retry.
 
-Comparison Summary and Detailed Changes, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
+An adopted pair loads its Comparison Summary automatically. The dashboard shows observed size, file, and directory differences as Target minus Baseline. A file classification chart separates Unchanged from the ring, and file byte accounting distinguishes all known deltas from confirmed changes. Coverage and unknown byte notes explain when these totals may diverge. Loaded results stay visible during scans and draft edits.
+
+Detailed Changes, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
 
 ## Snapshot comparison contracts
 

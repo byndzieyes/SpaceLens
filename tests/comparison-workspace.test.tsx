@@ -3,6 +3,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vi
 import type {
   ComparisonCompatibility,
   ComparisonPair,
+  ComparisonSummary,
   CompatiblePair
 } from '../src/shared/comparison'
 import { resolveScanHistoryQuery, type ScanHistoryItem } from '../src/shared/history'
@@ -81,6 +82,43 @@ function compatibility(pair: ComparisonPair): ComparisonCompatibility {
       warnings: [{ code: 'INCOMPLETE_COVERAGE', side: baseline.incomplete ? 'baseline' : 'target' }]
     }
   return { ...common, status: 'compatible' }
+}
+
+function summarize(pair: ComparisonPair): ComparisonSummary {
+  const baseline = rows.find(({ id }) => id === pair.baselineScanId)!
+  const target = rows.find(({ id }) => id === pair.targetScanId)!
+  const delta = target.summary.totalBytes - baseline.summary.totalBytes
+  const fileCountDelta = target.summary.fileCount - baseline.summary.fileCount
+  return {
+    pair,
+    compatibility: compatibility(pair) as CompatiblePair,
+    baseline,
+    target,
+    fileCountDelta,
+    directoryCountDelta: target.summary.directoryCount - baseline.summary.directoryCount,
+    observedSnapshotBytes: {
+      baseline: baseline.summary.totalBytes,
+      target: target.summary.totalBytes,
+      delta
+    },
+    files: {
+      counts: {
+        added: Math.max(fileCountDelta, 0),
+        removed: Math.max(-fileCountDelta, 0),
+        modified: 0,
+        indeterminate: 0,
+        unchanged: Math.min(baseline.summary.fileCount, target.summary.fileCount)
+      },
+      totalCount: Math.max(baseline.summary.fileCount, target.summary.fileCount),
+      knownDeltaCount: Math.max(baseline.summary.fileCount, target.summary.fileCount),
+      unknownDeltaCount: 0,
+      positiveDeltaBytes: Math.max(delta, 0),
+      negativeDeltaBytes: Math.min(delta, 0),
+      netKnownDeltaBytes: delta,
+      confirmedKnownDeltaBytes: delta,
+      confirmedUnknownDeltaCount: 0
+    }
+  }
 }
 
 function scanState(active: boolean, changed = false): void {
@@ -177,6 +215,7 @@ beforeEach(() => {
     ok: true,
     value: { selectionId: 'adopted-' + ticket, compatibility: tickets.get(ticket)! }
   }))
+  summary.mockImplementation(async ({ query }) => ({ ok: true, value: summarize(query) }))
   discard.mockResolvedValue({ ok: true, value: null })
   release.mockResolvedValue({ ok: true, value: null })
   const api = {
@@ -204,7 +243,18 @@ beforeEach(() => {
 afterEach(async () => {
   await act(async () => cleanup())
   expect(listen.size).toBe(0)
-  expect(summary).not.toHaveBeenCalled()
+  for (const [request] of summary.mock.calls) {
+    expect(
+      adopt.mock.settledResults.some(
+        (reply) =>
+          reply.type === 'fulfilled' &&
+          reply.value.ok &&
+          reply.value.value.selectionId === request.selectionId &&
+          reply.value.value.compatibility.pair.baselineScanId === request.query.baselineScanId &&
+          reply.value.value.compatibility.pair.targetScanId === request.query.targetScanId
+      )
+    ).toBe(true)
+  }
   expect(fileChanges).not.toHaveBeenCalled()
   expect(directoryChanges).not.toHaveBeenCalled()
   vi.unstubAllGlobals()
@@ -615,4 +665,248 @@ test('refreshes Latest and removed draft metadata without replacing the active p
   expect(button('Compare snapshots')).toBeDisabled()
   hasScan(active(), 2)
   expect(release).not.toHaveBeenCalled()
+})
+
+const summaryRequest = (
+  selectionId: string,
+  baseline: number,
+  target: number
+): Parameters<SpaceLensAPI['getComparisonSummary']>[0] => ({
+  selectionId,
+  query: pair(baseline, target)
+})
+const logicalSize = (): HTMLElement => screen.getByRole('region', { name: 'Observed logical size' })
+
+test('waits for successful adoption before loading Summary with the exact directional pair and identity', async () => {
+  const preparing =
+    Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['prepareComparisonSelection']>>>()
+  const adopting =
+    Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['adoptComparisonSelection']>>>()
+  const preparingValue = {
+    ticket: 'explicit-ticket',
+    compatibility: compatibility(pair(2, 1)) as CompatiblePair
+  }
+  prepare.mockReturnValueOnce(preparing.promise)
+  adopt.mockReturnValueOnce(adopting.promise)
+  render(<App />)
+  nav('History')
+  expect(summary).not.toHaveBeenCalled()
+  click(tab('Comparison'))
+  await compatible()
+  click(button('Swap baseline and target'))
+  await compatible()
+  expect(summary).not.toHaveBeenCalled()
+  click(button('Compare snapshots'))
+  click(button(/Preparing comparison/))
+  expect(summary).not.toHaveBeenCalled()
+  await act(async () => preparing.resolve({ ok: true, value: preparingValue }))
+  expect(adopt).toHaveBeenCalledExactlyOnceWith({ ticket: 'explicit-ticket' })
+  expect(summary).not.toHaveBeenCalled()
+  await act(async () =>
+    adopting.resolve({
+      ok: true,
+      value: { selectionId: 'actual-identity', compatibility: preparingValue.compatibility }
+    })
+  )
+  expect(summary).toHaveBeenCalledExactlyOnceWith(summaryRequest('actual-identity', 2, 1))
+  expect(within(logicalSize()).getByTitle('−1,000 bytes')).toHaveTextContent('−1 KB')
+})
+
+test('keeps previous Summary through draft changes and failed replacement, then clears it for the new adoption', async () => {
+  rows = [saved(4), saved(3), saved(1)]
+  openComparison()
+  await compare()
+  expect(
+    within(await screen.findByRole('region', { name: 'Observed logical size' })).getByTitle(
+      '+1,000 bytes'
+    )
+  ).toBeVisible()
+  await choose('baseline', 1)
+  await compatible()
+  expect(within(logicalSize()).getByTitle('+1,000 bytes')).toBeVisible()
+  const gated =
+    Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['prepareComparisonSelection']>>>()
+  prepare.mockReturnValueOnce(gated.promise)
+  click(button('Compare snapshots'))
+  expect(within(logicalSize()).getByTitle('+1,000 bytes')).toBeVisible()
+  await act(async () =>
+    gated.resolve({ ok: false, error: { code: 'SNAPSHOT_UNAVAILABLE', message: 'private path' } })
+  )
+  expect(await screen.findByText(/failed historical validation/)).toBeVisible()
+  expect(summary).toHaveBeenCalledTimes(1)
+  expect(within(logicalSize()).getByTitle('+1,000 bytes')).toBeVisible()
+
+  const replacement =
+    Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['getComparisonSummary']>>>()
+  summary.mockReturnValueOnce(replacement.promise)
+  click(button('Compare snapshots'))
+  expect(await screen.findByText('Loading comparison summary…')).toBeVisible()
+  hasScan(active(), 1)
+  expect(screen.queryByRole('region', { name: 'Observed logical size' })).toBeNull()
+  expect(summary).toHaveBeenLastCalledWith(summaryRequest('adopted-2', 1, 4))
+  await act(async () => replacement.resolve({ ok: true, value: summarize(pair(1, 4)) }))
+  expect(within(logicalSize()).getByTitle('+3,000 bytes')).toHaveTextContent('+3 KB')
+})
+
+test('keeps an in-flight Summary across draft edits and retained-history revisions', async () => {
+  rows = [saved(3), saved(2), saved(1)]
+  const pending = Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['getComparisonSummary']>>>()
+  summary.mockReturnValueOnce(pending.promise)
+  openComparison()
+  await compare()
+  await screen.findByText('Loading comparison summary…')
+  await choose('baseline', 1)
+  rows = [saved(4), ...rows]
+  scanState(false, true)
+  await waitFor(() => expect(within(side('Target')).queryByText('Latest')).toBeNull())
+  expect(summary).toHaveBeenCalledExactlyOnceWith(summaryRequest('adopted-1', 2, 3))
+  await act(async () => pending.resolve({ ok: true, value: summarize(pair(2, 3)) }))
+  expect(within(logicalSize()).getByTitle('+1,000 bytes')).toBeVisible()
+  rows = rows.filter((scan) => scan.id !== '4')
+  scanState(false, true)
+  expect(await within(side('Target')).findByText('Latest')).toBeVisible()
+  expect(summary).toHaveBeenCalledTimes(1)
+})
+
+test('ignores late success and failure after two replacements return to the original ordered IDs', async () => {
+  rows = [saved(4), saved(3), saved(1)]
+  const a = Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['getComparisonSummary']>>>()
+  const b = Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['getComparisonSummary']>>>()
+  summary.mockReturnValueOnce(a.promise).mockReturnValueOnce(b.promise)
+  openComparison()
+  await compare()
+  await waitFor(() => expect(summary).toHaveBeenCalledTimes(1))
+  await choose('baseline', 1)
+  await compatible()
+  click(button('Compare snapshots'))
+  await waitFor(() => expect(summary).toHaveBeenCalledTimes(2))
+  await choose('baseline', 3)
+  await compatible()
+  click(button('Compare snapshots'))
+  await screen.findByRole('region', { name: 'Observed logical size' })
+  const before = logicalSize().textContent
+  expect(summary.mock.calls).toEqual([
+    [summaryRequest('adopted-1', 3, 4)],
+    [summaryRequest('adopted-2', 1, 4)],
+    [summaryRequest('adopted-3', 3, 4)]
+  ])
+  const old = summarize(pair(3, 4))
+  await act(async () => {
+    a.resolve({
+      ok: true,
+      value: { ...old, observedSnapshotBytes: { baseline: 3000, target: 3999, delta: 999 } }
+    })
+    b.resolve({ ok: false, error: { code: 'COMPARISON_TIMEOUT', message: 'private path' } })
+  })
+  expect(logicalSize().textContent).toBe(before)
+  expect(screen.queryByText(/summary request timed out/)).toBeNull()
+})
+
+test.each(['Clear comparison', 'Scans', 'Overview'])(
+  'ignores Summary settling after %s and releases only the selection',
+  async (destination) => {
+    const pending =
+      Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['getComparisonSummary']>>>()
+    summary.mockReturnValueOnce(pending.promise)
+    openComparison()
+    await compare()
+    await screen.findByText('Loading comparison summary…')
+    if (destination === 'Scans') click(tab('Scans'))
+    else if (destination === 'Overview') nav('Overview')
+    else click(button(destination))
+    await waitFor(() =>
+      expect(release).toHaveBeenCalledExactlyOnceWith({ selectionId: 'adopted-1' })
+    )
+    await act(async () => pending.resolve({ ok: true, value: summarize(pair(1, 2)) }))
+    expect(screen.queryByRole('region', { name: 'Comparison summary' })).toBeNull()
+    expect(summary).toHaveBeenCalledTimes(1)
+    expect(discard).not.toHaveBeenCalled()
+  }
+)
+
+test.each(['scanner state', 'IPC admission'])(
+  'requires an explicit Summary retry after %s blocks loading',
+  async (exposure) => {
+    if (exposure === 'scanner state') {
+      const delayed =
+        Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['adoptComparisonSelection']>>>()
+      adopt.mockReturnValueOnce(delayed.promise)
+      openComparison()
+      await compatible()
+      click(button('Compare snapshots'))
+      await waitFor(() => expect(adopt).toHaveBeenCalledOnce())
+      scanState(true)
+      await act(async () =>
+        delayed.resolve({
+          ok: true,
+          value: { selectionId: 'adopted-1', compatibility: tickets.get('1')! }
+        })
+      )
+      expect(await screen.findByText(/Summary is temporarily unavailable/)).toBeVisible()
+      expect(button('Retry summary')).toBeDisabled()
+    } else {
+      summary.mockResolvedValueOnce({
+        ok: false,
+        error: { code: 'COMPARISON_SCAN_ACTIVE', message: 'private path' }
+      })
+      openComparison()
+      await compare()
+      expect(await screen.findByText(/A scan paused summary loading/)).toBeVisible()
+      scanState(true)
+      expect(button('Retry summary')).toBeDisabled()
+    }
+    const callsBefore = exposure === 'scanner state' ? 0 : 1
+    expect(summary).toHaveBeenCalledTimes(callsBefore)
+    scanState(false)
+    expect(button('Retry summary')).toBeEnabled()
+    expect(summary).toHaveBeenCalledTimes(callsBefore)
+    click(button('Retry summary'))
+    await screen.findByRole('region', { name: 'Observed logical size' })
+    const callsAfter = callsBefore + 1
+    expect(summary).toHaveBeenCalledTimes(callsAfter)
+    scanState(true)
+    expect(logicalSize()).toBeVisible()
+    scanState(false, true)
+    expect(logicalSize()).toBeVisible()
+    expect(summary).toHaveBeenCalledTimes(callsAfter)
+  }
+)
+
+test.each([
+  ['COMPARISON_TIMEOUT', /summary request timed out/],
+  ['UNAVAILABLE', /Saved scan storage is unavailable/]
+] as const)('offers one in-flight retry after Summary returns %s', async (code, message) => {
+  summary.mockResolvedValueOnce({ ok: false, error: { code, message: 'private path' } })
+  openComparison()
+  await compare()
+  expect(await screen.findByText(message)).toBeVisible()
+  expect(screen.queryByText('private path')).toBeNull()
+  const delayed = Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['getComparisonSummary']>>>()
+  summary.mockReturnValueOnce(delayed.promise)
+  const retry = button('Retry summary')
+  act(() => {
+    retry.click()
+    retry.click()
+  })
+  expect(await screen.findByText('Loading comparison summary…')).toBeVisible()
+  expect(summary.mock.calls).toEqual([
+    [summaryRequest('adopted-1', 1, 2)],
+    [summaryRequest('adopted-1', 1, 2)]
+  ])
+  await act(async () => delayed.resolve({ ok: true, value: summarize(pair(1, 2)) }))
+  expect(logicalSize()).toBeVisible()
+})
+
+test('asks the user to adopt again after the current selection is invalidated', async () => {
+  summary.mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'SNAPSHOT_EXPIRED', message: 'private path' }
+  })
+  openComparison()
+  await compare()
+  expect(await screen.findByText(/Adopt the pair again/)).toBeVisible()
+  expect(screen.queryByRole('button', { name: 'Retry summary' })).toBeNull()
+  click(button('Compare snapshots'))
+  await screen.findByRole('region', { name: 'Observed logical size' })
+  expect(summary).toHaveBeenLastCalledWith(summaryRequest('adopted-2', 1, 2))
 })

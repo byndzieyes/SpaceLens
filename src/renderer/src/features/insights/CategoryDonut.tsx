@@ -5,6 +5,7 @@ import type {
   InsightsFileCategory
 } from '../../../../shared/insights'
 import { formatBytes } from '../../lib/storage'
+import { DonutRing } from '../../components/ui/DonutRing'
 import { categoryLabels } from './insightsDisplay'
 
 const categoryColors: Record<InsightsFileCategory, string> = {
@@ -75,38 +76,11 @@ export function CategoryDonut({ data }: { data: InsightsCategories }): React.JSX
     >
       {knownBytes > 0 ? (
         <div className="relative mx-auto grid aspect-square w-full max-w-52 place-items-center">
-          <svg aria-hidden="true" viewBox="0 0 200 200" className="block h-full w-full">
-            <circle
-              cx="100"
-              cy="100"
-              r="76"
-              fill="none"
-              strokeWidth="22"
-              className="stroke-separator"
-            />
-            <g transform="rotate(-90 100 100)">
-              {rows
-                .filter(({ share }) => share > 0)
-                .map(({ category, color, offset, share }) => (
-                  <circle
-                    key={category}
-                    cx="100"
-                    cy="100"
-                    r="76"
-                    fill="none"
-                    stroke={color}
-                    strokeWidth={active?.category === category ? 26 : 22}
-                    pathLength="1"
-                    strokeDasharray={share === 1 ? undefined : `${share} ${1 - share}`}
-                    strokeDashoffset={-offset}
-                    opacity={active && active.category !== category ? 0.55 : 1}
-                    data-category={category}
-                    onPointerEnter={() => setHovered(category)}
-                    onPointerLeave={() => setHovered(null)}
-                  />
-                ))}
-            </g>
-          </svg>
+          <DonutRing
+            segments={rows.map((row) => ({ ...row, key: row.category }))}
+            active={active?.category}
+            onHover={setHovered}
+          />
           {active ? (
             <div
               id={tooltipId}

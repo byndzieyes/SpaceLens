@@ -23,7 +23,7 @@ export function AppShell({
   }, [activePage])
 
   return (
-    <div className="flex h-dvh overflow-hidden bg-background text-text-primary">
+    <div className="fixed inset-0 flex overflow-hidden bg-background text-text-primary">
       <Sidebar activePage={activePage} onNavigate={onNavigate} />
       <div className="flex min-w-0 flex-1 flex-col">
         <Topbar title={pageTitles[activePage]} actions={actions} />

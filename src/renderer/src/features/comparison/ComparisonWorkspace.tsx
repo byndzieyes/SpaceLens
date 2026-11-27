@@ -5,7 +5,9 @@ import { DEFAULT_SCAN_HISTORY_PAGE_SIZE, type ScanHistoryItem } from '../../../.
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
-import { SnapshotDetails, SnapshotPicker, SnapshotSelector } from './SnapshotPicker'
+import { formatPreciseScanDate } from '../../lib/scanDisplay'
+import { ComparisonDashboard } from './ComparisonDashboard'
+import { SnapshotPicker, SnapshotSelector } from './SnapshotPicker'
 import {
   comparisonError,
   incompatibilityMessage,
@@ -43,44 +45,61 @@ function CoverageWarnings({
   )
 }
 
-// Future results belong below this heading and receive only the adopted identity.
 function ActiveComparisonPanel({
   active,
   latestId,
+  scanActive,
   onClear
 }: {
   active: ActiveComparison
   latestId?: string | null
+  scanActive: boolean | undefined
   onClear: () => void
 }): React.JSX.Element {
   return (
-    <Card aria-labelledby="active-comparison-title" className="min-w-0 space-y-3">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 id="active-comparison-title" className="text-base font-semibold">
-          Active comparison
-        </h3>
-        <Button variant="secondary" onClick={onClear}>
-          Clear comparison
-        </Button>
-      </div>
-      <dl className="grid min-w-0 gap-3 @min-[38rem]:grid-cols-2">
-        {(['baseline', 'target'] as const).map((side) => {
-          const scan = active.snapshots[side]
-          return (
-            <div key={side} className="min-w-0 space-y-1">
-              <dt className="text-xs font-medium text-text-secondary">{sideLabels[side]}</dt>
-              <dd>
-                <SnapshotDetails
-                  scan={scan}
-                  latest={latestId === undefined ? scan.isLatest : latestId === scan.id}
-                />
-              </dd>
-            </div>
-          )
-        })}
-      </dl>
-      <CoverageWarnings compatibility={active.selection.compatibility} />
-    </Card>
+    <section aria-labelledby="active-comparison-title" className="min-w-0 space-y-3">
+      <Card className="min-w-0 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h3 id="active-comparison-title" className="text-base font-semibold">
+              Active comparison
+            </h3>
+            <p className="text-sm text-text-secondary">Changes are Target minus Baseline.</p>
+          </div>
+          <Button variant="secondary" onClick={onClear}>
+            Clear comparison
+          </Button>
+        </div>
+        <dl className="grid min-w-0 gap-3 @min-[38rem]:grid-cols-2">
+          {(['baseline', 'target'] as const).map((side) => {
+            const scan = active.snapshots[side]
+            const latest = latestId === undefined ? scan.isLatest : latestId === scan.id
+            return (
+              <div key={side} className="min-w-0 space-y-1">
+                <dt className="text-xs font-medium text-text-secondary">{sideLabels[side]}</dt>
+                <dd className="space-y-1">
+                  <p
+                    title={scan.rootPath}
+                    className="line-clamp-2 text-sm font-medium break-all whitespace-pre-wrap"
+                  >
+                    {scan.rootPath}
+                  </p>
+                  <div className="flex flex-wrap items-center gap-2 text-xs text-text-secondary tabular-nums">
+                    <time dateTime={scan.finishedAt}>{formatPreciseScanDate(scan.finishedAt)}</time>
+                    {latest && <Badge>Latest</Badge>}
+                  </div>
+                </dd>
+              </div>
+            )
+          })}
+        </dl>
+      </Card>
+      <ComparisonDashboard
+        key={active.selection.selectionId}
+        selection={active.selection}
+        scanActive={scanActive}
+      />
+    </section>
   )
 }
 
@@ -273,6 +292,7 @@ export function ComparisonWorkspace({
         <ActiveComparisonPanel
           active={selection.active}
           latestId={latestId}
+          scanActive={scanActive}
           onClear={selection.clear}
         />
       )}
