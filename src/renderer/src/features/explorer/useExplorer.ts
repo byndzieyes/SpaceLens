@@ -4,12 +4,12 @@ import { followLatest } from '../../../../shared/snapshotSelection'
 import type { ExplorerTarget } from '../../navigation'
 import { useSnapshotSelections, type ViewSnapshotOptions } from '../snapshots/selection'
 import {
-  invalidExplorerEntry,
   isStaleSnapshotError,
-  locateFileContentsPage,
   resolveDirectoryAncestry,
+  resolveExplorerArrival,
   resolveExplorerSnapshot,
   type ExplorerAccessError,
+  type ExplorerArrival,
   type ExplorerSnapshotState,
   type LocatedContentsPage
 } from './data'
@@ -79,7 +79,8 @@ function enterDirectory(
 export function useExplorer(
   target?: ExplorerTarget,
   onTargetConsumed?: (target: ExplorerTarget) => void,
-  snapshots?: ViewSnapshotOptions
+  snapshots?: ViewSnapshotOptions,
+  arrival?: ExplorerArrival
 ): ExplorerState & {
   currentDirectoryId: string | null
   historical: boolean
@@ -107,7 +108,8 @@ export function useExplorer(
     replacing = false,
     intent?: ExplorerTarget,
     targetNotice = replacing ? current.current.targetNotice : null,
-    handoff?: ViewSnapshotOptions['handoff']
+    handoff?: ViewSnapshotOptions['handoff'],
+    verified?: ExplorerArrival
   ): Promise<void> => {
     if (!mounted.current) return
     const ticket = ++sequence.current
@@ -161,42 +163,15 @@ export function useExplorer(
       }
 
       try {
-        let file: FileEntry | undefined
-        if (intent.type === 'file') {
-          const entry = await window.spaceLens.getScanEntry({
-            scanId: intent.scanId,
-            entryId: intent.entryId
-          })
-          if (!isCurrent()) return
-          if (!entry.ok) throw entry.error
-          file = entry.value
-          if (
-            file.scanId !== intent.scanId ||
-            file.id !== intent.entryId ||
-            file.parentId !== intent.parentId ||
-            file.type !== 'file'
-          )
-            throw invalidExplorerEntry('The ranked file does not match its published entry.')
-        }
-        const directoryId = file ? intent.parentId : intent.entryId
-        const chain = await resolveDirectoryAncestry(availability.snapshot, directoryId, isCurrent)
-        if (!chain || !isCurrent()) return
-        if (!file && chain.at(-1)?.parentId !== intent.parentId)
-          throw invalidExplorerEntry('The ranked directory does not match its published parent.')
-        const destination = { ...enterDirectory(resolved, chain, 'new'), revealPath: true }
-        if (file) {
-          const contents = await locateFileContentsPage(
-            { scanId: intent.scanId, entryId: directoryId },
-            file,
-            isCurrent
-          )
-          if (!contents || !isCurrent()) return
-          publish({
-            ...destination,
-            selectedEntryId: file.id,
-            fileArrival: { entry: file, contents }
-          })
-        } else publish(destination)
+        const located =
+          verified ?? (await resolveExplorerArrival(availability.snapshot, intent, isCurrent))
+        if (!located || !isCurrent()) return
+        publish({
+          ...enterDirectory(resolved, located.chain, 'new'),
+          revealPath: true,
+          selectedEntryId: located.file?.entry.id ?? null,
+          fileArrival: located.file
+        })
       } catch (error) {
         if (!isCurrent()) return
         const failure = requestError(
@@ -272,7 +247,7 @@ export function useExplorer(
       const intent = waitingTarget
       waitingTarget = undefined
       if (intent) onTargetConsumed?.(intent)
-      void refreshSnapshot(false, intent, null, snapshots?.handoff)
+      void refreshSnapshot(false, intent, null, snapshots?.handoff, arrival)
     })
     return () => {
       mounted.current = false

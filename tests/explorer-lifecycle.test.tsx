@@ -12,6 +12,7 @@ import { useSnapshotSelections } from '../src/renderer/src/features/snapshots/se
 import { useSnapshotNavigation } from '../src/renderer/src/features/snapshots/useSnapshotNavigation'
 import { rankedExplorerTarget, type SnapshotNavigationTarget } from '../src/renderer/src/navigation'
 import type { InsightsCategories } from '../src/shared/insights'
+import type { ComparisonSummary, CompatiblePair } from '../src/shared/comparison'
 import { mockSnapshotSelection } from './snapshot-selection-fixture'
 import { recentHistoryPage } from './recent-scans-fixture'
 import type { ScannerIpcResult, ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
@@ -670,6 +671,270 @@ async function historyAction(view: 'Explorer' | 'Insights', path: string): Promi
   fireEvent.click(menu)
   fireEvent.click(screen.getByRole('menuitem', { name: `Open in ${view}` }))
 }
+
+function comparisonApp(): ReturnType<typeof historicalApp> & {
+  baseline: SavedFixture
+  target: SavedFixture
+} {
+  const baseline = publishedFixture('scan-before', 'Alpha', 0, 110, true)
+  const target = publishedFixture('scan-after', 'Alpha', 0, 110, true)
+  const third = publishedFixture('scan-next', 'Beta')
+  const main = historicalApp(baseline, target, third)
+  const { api } = main
+  const pair = { baselineScanId: 'scan-before', targetScanId: 'scan-after' }
+  const compatibility: CompatiblePair = {
+    pair,
+    status: 'compatible',
+    pathStyle: 'posix',
+    normalizedRoot: '/scans/Alpha',
+    coverage: { baseline: 'complete', target: 'complete' }
+  }
+  main.restore(baseline)
+  main.restore(target)
+  api.getScanHistoryMetadata.mockImplementation(async ({ scanId }) => ({
+    ok: true,
+    value: (scanId === 'scan-before' ? baseline : target).database.getScanHistoryMetadata({
+      scanId
+    })
+  }))
+  const row = (
+    scanId: string
+  ): {
+    presence: 'present'
+    entry: { scanId: string; entryId: string; type: 'file'; sizeBytes: number; modifiedAt: null }
+  } => ({
+    presence: 'present',
+    entry: { scanId, entryId: 'nested', type: 'file', sizeBytes: 2000, modifiedAt: null }
+  })
+  const counts = { added: 0, removed: 0, modified: 0, unchanged: 112, indeterminate: 0 }
+  const files: ComparisonSummary['files'] = {
+    counts,
+    totalCount: 112,
+    knownDeltaCount: 112,
+    unknownDeltaCount: 0,
+    positiveDeltaBytes: 0,
+    negativeDeltaBytes: 0,
+    netKnownDeltaBytes: 0,
+    confirmedKnownDeltaBytes: 0,
+    confirmedUnknownDeltaCount: 0
+  }
+  api.evaluateComparisonCompatibility.mockResolvedValue({ ok: true, value: compatibility })
+  api.prepareComparisonSelection.mockResolvedValue({
+    ok: true,
+    value: { ticket: 'pair-ticket', compatibility }
+  })
+  api.adoptComparisonSelection.mockResolvedValue({
+    ok: true,
+    value: { selectionId: 'adopted-pair', compatibility }
+  })
+  api.releaseComparisonSelection.mockResolvedValue({ ok: true, value: null })
+  api.getComparisonSummary.mockResolvedValue({
+    ok: true,
+    value: {
+      pair,
+      compatibility,
+      files,
+      baseline: baseline.database.getScanHistoryMetadata({ scanId: pair.baselineScanId }),
+      target: target.database.getScanHistoryMetadata({ scanId: pair.targetScanId }),
+      fileCountDelta: 0,
+      directoryCountDelta: 0,
+      observedSnapshotBytes: {
+        baseline: baseline.snapshot.summary.totalBytes,
+        target: target.snapshot.summary.totalBytes,
+        delta: 0
+      }
+    }
+  })
+  api.listComparisonFileChanges.mockResolvedValue({
+    ok: true,
+    value: {
+      pair,
+      compatibility,
+      offset: 0,
+      limit: 20,
+      totalCount: 1,
+      nextOffset: null,
+      items: [
+        {
+          relativePath: 'Nested/Deeper/Leaf/Ω-target.bin',
+          kind: 'unchanged',
+          reason: 'metadata-equal',
+          baseline: row(pair.baselineScanId),
+          target: row(pair.targetScanId),
+          deltaBytes: 0
+        }
+      ]
+    }
+  })
+  api.listComparisonDirectoryChanges.mockResolvedValue({
+    ok: true,
+    value: {
+      pair,
+      compatibility,
+      offset: 0,
+      limit: 20,
+      totalCount: 1,
+      nextOffset: null,
+      items: [
+        {
+          relativePath: 'Nested/Deeper/Leaf',
+          kind: 'unchanged',
+          observedDeltaBytes: 0,
+          typeReplacement: false,
+          uncertain: false,
+          subtreeFiles: files,
+          baseline: {
+            presence: 'present',
+            entry: { scanId: pair.baselineScanId, entryId: 'leaf', type: 'directory' },
+            observedBytes: 100
+          },
+          target: {
+            presence: 'present',
+            entry: { scanId: pair.targetScanId, entryId: 'leaf', type: 'directory' },
+            observedBytes: 100
+          }
+        }
+      ]
+    }
+  })
+  return { ...main, baseline, target }
+}
+
+async function openDetailedChanges(
+  kind: 'File Changes' | 'Directory Changes' = 'File Changes'
+): Promise<void> {
+  render(<App />)
+  open('History')
+  fireEvent.click(screen.getByRole('tab', { name: 'Comparison' }))
+  await waitFor(() => expect(button('Compare snapshots')).toBeEnabled())
+  fireEvent.click(button('Compare snapshots'))
+  fireEvent.click(await screen.findByRole('tab', { name: kind }))
+}
+
+async function openComparedEntry(
+  side: 'Baseline' | 'Target',
+  path = 'Nested/Deeper/Leaf/Ω-target.bin'
+): Promise<void> {
+  fireEvent.click(await screen.findByRole('button', { name: 'Actions for ' + path }))
+  fireEvent.click(screen.getByRole('menuitem', { name: `Open ${side} in Explorer` }))
+}
+
+test('hands off the exact compared file beyond page one while retaining both source snapshots until arrival', async () => {
+  const { api } = comparisonApp()
+  await openDetailedChanges()
+  expect(api.listComparisonFileChanges).toHaveBeenCalledExactlyOnceWith({
+    selectionId: 'adopted-pair',
+    query: {
+      baselineScanId: 'scan-before',
+      targetScanId: 'scan-after',
+      offset: 0,
+      limit: 20,
+      sort: 'path'
+    }
+  })
+  expect(api.listComparisonDirectoryChanges).not.toHaveBeenCalled()
+  const pending = Promise.withResolvers<ScannerIpcResult<FileEntry>>()
+  const exact = api.getScanEntry.getMockImplementation()!
+  api.getScanEntry.mockReturnValueOnce(pending.promise)
+  await openComparedEntry('Baseline')
+  await waitFor(() =>
+    expect(api.getScanEntry).toHaveBeenCalledWith({ scanId: 'scan-before', entryId: 'nested' })
+  )
+  expect(api.adoptSnapshotSelection).toHaveBeenCalledExactlyOnceWith({
+    view: 'explorer',
+    ticket: 'scan-before'
+  })
+  expect(api.releaseComparisonSelection).not.toHaveBeenCalled()
+  expect(screen.getByRole('heading', { name: 'Scan History' })).toBeVisible()
+  await act(async () => pending.resolve(await exact({ scanId: 'scan-before', entryId: 'nested' })))
+  await screen.findByRole('region', { name: 'Treemap' })
+  await chart('Leaf')
+  expect(screen.getByText('Historical snapshot')).toBeVisible()
+  expect(button('Follow Latest')).toBeVisible()
+  expect(api.releaseComparisonSelection).toHaveBeenCalledExactlyOnceWith({
+    selectionId: 'adopted-pair'
+  })
+  expect(api.listScanDirectory).toHaveBeenCalledWith({
+    scanId: 'scan-before',
+    entryId: 'leaf',
+    offset: 100,
+    limit: 100
+  })
+  expect(
+    api.listScanDirectory.mock.calls.every(([request]) => request.scanId === 'scan-before')
+  ).toBe(true)
+})
+
+test('opens a compared nested directory on Target without file-page lookups', async () => {
+  const { api } = comparisonApp()
+  await openDetailedChanges('Directory Changes')
+  await openComparedEntry('Target', 'Nested/Deeper/Leaf')
+  await screen.findByRole('region', { name: 'Treemap' })
+  await chart('Leaf')
+  expect(api.prepareSnapshotSelection).toHaveBeenCalledExactlyOnceWith({
+    view: 'explorer',
+    selection: { mode: 'explicit', scanId: 'scan-after' }
+  })
+  expect(api.getScanEntry).toHaveBeenCalledWith({ scanId: 'scan-after', entryId: 'leaf' })
+  expect(api.listScanDirectory.mock.calls.some(([request]) => request.offset > 0)).toBe(false)
+  expect(api.releaseComparisonSelection).toHaveBeenCalledExactlyOnceWith({
+    selectionId: 'adopted-pair'
+  })
+})
+
+test.each(['prepare', 'adopt', 'entry'] as const)(
+  'preserves the active comparison and releases Explorer after %s failure',
+  async (failure) => {
+    const { api } = comparisonApp()
+    await openDetailedChanges()
+    if (failure === 'prepare')
+      api.prepareSnapshotSelection.mockResolvedValueOnce({
+        ok: false,
+        error: { code: 'SNAPSHOT_UNAVAILABLE', message: 'private path' }
+      })
+    if (failure === 'adopt')
+      api.adoptSnapshotSelection.mockResolvedValueOnce({
+        ok: false,
+        error: { code: 'UNAVAILABLE', message: 'private path' }
+      })
+    if (failure === 'entry')
+      api.getScanEntry.mockResolvedValueOnce({
+        ok: false,
+        error: { code: 'ENTRY_NOT_FOUND', message: 'private path' }
+      })
+    await openComparedEntry('Baseline')
+    const message = await screen.findByRole('alert')
+    expect(message).not.toHaveTextContent('private path')
+    expect(screen.getByRole('table', { name: 'File changes' })).toBeVisible()
+    expect(screen.getByRole('region', { name: 'Comparison summary' })).toBeVisible()
+    expect(api.releaseComparisonSelection).not.toHaveBeenCalled()
+    expect(api.releaseSnapshotSelection).toHaveBeenCalledExactlyOnceWith({ view: 'explorer' })
+  }
+)
+
+test('ignores a superseded compared entry and a publication during validated Explorer navigation', async () => {
+  const { api, publish } = comparisonApp()
+  const next = publishedFixture('scan-new', 'Gamma')
+  await openDetailedChanges()
+  const pending = Promise.withResolvers<ScannerIpcResult<FileEntry>>()
+  const exact = api.getScanEntry.getMockImplementation()!
+  api.getScanEntry.mockReturnValueOnce(pending.promise)
+  await openComparedEntry('Target')
+  await waitFor(() =>
+    expect(api.getScanEntry).toHaveBeenCalledWith({ scanId: 'scan-after', entryId: 'nested' })
+  )
+  await act(async () => publish(next))
+  await openComparedEntry('Baseline')
+  await screen.findByRole('region', { name: 'Treemap' })
+  await chart('Leaf')
+  await act(async () => pending.resolve(await exact({ scanId: 'scan-after', entryId: 'nested' })))
+  expect(api.releaseComparisonSelection).toHaveBeenCalledExactlyOnceWith({
+    selectionId: 'adopted-pair'
+  })
+  expect(api.adoptSnapshotSelection.mock.lastCall).toEqual([
+    { view: 'explorer', ticket: 'scan-before' }
+  ])
+})
 
 test.each(['Explorer', 'Insights'] as const)(
   'adopts the exact older History row before showing %s',

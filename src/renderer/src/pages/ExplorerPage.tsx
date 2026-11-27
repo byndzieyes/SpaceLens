@@ -3,7 +3,7 @@ import { DetailsPanel } from '../features/explorer/DetailsPanel'
 import { DirectoryTreemap } from '../features/explorer/DirectoryTreemap'
 import { useExplorer } from '../features/explorer/useExplorer'
 import { DirectoryTree } from '../features/explorer/DirectoryTree'
-import { isStaleSnapshotError } from '../features/explorer/data'
+import { isStaleSnapshotError, type ExplorerArrival } from '../features/explorer/data'
 import { useLayoutEffect, useRef, type ReactNode } from 'react'
 import { ArrowLeft, ArrowRight, ArrowUp, FolderTree } from 'lucide-react'
 import { Badge } from '../components/ui/Badge'
@@ -36,16 +36,18 @@ function ExplorerPanel({
 
 export function ExplorerPage({
   target,
+  arrival,
   onTargetConsumed,
   snapshots,
   onFollowLatest
 }: {
   target?: ExplorerTarget
+  arrival?: ExplorerArrival
   onTargetConsumed?: (target: ExplorerTarget) => void
   snapshots?: ViewSnapshotOptions
   onFollowLatest?: () => void
 } = {}): React.JSX.Element {
-  const explorer = useExplorer(target, onTargetConsumed, snapshots)
+  const explorer = useExplorer(target, onTargetConsumed, snapshots, arrival)
   const { availability, error, loading } = explorer
   const snapshot = availability?.status === 'available' ? availability.snapshot : null
   const scanId = snapshot?.entries.scanId ?? null

@@ -6,39 +6,12 @@ import type {
 } from '../../../../shared/comparison'
 import { Card } from '../../components/ui/Card'
 import { DonutRing, type DonutSegment } from '../../components/ui/DonutRing'
-import { formatBytes } from '../../lib/storage'
+import { ComparisonBytes as Bytes } from './ComparisonBytes'
+import { comparisonCounts as counts, comparisonSign as sign, fileKinds } from './changeDisplay'
 
-const counts = new Intl.NumberFormat('en-US')
 const ringKinds = ['added', 'removed', 'modified', 'indeterminate'] as const
 const kinds = [...ringKinds, 'unchanged'] as const
-const fileKinds = {
-  added: { label: 'Added', color: '#86c9ac' },
-  removed: { label: 'Removed', color: '#e49da9' },
-  modified: { label: 'Modified', color: '#e5c486' },
-  indeterminate: { label: 'Indeterminate', color: '#b7a8e8' },
-  unchanged: { label: 'Unchanged', color: '#94a3b8' }
-} satisfies Record<EntryChangeKind, { label: string; color: string }>
-
-const sign = (value: number): string => (value < 0 ? '−' : value > 0 ? '+' : '')
 const signedCount = (value: number): string => sign(value) + counts.format(Math.abs(value))
-
-function Bytes({
-  value,
-  signed = false
-}: {
-  value: number | null
-  signed?: boolean
-}): React.JSX.Element {
-  if (value === null) return <span className="text-text-secondary">Unavailable</span>
-  const prefix = signed ? sign(value) : ''
-  const magnitude = Math.abs(value)
-  return (
-    <span title={`${prefix}${counts.format(magnitude)} bytes`}>
-      {prefix}
-      {formatBytes(magnitude)}
-    </span>
-  )
-}
 
 function percentage(delta: number, baseline: number): string | undefined {
   if (!Number.isSafeInteger(delta) || !Number.isSafeInteger(baseline) || baseline < 0)

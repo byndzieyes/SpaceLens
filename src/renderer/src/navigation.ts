@@ -16,7 +16,7 @@ export type PageId = keyof typeof pageTitles
 export interface ExplorerTarget {
   readonly scanId: string
   readonly entryId: string
-  readonly parentId: string
+  readonly parentId?: string | null
   readonly type: 'file' | 'directory'
 }
 

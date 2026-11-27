@@ -73,7 +73,11 @@ History's Comparison tab lets you choose, swap, and check two saved snapshots, i
 
 An adopted pair loads its Comparison Summary automatically. The dashboard shows observed size, file, and directory differences as Target minus Baseline. A file classification chart separates Unchanged from the ring, and file byte accounting distinguishes all known deltas from confirmed changes. Coverage and unknown byte notes explain when these totals may diverge. Loaded results stay visible during scans and draft edits.
 
-Detailed Changes, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
+After Summary loads, choose File Changes or Directory Changes to request a 20-row page. Classification filters, signed delta sorts, and page counts come from storage. Directory rows can scope either view to the selected canonical relative directory. The scope includes the exact key and nested keys, including a file at the exact key when the path changes type. Directory file counts include strict descendants, so parent and child totals may overlap. The unscoped directory table excludes the comparison root by default.
+
+Load either directory ranking to see up to five directories with known deltas in that direction. Row actions open the exact saved entry on the selected side. Comparison keeps both snapshots protected until Explorer has adopted its snapshot and verified the destination.
+
+Storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
 
 ## Snapshot comparison contracts
 
@@ -253,6 +257,8 @@ The Task 5.16a benchmark used the production Scanner and Storage Worker bundles,
 The scanner-first runs queued zero Comparison commands. The first batch spent 5.16 ms and 6.31 ms waiting, including the benchmark gate used to send the conflicting requests. Retry batches waited at most 0.03 ms. In Comparison-first runs, the busy response and a duplicate-start rejection produced zero building writes. The representative Summary spent 8.94 s executing on the Worker, and the scanner retried on that Worker. In the stress case, the benchmark held termination briefly to verify that both request leases survived the timeout, then observed zero leases 52 ms after allowing exit. Recovery preserved the previous publication and both source snapshots. An explicit scanner retry then published after reopening storage.
 
 ### Task 5.23 optimization plan
+
+The 113-snapshot History pagination fixture is timing-sensitive under the two-worker Windows suite. It passed in isolation in 4.17 seconds during Task 5.20 and can exceed its existing five-second timeout under parallel load. Track the fixture alongside the comparison performance measurements.
 
 For Task 5.23, give one candidate workspace an identity tied to the Worker and pair, and retain both source reservations across all of its stages. Build and validate ordered path ranges and roll up directories from children to parents in separately dispatched, measured chunks that each close their transaction. Keep the candidate inaccessible to analytical queries until an atomic promotion checks the pair and candidate identity. Discard stale or failed candidates once dispatched work settles. Benchmark both stage duration and scanner acknowledgement delay on the same fixtures, including contention and deadline cases, before choosing chunk sizes.
 

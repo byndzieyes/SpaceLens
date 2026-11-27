@@ -1,12 +1,24 @@
-import { useEffect, useMemo, useState, type Dispatch, type SetStateAction } from 'react'
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction
+} from 'react'
 import { ArrowLeftRight, GitCompareArrows } from 'lucide-react'
 import type { ComparisonPair, ComparisonSide, CompatiblePair } from '../../../../shared/comparison'
+import type { ScannerIpcErrorCode } from '../../../../shared/ipc'
 import { DEFAULT_SCAN_HISTORY_PAGE_SIZE, type ScanHistoryItem } from '../../../../shared/history'
 import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { formatPreciseScanDate } from '../../lib/scanDisplay'
 import { ComparisonDashboard } from './ComparisonDashboard'
+import type { OpenHistoricalEntry } from '../snapshots/useSnapshotNavigation'
+import type { OpenComparisonEntry } from './ChangeTables'
+import type { ChangeNavigation } from './DetailedChanges'
 import { SnapshotPicker, SnapshotSelector } from './SnapshotPicker'
 import {
   comparisonError,
@@ -25,6 +37,23 @@ import {
 } from './selection'
 
 const newest = { offset: 0, limit: DEFAULT_SCAN_HISTORY_PAGE_SIZE, sort: 'newest' } as const
+
+function navigationError(code: ScannerIpcErrorCode): string {
+  switch (code) {
+    case 'ENTRY_NOT_FOUND':
+    case 'NOT_DIRECTORY':
+    case 'INVALID_REQUEST':
+      return 'The saved entry is unavailable. The active comparison is still open.'
+    case 'SNAPSHOT_EXPIRED':
+    case 'SNAPSHOT_UNAVAILABLE':
+      return 'The historical snapshot is unavailable or failed validation.'
+    case 'UNAVAILABLE':
+    case 'SNAPSHOT_IN_USE':
+      return 'Saved scan storage is busy or unavailable. Try opening the entry again.'
+    default:
+      return 'The saved entry could not be opened.'
+  }
+}
 
 function CoverageWarnings({
   compatibility
@@ -49,11 +78,15 @@ function ActiveComparisonPanel({
   active,
   latestId,
   scanActive,
+  onOpenChange,
+  navigation,
   onClear
 }: {
   active: ActiveComparison
   latestId?: string | null
   scanActive: boolean | undefined
+  onOpenChange: OpenComparisonEntry
+  navigation?: ChangeNavigation
   onClear: () => void
 }): React.JSX.Element {
   return (
@@ -98,6 +131,8 @@ function ActiveComparisonPanel({
         key={active.selection.selectionId}
         selection={active.selection}
         scanActive={scanActive}
+        onOpenChange={onOpenChange}
+        navigation={navigation}
       />
     </section>
   )
@@ -108,18 +143,30 @@ export function ComparisonWorkspace({
   setDraft,
   historyRevision,
   scanActive,
-  mutations
+  mutations,
+  onOpenEntry
 }: {
   draft: ComparisonDraft | undefined
   setDraft: Dispatch<SetStateAction<ComparisonDraft | undefined>>
   historyRevision: number
   scanActive: boolean | undefined
   mutations: ComparisonMutations
+  onOpenEntry?: OpenHistoricalEntry
 }): React.JSX.Element {
   const recent = useComparisonHistory(newest, historyRevision)
   const [picker, setPicker] = useState<ComparisonSide>()
   const [retryNumber, setRetryNumber] = useState(0)
+  const [navigation, setNavigation] = useState<ChangeNavigation>()
+  const handoff = useRef<{ cancel?: () => void }>(undefined)
   const selection = useComparisonSelection(mutations)
+  useLayoutEffect(
+    () => () => {
+      const current = handoff.current
+      handoff.current = undefined
+      current?.cancel?.()
+    },
+    []
+  )
   const pair = useMemo<ComparisonPair | undefined>(
     () =>
       draft?.baseline && draft.target
@@ -176,8 +223,37 @@ export function ComparisonWorkspace({
     if (!selection.changeDraft()) return
     setDraft({ baseline: shownTarget, target: shownBaseline })
   }
+  const cancelNavigation = (): void => {
+    const current = handoff.current
+    handoff.current = undefined
+    current?.cancel?.()
+    setNavigation(undefined)
+  }
+  const openChange: OpenComparisonEntry = (side, entry) => {
+    if (!selection.active || !onOpenEntry) return
+    if (selection.pending) {
+      setNavigation({
+        status: 'opening',
+        message: 'Wait for the replacement to finish before opening an entry.'
+      })
+      return
+    }
+    const { pair } = selection.active.selection.compatibility
+    const scanId = side === 'baseline' ? pair.baselineScanId : pair.targetScanId
+    if (entry.scanId !== scanId || (entry.type !== 'file' && entry.type !== 'directory')) return
+    cancelNavigation()
+    const request: { cancel?: () => void } = {}
+    handoff.current = request
+    setNavigation({ status: 'opening', message: 'Opening saved entry in Explorer…' })
+    request.cancel = onOpenEntry({ scanId, entryId: entry.entryId, type: entry.type }, (code) => {
+      if (handoff.current !== request) return
+      handoff.current = undefined
+      setNavigation(code ? { status: 'error', message: navigationError(code) } : undefined)
+    })
+  }
   const compare = (): void => {
     if (!canCompare || !pair || baseline.status !== 'ready' || target.status !== 'ready') return
+    cancelNavigation()
     selection.start(pair, { baseline: baseline.item, target: target.item })
   }
   const retry = (): void => {
@@ -293,7 +369,12 @@ export function ComparisonWorkspace({
           active={selection.active}
           latestId={latestId}
           scanActive={scanActive}
-          onClear={selection.clear}
+          onOpenChange={openChange}
+          navigation={navigation}
+          onClear={() => {
+            cancelNavigation()
+            selection.clear()
+          }}
         />
       )}
       {picker && (

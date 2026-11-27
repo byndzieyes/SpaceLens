@@ -9,11 +9,13 @@ import {
   type SnapshotNavigationTarget
 } from '../../navigation'
 import type { SnapshotHandoff, SnapshotSelections, ViewSnapshotOptions } from './selection'
+import { resolveExplorerArrival, type ExplorerArrival } from '../explorer/data'
 
 interface Destination {
   readonly page: PageId
   readonly activation: number
   readonly target?: ExplorerTarget
+  readonly arrival?: ExplorerArrival
   readonly snapshot?: SnapshotNavigationTarget
   readonly handoff?: Promise<SnapshotHandoff | undefined>
 }
@@ -24,12 +26,19 @@ interface PendingHandoff {
 }
 
 export type SnapshotOpenFailure = (code?: ScannerIpcErrorCode) => void
+export type OpenHistoricalEntry = (
+  entry: ExplorerTarget,
+  onNotOpened: SnapshotOpenFailure
+) => () => void
 
 export function useSnapshotNavigation(selections: SnapshotSelections): {
   destination: Destination
   viewOptions: ViewSnapshotOptions
   navigate: (page: PageId) => void
-  navigateToSnapshot: (target: SnapshotNavigationTarget, onNotOpened?: SnapshotOpenFailure) => void
+  navigateToSnapshot: (
+    target: SnapshotNavigationTarget,
+    onNotOpened?: SnapshotOpenFailure
+  ) => () => void
   consumeTarget: (target: ExplorerTarget) => void
 } {
   const [destination, setDestination] = useState<Destination>({ page: 'overview', activation: 0 })
@@ -78,7 +87,7 @@ export function useSnapshotNavigation(selections: SnapshotSelections): {
   const navigateToSnapshot = (
     target: SnapshotNavigationTarget,
     onNotOpened?: SnapshotOpenFailure
-  ): void => {
+  ): (() => void) => {
     const previous = committedPage.current
     const retained = pending.current?.source
     const source =
@@ -90,8 +99,32 @@ export function useSnapshotNavigation(selections: SnapshotSelections): {
     abandon(target.view, source)
     const transition = { target, source }
     pending.current = transition
-    const handoff = selections.select(target.view, target.selection).then((result) => {
-      if (pending.current !== transition) {
+    const isCurrent = (): boolean => pending.current === transition
+    const handoff = selections.select(target.view, target.selection).then(async (result) => {
+      if (!isCurrent()) {
+        onNotOpened?.()
+        return result
+      }
+      let arrival: ExplorerArrival | undefined
+      let error: ScannerIpcErrorCode | undefined
+      if (
+        onNotOpened &&
+        target.view === 'explorer' &&
+        target.entry &&
+        result?.status === 'resolved' &&
+        result.explorerSnapshot
+      ) {
+        try {
+          arrival = await resolveExplorerArrival(result.explorerSnapshot, target.entry, isCurrent)
+          if (!arrival) error = 'ENTRY_NOT_FOUND'
+        } catch (cause) {
+          error =
+            typeof cause === 'object' && cause !== null && 'code' in cause
+              ? (cause.code as ScannerIpcErrorCode)
+              : 'UNAVAILABLE'
+        }
+      }
+      if (!isCurrent()) {
         onNotOpened?.()
         return result
       }
@@ -104,30 +137,36 @@ export function useSnapshotNavigation(selections: SnapshotSelections): {
           (target.view !== 'explorer' ||
             target.selection.mode !== 'explicit' ||
             result.explorerSnapshot?.entries.scanId === target.selection.scanId)
-        if (valid) open()
+        if (valid && !error) open(arrival)
         else {
           selections.release(target.view)
-          onNotOpened(result && 'error' in result ? result.error.code : 'SNAPSHOT_UNAVAILABLE')
+          onNotOpened(
+            error ?? (result && 'error' in result ? result.error.code : 'SNAPSHOT_UNAVAILABLE')
+          )
         }
       }
       return result
     })
-    const open = (): void => {
+    const open = (arrival?: ExplorerArrival): void => {
       setDestination((current) => ({
         page: target.view,
         activation: current.activation + 1,
         snapshot: target,
         handoff,
+        arrival,
         target: target.view === 'explorer' ? target.entry : undefined
       }))
     }
     // History stays visible until adoption succeeds. Existing eager handoffs keep their behavior.
     if (!onNotOpened) open()
+    return () => {
+      if (isCurrent()) abandon(committedPage.current)
+    }
   }
   const consumeTarget = (opened: ExplorerTarget): void => {
     setDestination((current) =>
       current.page === 'explorer' && current.target === opened
-        ? { ...current, target: undefined }
+        ? { ...current, target: undefined, arrival: undefined }
         : current
     )
   }

@@ -11,7 +11,10 @@ import { DeleteSnapshotDialog } from '../features/history/DeleteSnapshotDialog'
 import { HistorySettings, type HistoryFeedback } from '../features/history/HistorySettings'
 import { useScanHistory } from '../features/history/useScanHistory'
 import type { SnapshotSelections } from '../features/snapshots/selection'
-import type { SnapshotOpenFailure } from '../features/snapshots/useSnapshotNavigation'
+import type {
+  OpenHistoricalEntry,
+  SnapshotOpenFailure
+} from '../features/snapshots/useSnapshotNavigation'
 import { ComparisonWorkspace } from '../features/comparison/ComparisonWorkspace'
 import type { ComparisonDraft } from '../features/comparison/draft'
 import type { ComparisonMutations } from '../features/comparison/selection'
@@ -56,11 +59,13 @@ export function HistoryPage({
   snapshots,
   comparisonMutations,
   onOpenSnapshot,
+  onOpenEntry,
   onCancelOpen
 }: {
   snapshots: SnapshotSelections
   comparisonMutations: ComparisonMutations
   onOpenSnapshot: (view: SnapshotView, scanId: string, onNotOpened: SnapshotOpenFailure) => void
+  onOpenEntry?: OpenHistoricalEntry
   onCancelOpen?: () => void
 }): React.JSX.Element {
   const [tab, setTab] = useState<HistoryTab>('scans')
@@ -338,6 +343,7 @@ export function HistoryPage({
       >
         {!showScans && (
           <ComparisonWorkspace
+            onOpenEntry={onOpenEntry}
             draft={comparisonDraft}
             setDraft={setComparisonDraft}
             historyRevision={history.historyRevision}

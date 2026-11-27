@@ -255,8 +255,20 @@ afterEach(async () => {
       )
     ).toBe(true)
   }
-  expect(fileChanges).not.toHaveBeenCalled()
-  expect(directoryChanges).not.toHaveBeenCalled()
+  for (const [request] of [...fileChanges.mock.calls, ...directoryChanges.mock.calls]) {
+    expect(
+      summary.mock.calls.some(([read], index) => {
+        const reply = summary.mock.settledResults[index]
+        return (
+          read.selectionId === request.selectionId &&
+          read.query.baselineScanId === request.query.baselineScanId &&
+          read.query.targetScanId === request.query.targetScanId &&
+          reply.type === 'fulfilled' &&
+          reply.value.ok
+        )
+      })
+    ).toBe(true)
+  }
   vi.unstubAllGlobals()
 })
 
@@ -743,7 +755,7 @@ test('keeps previous Summary through draft changes and failed replacement, then 
   expect(await screen.findByText('Loading comparison summary…')).toBeVisible()
   hasScan(active(), 1)
   expect(screen.queryByRole('region', { name: 'Observed logical size' })).toBeNull()
-  expect(summary).toHaveBeenLastCalledWith(summaryRequest('adopted-2', 1, 4))
+  await waitFor(() => expect(summary).toHaveBeenLastCalledWith(summaryRequest('adopted-2', 1, 4)))
   await act(async () => replacement.resolve({ ok: true, value: summarize(pair(1, 4)) }))
   expect(within(logicalSize()).getByTitle('+3,000 bytes')).toHaveTextContent('+3 KB')
 })
@@ -906,7 +918,111 @@ test('asks the user to adopt again after the current selection is invalidated', 
   await compare()
   expect(await screen.findByText(/Adopt the pair again/)).toBeVisible()
   expect(screen.queryByRole('button', { name: 'Retry summary' })).toBeNull()
+  expect(screen.queryByRole('tab', { name: 'File Changes' })).toBeNull()
+  expect(screen.queryByRole('tab', { name: 'Directory Changes' })).toBeNull()
+  expect(fileChanges).not.toHaveBeenCalled()
+  expect(directoryChanges).not.toHaveBeenCalled()
   click(button('Compare snapshots'))
   await screen.findByRole('region', { name: 'Observed logical size' })
   expect(summary).toHaveBeenLastCalledWith(summaryRequest('adopted-2', 1, 2))
+})
+
+function detailPage(
+  query: ComparisonPair,
+  path: string
+): Awaited<ReturnType<SpaceLensAPI['listComparisonFileChanges']>> {
+  return {
+    ok: true,
+    value: {
+      pair: query,
+      compatibility: compatibility(query) as CompatiblePair,
+      limit: 20,
+      offset: 0,
+      totalCount: 1,
+      nextOffset: null,
+      items: [
+        {
+          relativePath: path,
+          kind: 'added',
+          reason: 'confirmed-absence',
+          baseline: { presence: 'absent' },
+          target: {
+            presence: 'present',
+            entry: {
+              scanId: query.targetScanId,
+              entryId: 'save',
+              type: 'file',
+              sizeBytes: 10,
+              modifiedAt: null
+            }
+          },
+          deltaBytes: 10
+        }
+      ]
+    }
+  }
+}
+
+test('keeps loaded details through draft edits and failed preparation, then resets the view after replacement', async () => {
+  rows = [saved(3), saved(2), saved(1)]
+  const gate = Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['getComparisonSummary']>>>()
+  summary.mockReturnValueOnce(gate.promise)
+  fileChanges.mockImplementation(async ({ query }) =>
+    detailPage(query, 'saved-' + query.baselineScanId)
+  )
+  openComparison()
+  await compare()
+  expect(await screen.findByText('Loading comparison summary…')).toBeVisible()
+  expect(screen.queryByRole('tab', { name: 'File Changes' })).toBeNull()
+  await act(async () => gate.resolve({ ok: true, value: summarize(pair(2, 3)) }))
+  click(await screen.findByRole('tab', { name: 'File Changes' }))
+  expect(await screen.findByText('saved-2')).toBeVisible()
+  await choose('baseline', 1)
+  scanState(false, true)
+  expect(screen.getByText('saved-2')).toBeVisible()
+  await compatible()
+  prepare.mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'SNAPSHOT_UNAVAILABLE', message: 'private path' }
+  })
+  click(button('Compare snapshots'))
+  await screen.findByText(/failed historical validation/)
+  expect(screen.getByText('saved-2')).toBeVisible()
+  expect(fileChanges).toHaveBeenCalledOnce()
+  click(button('Compare snapshots'))
+  await screen.findByText('Choose File Changes or Directory Changes to load details.')
+  expect(screen.queryByText('saved-2')).toBeNull()
+  expect(fileChanges).toHaveBeenCalledOnce()
+  click(tab('File Changes'))
+  expect(await screen.findByText('saved-1')).toBeVisible()
+  expect(fileChanges.mock.lastCall?.[0]).toMatchObject(summaryRequest('adopted-2', 1, 3))
+  expect(directoryChanges).not.toHaveBeenCalled()
+})
+
+test('rejects an outstanding detail response from an earlier adoption of the same exact pair', async () => {
+  rows = [saved(3), saved(2), saved(1)]
+  const old =
+    Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['listComparisonFileChanges']>>>()
+  fileChanges
+    .mockReturnValueOnce(old.promise)
+    .mockImplementation(async ({ query }) => detailPage(query, 'current-file'))
+  openComparison()
+  await compare()
+  click(await screen.findByRole('tab', { name: 'File Changes' }))
+  await waitFor(() => expect(fileChanges).toHaveBeenCalledOnce())
+  await choose('baseline', 1)
+  await compatible()
+  click(button('Compare snapshots'))
+  expect(
+    await screen.findByText('Choose File Changes or Directory Changes to load details.')
+  ).toBeVisible()
+  await choose('baseline', 2)
+  await compatible()
+  click(button('Compare snapshots'))
+  await waitFor(() => expect(summary).toHaveBeenLastCalledWith(summaryRequest('adopted-3', 2, 3)))
+  click(await screen.findByRole('tab', { name: 'File Changes' }))
+  expect(await screen.findByText('current-file')).toBeVisible()
+  await act(async () => old.resolve(detailPage(pair(2, 3), 'obsolete-file')))
+  expect(screen.queryByText('obsolete-file')).toBeNull()
+  expect(fileChanges.mock.lastCall?.[0]).toMatchObject(summaryRequest('adopted-3', 2, 3))
 })

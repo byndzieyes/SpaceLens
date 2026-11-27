@@ -10,6 +10,8 @@ import { Card } from '../../components/ui/Card'
 import { ComparisonSummaryView } from './ComparisonSummaryView'
 import { sideLabels } from './draft'
 import { useComparisonSummary } from './useComparisonSummary'
+import { DetailedChanges, type ChangeNavigation } from './DetailedChanges'
+import type { OpenComparisonEntry } from './ChangeTables'
 
 function coverageText(side: ComparisonSide, coverage: ComparisonCoverage): string {
   if (coverage === 'unknown') return `Coverage for the ${sideLabels[side]} is unknown.`
@@ -56,10 +58,14 @@ function summaryError(
 
 export function ComparisonDashboard({
   selection,
-  scanActive
+  scanActive,
+  onOpenChange,
+  navigation
 }: {
   selection: AdoptedComparisonSelection
   scanActive: boolean | undefined
+  onOpenChange?: OpenComparisonEntry
+  navigation?: ChangeNavigation
 }): React.JSX.Element {
   const { state, retry } = useComparisonSummary(selection, scanActive)
   const compatibility =
@@ -69,41 +75,51 @@ export function ComparisonDashboard({
   const failure = state.status === 'error' ? summaryError(state.code, scanActive) : undefined
 
   return (
-    <section aria-label="Comparison summary" className="min-w-0 space-y-3">
-      <p className={`text-sm ${complete ? 'text-text-secondary' : 'text-warning'}`}>
-        {complete
-          ? 'Both snapshots have complete coverage.'
-          : `${coverageText('baseline', coverage.baseline)} ${coverageText('target', coverage.target)}`}
-      </p>
-      {state.status === 'loading' && (
-        <Card
-          className="flex min-h-24 items-center gap-3 text-sm text-text-secondary"
-          role="status"
-        >
-          <LoaderCircle
-            aria-hidden="true"
-            size={17}
-            className="shrink-0 motion-safe:animate-spin"
-          />
-          Loading comparison summary…
-        </Card>
-      )}
-      {failure && (
-        <Card className="flex min-h-24 flex-wrap items-center justify-between gap-3">
-          <p
-            role="alert"
-            className={`min-w-0 flex-1 text-sm ${state.status === 'error' && state.code === 'COMPARISON_SCAN_ACTIVE' ? 'text-warning' : 'text-error'}`}
+    <>
+      <section aria-label="Comparison summary" className="min-w-0 space-y-3">
+        <p className={`text-sm ${complete ? 'text-text-secondary' : 'text-warning'}`}>
+          {complete
+            ? 'Both snapshots have complete coverage.'
+            : `${coverageText('baseline', coverage.baseline)} ${coverageText('target', coverage.target)}`}
+        </p>
+        {state.status === 'loading' && (
+          <Card
+            className="flex min-h-24 items-center gap-3 text-sm text-text-secondary"
+            role="status"
           >
-            {failure.message}
-          </p>
-          {failure.retry && (
-            <Button variant="secondary" disabled={scanActive} onClick={retry}>
-              Retry summary
-            </Button>
-          )}
-        </Card>
+            <LoaderCircle
+              aria-hidden="true"
+              size={17}
+              className="shrink-0 motion-safe:animate-spin"
+            />
+            Loading comparison summary…
+          </Card>
+        )}
+        {failure && (
+          <Card className="flex min-h-24 flex-wrap items-center justify-between gap-3">
+            <p
+              role="alert"
+              className={`min-w-0 flex-1 text-sm ${state.status === 'error' && state.code === 'COMPARISON_SCAN_ACTIVE' ? 'text-warning' : 'text-error'}`}
+            >
+              {failure.message}
+            </p>
+            {failure.retry && (
+              <Button variant="secondary" disabled={scanActive} onClick={retry}>
+                Retry summary
+              </Button>
+            )}
+          </Card>
+        )}
+        {state.status === 'ready' && <ComparisonSummaryView summary={state.summary} />}
+      </section>
+      {state.status === 'ready' && onOpenChange && (
+        <DetailedChanges
+          selection={selection}
+          scanActive={scanActive}
+          onOpen={onOpenChange}
+          navigation={navigation}
+        />
       )}
-      {state.status === 'ready' && <ComparisonSummaryView summary={state.summary} />}
-    </section>
+    </>
   )
 }

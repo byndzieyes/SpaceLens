@@ -1,5 +1,6 @@
 import type { ScannerIpcResult } from '../../../../shared/ipc'
 import type { FileEntry } from '../../../../shared/scan'
+import type { ExplorerTarget } from '../../navigation'
 import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
   type ScanDirectoryPage,
@@ -22,6 +23,53 @@ export const invalidExplorerEntry = (message: string): ExplorerAccessError => ({
 export interface LocatedContentsPage {
   readonly offset: number
   readonly page: ScanDirectoryPage
+}
+
+export interface ExplorerArrival {
+  readonly chain: FileEntry[]
+  readonly file?: { readonly entry: FileEntry; readonly contents: LocatedContentsPage }
+}
+
+export async function resolveExplorerArrival(
+  snapshot: ScanSnapshot,
+  target: ExplorerTarget,
+  isCurrent: () => boolean
+): Promise<ExplorerArrival | undefined> {
+  if (target.scanId !== snapshot.entries.scanId)
+    throw invalidExplorerEntry('Entry identity does not match this snapshot.')
+  let entry: FileEntry | undefined
+  let directoryId = target.entryId
+  if (target.type === 'file') {
+    const result = await window.spaceLens.getScanEntry({
+      scanId: target.scanId,
+      entryId: target.entryId
+    })
+    if (!isCurrent()) return
+    if (!result.ok) throw result.error
+    entry = result.value
+    if (
+      entry.scanId !== target.scanId ||
+      entry.id !== target.entryId ||
+      entry.type !== 'file' ||
+      entry.parentId === null ||
+      (target.parentId !== undefined && entry.parentId !== target.parentId)
+    )
+      throw invalidExplorerEntry('The file does not match its saved entry.')
+    directoryId = entry.parentId
+  }
+  const chain = await resolveDirectoryAncestry(snapshot, directoryId, isCurrent)
+  if (!chain || !isCurrent()) return
+  if (!entry) {
+    if (target.parentId !== undefined && chain.at(-1)?.parentId !== target.parentId)
+      throw invalidExplorerEntry('The directory does not match its saved parent.')
+    return { chain }
+  }
+  const contents = await locateFileContentsPage(
+    { scanId: target.scanId, entryId: directoryId },
+    entry,
+    isCurrent
+  )
+  return contents && isCurrent() ? { chain, file: { entry, contents } } : undefined
 }
 
 /** Availability at query time, not a guarantee that a later request will succeed. */

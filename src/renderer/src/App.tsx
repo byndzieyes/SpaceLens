@@ -13,7 +13,7 @@ function App(): React.JSX.Element {
   const selections = useSnapshotSelections()
   const comparisonMutations = useMemo(() => new ComparisonMutations(), [])
   const {
-    destination: { page: activePage, activation, target },
+    destination: { page: activePage, activation, target, arrival },
     viewOptions,
     navigate,
     navigateToSnapshot,
@@ -34,6 +34,7 @@ function App(): React.JSX.Element {
         key={activation}
         snapshots={viewOptions}
         target={target}
+        arrival={arrival}
         onTargetConsumed={consumeTarget}
         onFollowLatest={() => navigate('explorer')}
       />
@@ -54,6 +55,12 @@ function App(): React.JSX.Element {
         snapshots={selections}
         comparisonMutations={comparisonMutations}
         onCancelOpen={() => navigate('history')}
+        onOpenEntry={(entry, onNotOpened) =>
+          navigateToSnapshot(
+            { view: 'explorer', selection: { mode: 'explicit', scanId: entry.scanId }, entry },
+            onNotOpened
+          )
+        }
         onOpenSnapshot={(view, scanId, onNotOpened) =>
           navigateToSnapshot({ view, selection: { mode: 'explicit', scanId } }, onNotOpened)
         }
