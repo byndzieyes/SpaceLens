@@ -39,7 +39,7 @@ Directory pages contain at most 100 direct children, sorted by name then ID in U
 
 Main serializes reads and scanner writes through one Storage Worker. Scanner writes take priority over queued reads. Up to 16 reads may wait for a turn, each with a 10-second queue deadline. Document changes and shutdown drop queued snapshot reads. An active SQLite query can delay the next write. Cold analytics and targeting a file in a wide or deeply nested directory can take noticeable time on large scans. Cancellation remains available through traversal and batch persistence and closes when the final publication request is sent.
 
-The History API reads completed scan metadata in pages of 20 by default, with at most 100 scans per request. Root filters match stored paths case-sensitively, with literal substring search available. Offset-based pages reflect the current history on each read. Overview refreshes its first five rows after committed publication, deletion, or pruning, using the history revision on the scanner-state channel. A listed row can expire before it is opened. Selecting a row acquires protection through the destination view.
+The History API reads completed scan metadata in pages of 20 by default, with at most 100 scans per request. Root filters match stored paths case-sensitively, with literal substring search available. Offset-based pages reflect the current history on each read. Overview refreshes its first five rows after committed publication, deletion, or pruning, using the history revision on the scanner-state channel. A snapshot can expire between listing it and using an Overview action. Explorer and Insights acquire protection through their selection lifecycle when opening one.
 
 The History deletion API removes one completed snapshot and its stored entries in a SQLite transaction. Deleting Latest selects the next publication by sequence, or clears Latest when history is empty. Confirmed publications, manual deletions, and automatic pruning advance a history revision on the scanner-state channel. The deletion queue admits one request at a time. Queued scanner writes take priority, and an active cascade can delay the next batch because SQLite executes it synchronously.
 
@@ -63,7 +63,9 @@ The global history target defaults to 10 completed snapshots and accepts integer
 
 Automatic retention prunes the oldest eligible snapshot by publication sequence, one transaction per snapshot. It preserves Latest and protected snapshots and can temporarily exceed the target. Maintenance resumes when a relevant lease is released and defers while a scan is building. A confirmed publication stands independently of pruning. The limit controls retained snapshot count. Deleted rows free SQLite pages for later writes, so the database file may stay near its previous peak size.
 
-The full History page, history management controls, Comparison UI, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
+History lists retained completed snapshots with literal path filtering, publication and size sorting, and 20-row pages. The table shows Latest by publication ID and flags partial scans with known error counts. It refreshes after publication, deletion, or retention pruning while keeping the selected filter, sort order, and page where possible. Browsing history does not hold snapshot protection.
+
+History actions and retention settings, the Comparison UI, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
 
 ## Snapshot comparison contracts
 

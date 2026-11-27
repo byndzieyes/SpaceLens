@@ -9,7 +9,7 @@ import { ArrowLeft, ArrowRight, ArrowUp, FolderTree } from 'lucide-react'
 import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
-import { formatScanDate } from '../features/overview/recentScanUtils'
+import { formatScanDate } from '../lib/scanDisplay'
 import type { ExplorerTarget } from '../navigation'
 import type { ViewSnapshotOptions } from '../features/snapshots/selection'
 

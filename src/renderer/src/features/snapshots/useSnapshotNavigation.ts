@@ -43,11 +43,6 @@ export function useSnapshotNavigation(selections: SnapshotSelections): {
       selections.release(previous)
   }, [page, selections, snapshot])
 
-  useEffect(() => {
-    if (page === 'history') return selections.subscribeScanState()
-    return undefined
-  }, [page, selections])
-
   useEffect(
     () => () => {
       pending.current = undefined

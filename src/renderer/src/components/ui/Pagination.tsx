@@ -1,13 +1,14 @@
 import { ChevronLeft, ChevronRight } from 'lucide-react'
-import { Button } from '../../components/ui/Button'
+import { Button } from './Button'
 
-export function InsightsPagination({
+export function Pagination({
   label,
   previousLabel,
   nextLabel,
   range,
   previous,
-  next
+  next,
+  className = ''
 }: {
   label: string
   previousLabel: string
@@ -15,9 +16,10 @@ export function InsightsPagination({
   range: string | null
   previous: (() => void) | null
   next: (() => void) | null
+  className?: string
 }): React.JSX.Element {
   return (
-    <div className="flex flex-wrap items-center justify-between gap-3 border-b border-separator pb-3">
+    <div className={`flex flex-wrap items-center justify-between gap-3 ${className}`}>
       <p aria-live="polite" className="min-w-0 text-sm text-text-secondary tabular-nums">
         {range}
       </p>

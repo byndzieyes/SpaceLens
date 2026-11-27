@@ -15,7 +15,7 @@ import {
 import { InsightsSizeDistributionSection } from '../features/insights/InsightsSizeDistributionSection'
 import { InsightsSummaryCards } from '../features/insights/InsightsSummaryCards'
 import { useInsights } from '../features/insights/useInsights'
-import { formatScanDate } from '../features/overview/recentScanUtils'
+import { formatScanDate } from '../lib/scanDisplay'
 import type { ViewSnapshotOptions } from '../features/snapshots/selection'
 
 const errorMessages = {

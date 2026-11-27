@@ -1,6 +1,6 @@
 import { formatBytes } from '../../lib/storage'
 import { InsightsAnalyticsSection } from './InsightsAnalyticsSection'
-import { InsightsPagination } from './InsightsPagination'
+import { Pagination } from '../../components/ui/Pagination'
 import { categoryLabels } from './insightsDisplay'
 import { useInsightsRead, type InsightsSectionProps } from './useInsightsRead'
 
@@ -29,7 +29,8 @@ export function InsightsExtensionsSection(props: InsightsSectionProps): React.JS
       retry={retry}
       retryLabel="Retry extensions"
       controls={
-        <InsightsPagination
+        <Pagination
+          className="border-b border-separator pb-3"
           label="Extensions pagination"
           previousLabel="Previous extension page"
           nextLabel="Next extension page"

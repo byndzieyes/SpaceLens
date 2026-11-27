@@ -6,7 +6,7 @@ import { Badge } from '../../components/ui/Badge'
 import { Button } from '../../components/ui/Button'
 import { Card } from '../../components/ui/Card'
 import { formatStorageSize } from '../../lib/storage'
-import { formatScanDate, formatScanDuration } from './recentScanUtils'
+import { formatScanDate, formatScanDuration } from '../../lib/scanDisplay'
 import type { RecentScansState } from './useRecentScans'
 
 interface RecentScansProps {

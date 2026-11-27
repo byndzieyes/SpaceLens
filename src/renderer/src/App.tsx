@@ -46,7 +46,7 @@ function App(): React.JSX.Element {
         }
       />
     ),
-    history: <HistoryPage />
+    history: <HistoryPage snapshots={selections} />
   }
 
   return (

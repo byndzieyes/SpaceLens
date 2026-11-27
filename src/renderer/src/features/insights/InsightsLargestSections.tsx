@@ -7,7 +7,7 @@ import {
 import { formatBytes } from '../../lib/storage'
 import type { ExplorerTarget } from '../../navigation'
 import { InsightsAnalyticsSection } from './InsightsAnalyticsSection'
-import { InsightsPagination } from './InsightsPagination'
+import { Pagination } from '../../components/ui/Pagination'
 import { useInsightsRead, type InsightsSectionProps } from './useInsightsRead'
 
 const rankings = {
@@ -115,7 +115,8 @@ function LargestEntriesSection({
       retryLabel={`Retry largest ${noun}`}
       headerClassName="xl:min-h-17"
       controls={
-        <InsightsPagination
+        <Pagination
+          className="border-b border-separator pb-3"
           label={`${title} pagination`}
           previousLabel={`Previous ${kind} ranking page`}
           nextLabel={`Next ${kind} ranking page`}
