@@ -34,6 +34,7 @@ import {
 } from '../src/main/storage/workerClient'
 import type { createStorageWorkerClient } from '../src/main/storage/workerRunner'
 import type { StorageRequest } from '../src/main/storage/workerProtocol'
+import type { StorageTrends } from '../src/shared/trends'
 import type { FileEntry, ScanSession } from '../src/shared/scan'
 import {
   IPC_CHANNELS,
@@ -1778,6 +1779,19 @@ test('migrates v1 during bundled worker initialization and preserves Explorer an
   }
   await migrated.recoverStorage()
   await expect(migrated.getPublishedScan()).resolves.toEqual(legacyScan)
+  await expect(
+    migrated.readTrendBatch({ selection: { mode: 'latest' }, pointLimit: 100 })
+  ).resolves.toMatchObject({
+    matchedCount: 1,
+    latestCompletedScanId: legacyScan.id,
+    points: [
+      {
+        id: legacyScan.id,
+        totalBytes: legacyScan.summary.totalBytes,
+        directoryCount: legacyScan.summary.directoryCount
+      }
+    ]
+  })
 
   const directory = { scanId: legacyScan.id, entryId: folder.id }
   const page = { ...directory, offset: 0, limit: 10 }
@@ -1853,6 +1867,146 @@ test('an interrupted worker migration leaves the v1 schema and rows available fo
   await retry.recoverStorage()
   await expect(retry.getPublishedScan()).resolves.toEqual(legacyScan)
   await expect(retry.getScan('interrupted')).resolves.toBeNull()
+})
+
+test('serves bounded Trends through public IPC and gives a scanner write priority between bundled batches', async () => {
+  const client = wrap(start())
+  await client.initialize(':memory:')
+  await client.recoverStorage()
+  const stamp = '2026-11-20T10:00:00.000Z'
+  async function publish(id: string, rootPath: string, partial = false): Promise<void> {
+    const pending = { ...lifecycleScan(id), rootPath, startedAt: stamp }
+    const directory = { ...root, scanId: id, path: rootPath }
+    await client.beginScan(pending)
+    await client.applyBatch(id, [
+      { type: 'entry', entry: directory },
+      {
+        type: 'directory-finalized',
+        entry: { ...directory, type: 'directory', aggregatedSizeBytes: 0 }
+      }
+    ])
+    const completed = readyMetadata(pending)
+    await client.publishScan(
+      {
+        ...completed,
+        summary: { ...completed.summary, fileCount: 0, errorCount: Number(partial) }
+      },
+      directory.id
+    )
+  }
+  for (let index = 0; index < 145; index++)
+    await publish('trend-' + index, index % 2 ? 'C:\\Archive\\' : 'c:/Archive', index === 144)
+  await publish('unrelated', '/other')
+  await expect(
+    client.readTrendBatch({ selection: { mode: 'latest' }, pointLimit: 101 })
+  ).rejects.toMatchObject({ code: 'INVALID_REQUEST' })
+  const storage = new ScanStorageCoordinator(Promise.resolve(client))
+  await storage.beginScan(lifecycleScan('active'))
+  const { handlers } = mockBundledElectron()
+  const { registerScannerIpc } = await import('../src/main/scannerIpc')
+  const url = 'file:///trends/index.html'
+  const renderer = Object.assign(new EventEmitter(), {
+    isDestroyed: () => false,
+    mainFrame: { url },
+    send: vi.fn()
+  })
+  const event = {
+    sender: renderer,
+    senderFrame: renderer.mainFrame
+  } as unknown as IpcMainInvokeEvent
+  const manager = {
+    getState: () => null,
+    subscribe: () => () => {},
+    dispose: async () => {}
+  } as unknown as Parameters<typeof registerScannerIpc>[0]
+  const latest = await client.getPublishedScan()
+  const boundary = registerScannerIpc(manager, url, storage, Promise.resolve(latest))
+  let first = Promise.withResolvers<void>()
+  let proceed = Promise.withResolvers<void>()
+  const order: string[] = []
+  const read = client.readTrendBatch.bind(client)
+  const write = client.applyBatch.bind(client)
+  const reads = vi.spyOn(client, 'readTrendBatch').mockImplementation(async (request) => {
+    order.push('trend')
+    const batch = await read(request)
+    if (request.before === undefined) {
+      first.resolve()
+      await proceed.promise
+    }
+    return batch
+  })
+  vi.spyOn(client, 'applyBatch').mockImplementation(async (scanId, entries) => {
+    order.push('write')
+    await write(scanId, entries)
+  })
+  try {
+    boundary.attachRenderer(renderer as unknown as WebContents)
+    const query = handlers.get(IPC_CHANNELS.getStorageTrends)!
+    await expect(
+      query({ ...event, senderFrame: {} } as IpcMainInvokeEvent, { mode: 'latest' })
+    ).resolves.toMatchObject({ ok: false, error: { code: 'UNAUTHORIZED' } })
+    await expect(query(event, { mode: 'latest', before: 2n })).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'INVALID_REQUEST' }
+    })
+    expect(reads).not.toHaveBeenCalled()
+    const result = query(event, { mode: 'snapshot', scanId: 'trend-0' }) as Promise<
+      ScannerIpcResult<StorageTrends>
+    >
+    await Promise.race([
+      first.promise,
+      result.then((reply) => {
+        throw new Error('The first Trends batch never dispatched: ' + JSON.stringify(reply))
+      })
+    ])
+    const writing = storage.applyBatch('active', [
+      { type: 'entry', entry: { ...root, scanId: 'active' } }
+    ])
+    proceed.resolve()
+    await writing
+    const reply = await result
+    expect(reply.ok).toBe(true)
+    if (!reply.ok) throw new Error(reply.error.message)
+    expect(reply.value).toMatchObject({
+      retainedCount: 145,
+      latestCompletedScanId: 'unrelated',
+      series: { normalizedRoot: 'c:/Archive' }
+    })
+    expect(reply.value.points).toHaveLength(100)
+    expect(reply.value.points[0].id).toBe('trend-45')
+    expect(reply.value.points.at(-1)).toMatchObject({ id: 'trend-144', incomplete: true })
+    expect(order).toEqual(['trend', 'write', 'trend'])
+    expect(reads.mock.lastCall?.[0]).toMatchObject({ pointLimit: 0, selection: { mode: 'series' } })
+    expect(storage.isSnapshotProtected('trend-0')).toBe(false)
+    expect(storage.isSnapshotProtected('trend-144')).toBe(false)
+
+    first = Promise.withResolvers<void>()
+    proceed = Promise.withResolvers<void>()
+    const selection = { mode: 'series', series: reply.value.series }
+    const changing = Promise.resolve(query(event, selection))
+    await Promise.race([
+      first.promise,
+      changing.then(() => {
+        throw new Error('The refresh never dispatched.')
+      })
+    ])
+    const deletion = storage.deleteSnapshot({ scanId: 'trend-144' })
+    proceed.resolve()
+    await deletion
+    await expect(changing).resolves.toMatchObject({
+      ok: false,
+      error: { code: 'HISTORY_CHANGED' }
+    })
+    await expect(query(event, selection)).resolves.toMatchObject({
+      ok: true,
+      value: { retainedCount: 144 }
+    })
+  } finally {
+    proceed.resolve()
+    await boundary.dispose()
+    await storage.discardBuildingScan('active')
+    vi.doUnmock('electron')
+  }
 })
 
 test('reads completed history through the worker and coordinator across publication, discard and restart', async () => {

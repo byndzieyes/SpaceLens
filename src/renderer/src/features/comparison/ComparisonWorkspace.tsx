@@ -379,7 +379,7 @@ export function ComparisonWorkspace({
       )}
       {picker && (
         <SnapshotPicker
-          side={picker}
+          title={`Choose ${sideLabels[picker].toLowerCase()} snapshot`}
           selectedId={draft?.[picker]?.id}
           recent={recent}
           historyRevision={historyRevision}

@@ -34,6 +34,7 @@ type SnapshotQueries = Pick<
   | 'requireValidatedScan'
   | 'listScanHistory'
   | 'getScanHistoryMetadata'
+  | 'readTrendBatch'
   | 'getInsightsCategories'
   | 'getInsightsSizeDistribution'
   | 'getInsightsObservations'

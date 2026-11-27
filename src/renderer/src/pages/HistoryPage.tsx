@@ -18,6 +18,7 @@ import type {
 import { ComparisonWorkspace } from '../features/comparison/ComparisonWorkspace'
 import type { ComparisonDraft } from '../features/comparison/draft'
 import type { ComparisonMutations } from '../features/comparison/selection'
+import { TrendsWorkspace } from '../features/trends/TrendsWorkspace'
 
 const counts = new Intl.NumberFormat('en-US')
 const sortOptions = {
@@ -26,9 +27,9 @@ const sortOptions = {
   'size-desc': 'Largest size first',
   'size-asc': 'Smallest size first'
 } satisfies Record<ScanHistorySort, string>
-const historyTabs = { scans: 'Scans', comparison: 'Comparison' } as const
+const historyTabs = { scans: 'Scans', comparison: 'Comparison', trends: 'Trends' } as const
 type HistoryTab = keyof typeof historyTabs
-const tabs: readonly HistoryTab[] = ['scans', 'comparison']
+const tabs: readonly HistoryTab[] = ['scans', 'comparison', 'trends']
 
 function describePage(page: ScanHistoryPage, filtered: boolean): string {
   const { offset, limit, totalCount, items } = page
@@ -95,7 +96,7 @@ export function HistoryPage({
     []
   )
 
-  const openSnapshot = (view: SnapshotView, scan: ScanHistoryItem): void => {
+  const openSnapshot = (view: SnapshotView, scan: Pick<ScanHistoryItem, 'id'>): void => {
     const request = Symbol()
     attempt.current = request
     setOpening(view)
@@ -115,7 +116,10 @@ export function HistoryPage({
     onCancelOpen?.()
   }
   const selectTab = (next: HistoryTab): void => {
-    if (next === 'comparison') cancelOpening()
+    if (next !== tab) {
+      cancelOpening()
+      setFeedback(undefined)
+    }
     setTab(next)
   }
   const compareSnapshot = (scan: ScanHistoryItem): void => {
@@ -142,9 +146,9 @@ export function HistoryPage({
       <div
         role="tablist"
         aria-label="History views"
-        className="flex w-fit gap-1 rounded-lg border border-border bg-background/40 p-1"
+        className="flex w-fit max-w-full flex-wrap gap-1 rounded-lg border border-border bg-background/40 p-1"
       >
-        {tabs.map((name) => (
+        {tabs.map((name, index) => (
           <button
             key={name}
             ref={(node) => {
@@ -165,10 +169,8 @@ export function HistoryPage({
                 key === 'Home'
                   ? 'scans'
                   : key === 'End'
-                    ? 'comparison'
-                    : name === 'scans'
-                      ? 'comparison'
-                      : 'scans'
+                    ? 'trends'
+                    : tabs[(index + (key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length]
               tabButtons.current[next]?.focus()
             }}
             className="rounded-md px-3 py-1.5 text-sm font-medium text-text-secondary hover:bg-surface-hover aria-selected:bg-surface-elevated aria-selected:text-text-primary"
@@ -338,10 +340,10 @@ export function HistoryPage({
         role="tabpanel"
         aria-labelledby={`${tabId}-comparison-tab`}
         tabIndex={0}
-        hidden={showScans}
+        hidden={tab !== 'comparison'}
         className="rounded-xl"
       >
-        {!showScans && (
+        {tab === 'comparison' && (
           <ComparisonWorkspace
             onOpenEntry={onOpenEntry}
             draft={comparisonDraft}
@@ -351,6 +353,23 @@ export function HistoryPage({
             mutations={comparisonMutations}
           />
         )}
+      </div>
+      <div
+        id={`${tabId}-trends-panel`}
+        role="tabpanel"
+        aria-labelledby={`${tabId}-trends-tab`}
+        tabIndex={0}
+        hidden={tab !== 'trends'}
+        className="rounded-xl"
+      >
+        <TrendsWorkspace
+          active={tab === 'trends'}
+          historyRevision={history.historyRevision}
+          opening={tab === 'trends' ? opening : undefined}
+          feedback={tab === 'trends' ? feedback : undefined}
+          onOpen={(view, id) => openSnapshot(view, { id })}
+          onOpenPicker={cancelOpening}
+        />
       </div>
     </div>
   )

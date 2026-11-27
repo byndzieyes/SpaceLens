@@ -20,6 +20,7 @@ import type { ScannerIpcResult, SpaceLensAPI } from '../src/shared/ipc'
 const queries = {
   requireValidatedScan: vi.fn<StorageWorkerClient['requireValidatedScan']>(),
   listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
+  readTrendBatch: vi.fn<StorageWorkerClient['readTrendBatch']>(),
   getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
   listComparisonMatches: vi.fn<StorageWorkerClient['listComparisonMatches']>(),
   listComparisonFileChanges: vi.fn<StorageWorkerClient['listComparisonFileChanges']>(),

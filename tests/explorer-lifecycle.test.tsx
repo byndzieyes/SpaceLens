@@ -252,6 +252,7 @@ function mockApp(): {
       )
     })),
     getScanHistoryMetadata: vi.fn(),
+    getStorageTrends: vi.fn(),
     deleteSnapshot: vi.fn(),
     getRetentionSettings: vi.fn(),
     setRetentionSettings: vi.fn(),

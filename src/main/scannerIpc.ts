@@ -41,7 +41,9 @@ import {
   StorageUnavailableError,
   type ScanStorageCoordinator
 } from './storage/coordinator'
-import { StorageWorkerError } from './storage/workerClient'
+import { STORAGE_REQUEST_TIMEOUT_MS, StorageWorkerError } from './storage/workerClient'
+import { readTrendSelection } from './storage/trendsContracts'
+import { readStorageTrends } from './storage/readStorageTrends'
 import type { HistoryRetention } from './storage/historyRetention'
 import { RetentionSettingsError } from './storage/retentionSettings'
 import { isScanHistoryRetentionSettings } from '../shared/history'
@@ -197,6 +199,7 @@ export function registerScannerIpc(
   let readContext = new AbortController()
   let viewSelections = new ViewSnapshotSelections(storage, readContext.signal)
   let documentNavigating = false
+  let trendRead: AbortController | undefined
 
   const clearApproval = (): void => {
     approval = null
@@ -411,6 +414,7 @@ export function registerScannerIpc(
     IPC_CHANNELS.getScanSnapshot,
     IPC_CHANNELS.listScanHistory,
     IPC_CHANNELS.getScanHistoryMetadata,
+    IPC_CHANNELS.getStorageTrends,
     IPC_CHANNELS.deleteSnapshot,
     IPC_CHANNELS.getRetentionSettings,
     IPC_CHANNELS.setRetentionSettings,
@@ -431,12 +435,15 @@ export function registerScannerIpc(
       const viewTitle = insightsRead ? 'Insights' : 'Explorer'
       if ((explorerRead || insightsRead) && documentNavigating)
         return failure('UNAUTHORIZED', `${viewTitle} access is not authorized.`)
+      if (channel === IPC_CHANNELS.getStorageTrends && documentNavigating)
+        return failure('UNAUTHORIZED', 'Trends access is not authorized.')
       const { signal } = readContext
       const selections = viewSelections
       let stillSelected: (() => boolean) | undefined
       const history =
         channel === IPC_CHANNELS.listScanHistory ||
         channel === IPC_CHANNELS.getScanHistoryMetadata ||
+        channel === IPC_CHANNELS.getStorageTrends ||
         channel === IPC_CHANNELS.deleteSnapshot ||
         channel === IPC_CHANNELS.getRetentionSettings ||
         channel === IPC_CHANNELS.setRetentionSettings
@@ -494,6 +501,27 @@ export function registerScannerIpc(
           if (value.offset !== query.offset || value.limit !== query.limit)
             throw new Error('Storage returned a different history page.')
           return reply({ ok: true, value })
+        }
+        if (channel === IPC_CHANNELS.getStorageTrends) {
+          const selection = readTrendSelection(args[0])
+          trendRead?.abort()
+          const request = new AbortController()
+          trendRead = request
+          const lifetime = AbortSignal.any([
+            signal,
+            request.signal,
+            AbortSignal.timeout(STORAGE_REQUEST_TIMEOUT_MS)
+          ])
+          try {
+            const value = await readStorageTrends(storage, lifetime, selection)
+            if (lifetime.aborted)
+              return failure('UNAVAILABLE', 'The storage trends request is no longer active.')
+            if (!value)
+              return failure('HISTORY_CHANGED', 'Saved history changed while trends were loading.')
+            return reply({ ok: true, value })
+          } finally {
+            if (trendRead === request) trendRead = undefined
+          }
         }
         if (channel === IPC_CHANNELS.getScanHistoryMetadata) {
           const scanId = readSnapshotId(args[0])

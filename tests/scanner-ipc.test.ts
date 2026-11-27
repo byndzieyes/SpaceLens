@@ -73,6 +73,7 @@ const queries = {
   getScanSnapshot: vi.fn<StorageWorkerClient['getScanSnapshot']>(),
   openSavedSnapshot: vi.fn<StorageWorkerClient['openSavedSnapshot']>(),
   listScanHistory: vi.fn<StorageWorkerClient['listScanHistory']>(),
+  readTrendBatch: vi.fn<StorageWorkerClient['readTrendBatch']>(),
   getScanHistoryMetadata: vi.fn<StorageWorkerClient['getScanHistoryMetadata']>(),
   listComparisonMatches: vi.fn<StorageWorkerClient['listComparisonMatches']>(),
   listComparisonFileChanges: vi.fn<StorageWorkerClient['listComparisonFileChanges']>(),
@@ -1807,6 +1808,7 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getInsightsObservations)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listScanHistory)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getScanHistoryMetadata)
+  expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getStorageTrends)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.deleteSnapshot)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getRetentionSettings)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.setRetentionSettings)
@@ -1823,7 +1825,7 @@ test('handles destroyed windows, reloads, send failures and listener cleanup', a
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.getComparisonSummary)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listComparisonFileChanges)
   expect(ipcMain.removeHandler).toHaveBeenCalledWith(IPC_CHANNELS.listComparisonDirectoryChanges)
-  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(31)
+  expect(ipcMain.removeHandler).toHaveBeenCalledTimes(32)
 })
 
 test('shutdown waits for cleanup, handles repeated quit requests and removes its listener', async () => {

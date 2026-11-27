@@ -1,3 +1,4 @@
+import type { StorageTrends, TrendSelection } from './trends'
 import type {
   ScanHistoryErrorCode,
   ScanHistoryItem,
@@ -83,6 +84,9 @@ export interface SpaceLensAPI extends ComparisonAPI {
   getScanHistoryMetadata: (
     request: ScanHistoryMetadataRequest
   ) => Promise<ScannerIpcResult<ScanHistoryItem, ScanHistoryErrorCode>>
+  getStorageTrends: (
+    selection: TrendSelection
+  ) => Promise<ScannerIpcResult<StorageTrends, ScanHistoryErrorCode | 'HISTORY_CHANGED'>>
   deleteSnapshot: (
     request: SnapshotDeletionRequest
   ) => Promise<ScannerIpcResult<SnapshotDeletionResult, ScanHistoryErrorCode>>
@@ -137,6 +141,7 @@ export const IPC_CHANNELS = {
   listComparisonDirectoryChanges: 'spacelens:list-comparison-directory-changes',
   listScanHistory: 'spacelens:list-scan-history',
   getScanHistoryMetadata: 'spacelens:get-scan-history-metadata',
+  getStorageTrends: 'spacelens:get-storage-trends',
   deleteSnapshot: 'spacelens:delete-snapshot',
   getRetentionSettings: 'spacelens:get-retention-settings',
   setRetentionSettings: 'spacelens:set-retention-settings',
@@ -181,6 +186,7 @@ export type ScannerIpcErrorCode =
   | 'NOT_RUNNING'
   | 'UNAVAILABLE'
   | 'INTERNAL_ERROR'
+  | 'HISTORY_CHANGED'
 
 export type ScannerIpcResult<T, Code extends string = ScannerIpcErrorCode> =
   | { readonly ok: true; readonly value: T }

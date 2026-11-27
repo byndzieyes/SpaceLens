@@ -69,6 +69,7 @@ const api: SpaceLensAPI = {
   listScanHistory: (query) => ipcRenderer.invoke(IPC_CHANNELS.listScanHistory, query),
   getScanHistoryMetadata: (request) =>
     ipcRenderer.invoke(IPC_CHANNELS.getScanHistoryMetadata, request),
+  getStorageTrends: (selection) => ipcRenderer.invoke(IPC_CHANNELS.getStorageTrends, selection),
   deleteSnapshot: (request) => ipcRenderer.invoke(IPC_CHANNELS.deleteSnapshot, request),
   getRetentionSettings: () => ipcRenderer.invoke(IPC_CHANNELS.getRetentionSettings),
   setRetentionSettings: (settings) =>

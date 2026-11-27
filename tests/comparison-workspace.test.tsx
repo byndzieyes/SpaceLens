@@ -39,6 +39,7 @@ const prepare = vi.fn<SpaceLensAPI['prepareComparisonSelection']>()
 const adopt = vi.fn<SpaceLensAPI['adoptComparisonSelection']>()
 const discard = vi.fn<SpaceLensAPI['discardPreparedComparisonSelection']>()
 const release = vi.fn<SpaceLensAPI['releaseComparisonSelection']>()
+const trends = vi.fn<SpaceLensAPI['getStorageTrends']>()
 const summary = vi.fn<SpaceLensAPI['getComparisonSummary']>()
 const fileChanges = vi.fn<SpaceLensAPI['listComparisonFileChanges']>()
 const directoryChanges = vi.fn<SpaceLensAPI['listComparisonDirectoryChanges']>()
@@ -218,6 +219,10 @@ beforeEach(() => {
   summary.mockImplementation(async ({ query }) => ({ ok: true, value: summarize(query) }))
   discard.mockResolvedValue({ ok: true, value: null })
   release.mockResolvedValue({ ok: true, value: null })
+  trends.mockResolvedValue({
+    ok: true,
+    value: { series: null, points: [], retainedCount: 0, latestCompletedScanId: null }
+  })
   const api = {
     ...mockSnapshotSelection(readSnapshot),
     getScanSnapshot: readSnapshot,
@@ -227,6 +232,7 @@ beforeEach(() => {
       return () => listen.delete(callback)
     },
     listScanHistory: list,
+    getStorageTrends: trends,
     getScanHistoryMetadata: metadata,
     evaluateComparisonCompatibility: evaluate,
     prepareComparisonSelection: prepare,
@@ -340,7 +346,12 @@ test('keeps Comparison inside History and preserves Scans filter, sort and page 
   click(tab('Comparison'))
   expect(screen.getByRole('tabpanel', { name: 'Comparison' })).toBeVisible()
   expect(screen.queryByRole('button', { name: 'History Settings' })).toBeNull()
-  fireEvent.keyDown(tab('Comparison'), { key: 'Home' })
+  fireEvent.keyDown(tab('Comparison'), { key: 'End' })
+  expect(tab('Trends')).toHaveFocus()
+  click(tab('Trends'))
+  expect(screen.getByRole('tabpanel', { name: 'Trends' })).toBeVisible()
+  await screen.findByText(/No saved snapshots yet/)
+  fireEvent.keyDown(tab('Trends'), { key: 'Home' })
   expect(tab('Scans')).toHaveFocus()
   list.mockClear()
   click(tab('Scans'))
@@ -355,6 +366,20 @@ test('keeps Comparison inside History and preserves Scans filter, sort and page 
   )
   expect(screen.getByRole('searchbox', { name: 'Filter by path' })).toHaveValue('/photos')
   expect(screen.getByRole('combobox', { name: 'Sort' })).toHaveValue('oldest')
+})
+
+test('releases an active comparison when opening Trends and makes only a metadata query', async () => {
+  openComparison()
+  await compare()
+  await waitFor(() => expect(summary).toHaveBeenCalled())
+  for (const call of [evaluate, prepare, adopt, summary, fileChanges, directoryChanges])
+    call.mockClear()
+  click(tab('Trends'))
+  await screen.findByText(/No saved snapshots yet/)
+  expect(release).toHaveBeenCalledExactlyOnceWith({ selectionId: 'adopted-1' })
+  expect(trends).toHaveBeenCalledExactlyOnceWith({ mode: 'latest' })
+  for (const call of [evaluate, prepare, adopt, summary, fileChanges, directoryChanges])
+    expect(call).not.toHaveBeenCalled()
 })
 
 test.each([0, 1])('explains insufficient history with %i retained snapshots', async (n) => {

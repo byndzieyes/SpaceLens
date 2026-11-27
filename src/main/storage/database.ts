@@ -5,6 +5,7 @@ import {
   type StatementSync
 } from 'node:sqlite'
 import type { ScanHistoryItem, ScanHistoryPage, ScanHistorySort } from '../../shared/history'
+import type { TrendPoint } from '../../shared/trends'
 import type {
   InsightsCategories,
   InsightsExtensionPage,
@@ -18,8 +19,10 @@ import type {
 import type { FileEntry, ScanSession } from '../../shared/scan'
 import {
   comparisonMetadataForStoredScan,
+  comparisonSeries,
   evaluateComparisonCompatibility
 } from '../comparison/compatibility'
+import { readTrendBatchRequest, TREND_BATCH_SIZE, type TrendBatch } from './trendsContracts'
 import { isComparisonPathKey } from '../comparison/paths'
 import {
   MAX_SCAN_TREEMAP_ENTRIES,
@@ -278,6 +281,7 @@ function inTransaction(
 
 /** Owns one synchronous connection. Construct and close it on the same thread. */
 export class ScanDatabase {
+  private historyGeneration = 0n
   private readonly connection: DatabaseSync
   private readonly analytics: PublishedAnalytics
   private readonly comparison: ComparisonWorkspace
@@ -487,6 +491,7 @@ export class ScanDatabase {
     }
     if (this.connection.isTransaction) insertCompleted()
     else this.transaction(insertCompleted)
+    this.historyGeneration++
   }
 
   private insertScanRow(scan: ScanSession, sequence: bigint | null): void {
@@ -568,6 +573,7 @@ export class ScanDatabase {
       published = requireCompletedScan(stored)
     })
     this.validatedLatestId = published.id
+    this.historyGeneration++
     return published
   }
 
@@ -658,6 +664,7 @@ export class ScanDatabase {
       deleted = { scanId, latestCompleted, latestCompletedScanId: latestCompleted?.id ?? null }
     })
     if (deleted) {
+      this.historyGeneration++
       this.validatedSnapshots.delete(scanId)
       this.analytics.invalidate(scanId)
       this.comparison.invalidate(scanId)
@@ -735,6 +742,65 @@ export class ScanDatabase {
       'BEGIN'
     )
     return item
+  }
+
+  /** Indexed keyset read. Normalize no more than one batch of completed roots per admission. */
+  readTrendBatch(request: unknown): TrendBatch {
+    this.requireOpen()
+    const { selection, before, pointLimit } = readTrendBatchRequest(request)
+    const latest = this.getPublishedScan()
+    const anchor = selection.mode === 'snapshot' ? this.requireSavedScan(selection.scanId) : latest
+    const series =
+      selection.mode === 'series' ? selection.series : anchor && comparisonSeries(anchor.rootPath)
+    if (selection.mode !== 'series' && anchor && !series)
+      throw new SnapshotAccessError(
+        'SNAPSHOT_UNAVAILABLE',
+        'This snapshot has no compatible trend root.'
+      )
+
+    const header = {
+      series,
+      latestCompletedScanId: latest?.id ?? null,
+      generation: this.historyGeneration
+    }
+    if (!series || !latest) return { ...header, nextBefore: null, matchedCount: 0, points: [] }
+
+    // Root spellings use the original UTF-16 bytes. Comparing raw root_path would miss aliases.
+    const select = this.connection.prepare(
+      `${SELECT_SCAN} WHERE status = 'completed'${before === undefined ? '' : ' AND publication_sequence < ?'}
+       ORDER BY publication_sequence DESC LIMIT ${TREND_BATCH_SIZE + 1}`
+    )
+    select.setReadBigInts(true)
+    const rows = before === undefined ? select.all() : select.all(before)
+    const points: TrendPoint[] = []
+    let matchedCount = 0
+    for (const row of rows.slice(0, TREND_BATCH_SIZE)) {
+      const key = comparisonSeries(readFilesystemText(row.root_path, 'root path'))
+      if (
+        key?.normalizedRoot !== series.normalizedRoot ||
+        key.pathStyle !== series.pathStyle ||
+        key.traversalPolicy !== series.traversalPolicy
+      )
+        continue
+      matchedCount++
+      if (points.length >= pointLimit) continue
+      const scan = requireCompletedScan(readSequencedScan(row))
+      readCompletedScanDuration(scan)
+      const { totalBytes, fileCount, directoryCount, errorCount } = scan.summary
+      points.push({
+        id: scan.id,
+        finishedAt: scan.finishedAt,
+        totalBytes,
+        fileCount,
+        directoryCount,
+        incomplete: errorCount > 0
+      })
+    }
+    const nextBefore =
+      rows.length > TREND_BATCH_SIZE ? rows[TREND_BATCH_SIZE - 1].publication_sequence : null
+    if (nextBefore !== null && (typeof nextBefore !== 'bigint' || nextBefore <= 0n))
+      throw new Error('Invalid metadata publication cursor.')
+    return { ...header, nextBefore, matchedCount, points }
   }
 
   /** Internal keyset page of observations. All source reads belong to the same transaction. */

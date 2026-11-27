@@ -3,13 +3,31 @@ import type {
   ComparisonCoverage,
   ComparisonIncompatibility,
   ComparisonPair,
-  ComparisonPathStyle,
+  ComparisonScanSemantics,
   ComparisonSnapshotMetadata,
   ComparisonWarning
 } from '../../shared/comparison'
 import { normalizeComparisonRoot } from './paths'
+import type { TrendSeries } from '../../shared/trends'
 
 const storedTraversalPolicy = 'spacelens-v1-v2'
+
+function storedScanSemantics(rootPath: string): ComparisonScanSemantics | undefined {
+  if (/^[a-z]:[\\/]/i.test(rootPath) || rootPath.startsWith('\\\\'))
+    return { pathStyle: 'win32', traversalPolicy: storedTraversalPolicy }
+  if (rootPath.startsWith('/') && !rootPath.startsWith('//'))
+    return { pathStyle: 'posix', traversalPolicy: storedTraversalPolicy }
+  return undefined
+}
+
+export function comparisonSeries(
+  rootPath: string,
+  semantics = storedScanSemantics(rootPath)
+): TrendSeries | null {
+  if (semantics?.traversalPolicy !== storedTraversalPolicy) return null
+  const normalizedRoot = normalizeComparisonRoot(rootPath, semantics.pathStyle)
+  return normalizedRoot === null ? null : { normalizedRoot, ...semantics }
+}
 
 /**
  * Use only for official v1/v2 scan rows, including migrated publications. The
@@ -21,11 +39,8 @@ export function comparisonMetadataForStoredScan(
 ): ComparisonSnapshotMetadata {
   const { rootPath, id, status, summary } = scan
   const metadata = { id, status, rootPath, summary }
-  let pathStyle: ComparisonPathStyle
-  if (/^[a-z]:[\\/]/i.test(rootPath) || rootPath.startsWith('\\\\')) pathStyle = 'win32'
-  else if (rootPath.startsWith('/') && !rootPath.startsWith('//')) pathStyle = 'posix'
-  else return metadata
-  return { ...metadata, semantics: { pathStyle, traversalPolicy: storedTraversalPolicy } }
+  const semantics = storedScanSemantics(rootPath)
+  return semantics ? { ...metadata, semantics } : metadata
 }
 
 function readCoverage({ summary }: ComparisonSnapshotMetadata): ComparisonCoverage {
@@ -82,15 +97,15 @@ export function evaluateComparisonCompatibility(
   }
 
   const { pathStyle } = baselineSemantics
-  const baselineRoot = normalizeComparisonRoot(baseline.rootPath, pathStyle)
-  const targetRoot = normalizeComparisonRoot(target.rootPath, pathStyle)
-  if (baselineRoot === null)
+  const baselineRoot = comparisonSeries(baseline.rootPath, baselineSemantics)?.normalizedRoot
+  const targetRoot = comparisonSeries(target.rootPath, targetSemantics)?.normalizedRoot
+  if (baselineRoot === undefined)
     return incompatible({
       code: 'INSUFFICIENT_COMPATIBILITY_METADATA',
       field: 'root-path',
       side: 'baseline'
     })
-  if (targetRoot === null)
+  if (targetRoot === undefined)
     return incompatible({
       code: 'INSUFFICIENT_COMPATIBILITY_METADATA',
       field: 'root-path',

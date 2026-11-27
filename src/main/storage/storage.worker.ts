@@ -71,6 +71,8 @@ function execute(request: StorageRequest): StorageResult<StorageOperation> {
       return requireDatabase().listScanHistory(request.payload)
     case 'getScanHistoryMetadata':
       return requireDatabase().getScanHistoryMetadata(request.payload)
+    case 'readTrendBatch':
+      return requireDatabase().readTrendBatch(request.payload)
     case 'listComparisonMatches':
       return requireDatabase().listComparisonMatches(request.payload)
     case 'listComparisonFileChanges':

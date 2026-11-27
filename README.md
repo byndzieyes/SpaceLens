@@ -77,7 +77,11 @@ After Summary loads, choose File Changes or Directory Changes to request a 20-ro
 
 Load either directory ranking to see up to five directories with known deltas in that direction. Row actions open the exact saved entry on the selected side. Comparison keeps both snapshots protected until Explorer has adopted its snapshot and verified the destination.
 
-Storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
+History’s Trends tab starts with the series containing Latest. Choose another scan root through the paginated snapshot picker. Series use the same normalized root, path style, and traversal rules as Comparison. The chart shows known logical size, files, or directories for the newest 100 retained publications in the series. The summary reports the exact retained count and observed change across the displayed window. The timeline shows adjacent changes and opens exact snapshots in Explorer or Insights. Partial observations and any differences that touch them are marked.
+
+Trends reads published scan metadata from the existing sequence index. The Worker checks at most 128 metadata rows plus one lookahead per admission, and Main returns up to 100 points in ascending publication order. Counting a series exactly takes work proportional to retained history and the length of the stored paths. A history change between batches invalidates the read. The overall request budget is 10 seconds, with a retry available if it cannot complete. The coordinator gives queued scanner writes priority between batches. Browsing requires neither entry-tree reads nor snapshot protection, and switching metrics uses the loaded data.
+
+Duplicate detection, file cleanup, and background monitoring are planned for later tasks.
 
 ## Snapshot comparison contracts
 

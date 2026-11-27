@@ -42,6 +42,12 @@ import {
 } from './comparisonDirectoryContracts'
 import { isComparisonSummary, readComparisonPair } from './comparisonSummaryContracts'
 import {
+  isTrendBatch,
+  readTrendBatchRequest,
+  type TrendBatch,
+  type TrendBatchRequest
+} from './trendsContracts'
+import {
   MAX_SCAN_DIRECTORY_PAGE_SIZE,
   MAX_SCAN_TREEMAP_ENTRIES,
   knownTreemapBytes,
@@ -96,6 +102,7 @@ interface StorageCommands {
   requireValidatedScan: { payload: { scanId: string }; result: CompletedScan }
   listScanHistory: { payload: ScanHistoryQuery; result: ScanHistoryPage }
   getScanHistoryMetadata: { payload: ScanHistoryMetadataRequest; result: ScanHistoryItem }
+  readTrendBatch: { payload: TrendBatchRequest; result: TrendBatch }
   listComparisonMatches: { payload: ComparisonMatchQuery; result: ComparisonMatchPage }
   listComparisonFileChanges: { payload: ComparisonFileQuery; result: ComparisonFileResult }
   getComparisonSummary: { payload: ComparisonPair; result: ComparisonSummary }
@@ -206,6 +213,8 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       return { requestId, operation, payload: { scanId: readSnapshotId(payload) } }
     case 'listScanHistory':
       return { requestId, operation, payload: readScanHistoryQuery(payload) }
+    case 'readTrendBatch':
+      return { requestId, operation, payload: readTrendBatchRequest(payload) }
     case 'listComparisonMatches':
       return { requestId, operation, payload: readComparisonMatchQuery(payload) }
     case 'listComparisonFileChanges':
@@ -678,6 +687,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     requireValidatedScan: isCompletedScan,
     listScanHistory: isHistoryPage,
     getScanHistoryMetadata: isHistoryItem,
+    readTrendBatch: isTrendBatch,
     listComparisonMatches: isComparisonMatchPage,
     listComparisonFileChanges: isComparisonFileResult,
     getComparisonSummary: isComparisonSummary,

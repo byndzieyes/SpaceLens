@@ -50,14 +50,14 @@ export function SnapshotDetails({
 }
 
 export function SnapshotPicker({
-  side,
+  title,
   selectedId,
   recent,
   historyRevision,
   onSelect,
   onDismiss
 }: {
-  side: ComparisonSide
+  title: string
   selectedId?: string
   recent: ReturnType<typeof useComparisonHistory>
   historyRevision: number
@@ -94,7 +94,7 @@ export function SnapshotPicker({
       : `${counts.format(value.totalCount)} snapshots`
 
   return (
-    <Modal title={`Choose ${sideLabels[side].toLowerCase()} snapshot`} onDismiss={onDismiss}>
+    <Modal title={title} onDismiss={onDismiss}>
       <div className="space-y-4">
         <label className="block space-y-1.5 text-sm">
           <span>Filter by path</span>

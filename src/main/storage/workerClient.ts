@@ -150,6 +150,12 @@ export class StorageWorkerClient {
     return this.run('getScanHistoryMetadata', request)
   }
 
+  readTrendBatch(
+    request: StoragePayload<'readTrendBatch'>
+  ): Promise<StorageResult<'readTrendBatch'>> {
+    return this.run('readTrendBatch', request)
+  }
+
   listComparisonMatches(query: ComparisonMatchQuery): Promise<ComparisonMatchPage> {
     return this.run('listComparisonMatches', query)
   }

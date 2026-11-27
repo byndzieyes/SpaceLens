@@ -51,6 +51,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'getScanHistoryMetadata',
     'getScanSnapshot',
     'getScanState',
+    'getStorageTrends',
     'listComparisonDirectoryChanges',
     'listComparisonFileChanges',
     'listInsightsExtensions',
@@ -177,6 +178,14 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     IPC_CHANNELS.releaseSnapshotSelection,
     release
   )
+})
+
+test('forwards the public Trends selection without exposing a Worker cursor', async () => {
+  const request = { mode: 'snapshot', scanId: 'saved' } as const
+  const result = { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Saved scan expired.' } }
+  vi.mocked(ipcRenderer.invoke).mockResolvedValue(result)
+  expect(await api.getStorageTrends(request)).toBe(result)
+  expect(ipcRenderer.invoke).toHaveBeenCalledExactlyOnceWith(IPC_CHANNELS.getStorageTrends, request)
 })
 
 test('forwards only the public Comparison commands and their typed payloads', async () => {

@@ -262,6 +262,7 @@ beforeEach(() => {
     getScanState: vi.fn(async () => success(update(0))),
     listScanHistory: vi.fn(async () => ({ ok: true, value: recentHistoryPage() })),
     getScanHistoryMetadata: vi.fn(),
+    getStorageTrends: vi.fn(),
     deleteSnapshot: vi.fn(),
     getRetentionSettings: vi.fn(),
     setRetentionSettings: vi.fn(),

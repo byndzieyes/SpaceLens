@@ -6,26 +6,13 @@ import type {
 } from '../../../../shared/comparison'
 import { Card } from '../../components/ui/Card'
 import { DonutRing, type DonutSegment } from '../../components/ui/DonutRing'
+import { formatChangePercentage } from '../../lib/scanDisplay'
 import { ComparisonBytes as Bytes } from './ComparisonBytes'
 import { comparisonCounts as counts, comparisonSign as sign, fileKinds } from './changeDisplay'
 
 const ringKinds = ['added', 'removed', 'modified', 'indeterminate'] as const
 const kinds = [...ringKinds, 'unchanged'] as const
 const signedCount = (value: number): string => sign(value) + counts.format(Math.abs(value))
-
-function percentage(delta: number, baseline: number): string | undefined {
-  if (!Number.isSafeInteger(delta) || !Number.isSafeInteger(baseline) || baseline < 0)
-    return undefined
-  if (delta === 0) return '0%'
-  if (baseline <= 0) return undefined
-
-  // Round to tenths of a percent without converting a potentially unsafe scaled integer.
-  const denominator = BigInt(baseline)
-  const tenths = (2000n * BigInt(Math.abs(delta)) + denominator) / (2n * denominator)
-  if (tenths === 0n) return '<0.1%'
-  const fraction = tenths % 10n
-  return `${sign(delta)}${counts.format(tenths / 10n)}${fraction ? `.${fraction}` : ''}%`
-}
 
 function ObservedMetric({
   title,
@@ -226,7 +213,7 @@ export function ComparisonSummaryView({
           baseline={<Bytes value={sizes.baseline} />}
           target={<Bytes value={sizes.target} />}
           delta={<Bytes value={sizes.delta} signed />}
-          change={percentage(sizes.delta, sizes.baseline)}
+          change={formatChangePercentage(sizes.delta, sizes.baseline)}
         />
         <ObservedMetric
           title="Observed file count"
