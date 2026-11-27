@@ -1,12 +1,17 @@
-import { useRef } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
 import { Search, X } from 'lucide-react'
-import type { ScanHistoryPage, ScanHistorySort } from '../../../shared/history'
+import type { ScanHistoryItem, ScanHistoryPage, ScanHistorySort } from '../../../shared/history'
+import type { SnapshotView } from '../../../shared/snapshotSelection'
+import type { ScannerIpcErrorCode } from '../../../shared/ipc'
 import { Button } from '../components/ui/Button'
 import { Card } from '../components/ui/Card'
 import { Pagination } from '../components/ui/Pagination'
 import { HistoryTable } from '../features/history/HistoryTable'
+import { DeleteSnapshotDialog } from '../features/history/DeleteSnapshotDialog'
+import { HistorySettings, type HistoryFeedback } from '../features/history/HistorySettings'
 import { useScanHistory } from '../features/history/useScanHistory'
 import type { SnapshotSelections } from '../features/snapshots/selection'
+import type { SnapshotOpenFailure } from '../features/snapshots/useSnapshotNavigation'
 
 const counts = new Intl.NumberFormat('en-US')
 const sortOptions = {
@@ -28,9 +33,35 @@ function describePage(page: ScanHistoryPage, filtered: boolean): string {
   return `Showing ${first}–${last} of ${total} ${filtered ? 'matching ' : ''}${noun} · Page ${currentPage} of ${totalPages}`
 }
 
-export function HistoryPage({ snapshots }: { snapshots: SnapshotSelections }): React.JSX.Element {
+function openError(code: ScannerIpcErrorCode): string {
+  switch (code) {
+    case 'SNAPSHOT_EXPIRED':
+      return 'This snapshot is no longer retained.'
+    case 'SNAPSHOT_UNAVAILABLE':
+      return 'This saved snapshot is unavailable.'
+    case 'UNAVAILABLE':
+      return 'Saved scan storage is busy or unavailable. Try opening the snapshot again.'
+    default:
+      return 'The saved snapshot could not be opened.'
+  }
+}
+
+export function HistoryPage({
+  snapshots,
+  onOpenSnapshot,
+  onCancelOpen
+}: {
+  snapshots: SnapshotSelections
+  onOpenSnapshot: (view: SnapshotView, scanId: string, onNotOpened: SnapshotOpenFailure) => void
+  onCancelOpen?: () => void
+}): React.JSX.Element {
   const history = useScanHistory(snapshots)
   const filterInput = useRef<HTMLInputElement>(null)
+  const title = useRef<HTMLHeadingElement>(null)
+  const [deleteTarget, setDeleteTarget] = useState<ScanHistoryItem | null>(null)
+  const [feedback, setFeedback] = useState<HistoryFeedback>()
+  const [opening, setOpening] = useState<SnapshotView>()
+  const attempt = useRef<symbol>(undefined)
   const { state, filter } = history
   const { page } = state
   const hasRows = !!page?.items.length
@@ -39,9 +70,46 @@ export function HistoryPage({ snapshots }: { snapshots: SnapshotSelections }): R
     filterInput.current?.focus()
   }
 
+  useLayoutEffect(
+    () => () => {
+      attempt.current = undefined
+    },
+    []
+  )
+
+  const openSnapshot = (view: SnapshotView, scan: ScanHistoryItem): void => {
+    const request = Symbol()
+    attempt.current = request
+    setOpening(view)
+    setFeedback(undefined)
+    onOpenSnapshot(view, scan.id, (code) => {
+      if (attempt.current !== request) return
+      attempt.current = undefined
+      setOpening(undefined)
+      if (code) setFeedback({ status: 'error', message: openError(code) })
+      if (code === 'SNAPSHOT_EXPIRED') history.retry()
+    })
+  }
+  const cancelOpening = (): void => {
+    if (!attempt.current) return
+    attempt.current = undefined
+    setOpening(undefined)
+    onCancelOpen?.()
+  }
+
   return (
     <div className="min-w-0 space-y-6">
-      <h2 className="text-2xl font-semibold tracking-tight sm:text-3xl">Scan History</h2>
+      <header className="flex flex-wrap items-center justify-between gap-3">
+        <h2 ref={title} tabIndex={-1} className="text-2xl font-semibold tracking-tight sm:text-3xl">
+          Scan History
+        </h2>
+        <HistorySettings
+          historyRevision={history.historyRevision}
+          retainedCount={history.retainedCount}
+          onOpen={cancelOpening}
+          report={setFeedback}
+        />
+      </header>
       <Card aria-labelledby="saved-snapshots-title" className="min-w-0 space-y-4">
         <div className="flex flex-wrap items-center justify-between gap-x-6 gap-y-4">
           <h3 id="saved-snapshots-title" className="text-base font-semibold">
@@ -110,6 +178,19 @@ export function HistoryPage({ snapshots }: { snapshots: SnapshotSelections }): R
             </Button>
           </div>
         )}
+        {opening && (
+          <p role="status" className="text-sm text-text-secondary">
+            Opening saved snapshot in {opening === 'explorer' ? 'Explorer' : 'Insights'}…
+          </p>
+        )}
+        {feedback && (
+          <p
+            role={feedback.status === 'error' ? 'alert' : 'status'}
+            className={feedback.status === 'error' ? 'text-sm text-error' : 'text-sm text-success'}
+          >
+            {feedback.message}
+          </p>
+        )}
 
         <Pagination
           className="border-t border-separator pt-3"
@@ -123,7 +204,18 @@ export function HistoryPage({ snapshots }: { snapshots: SnapshotSelections }): R
           next={history.next}
         />
 
-        {page && hasRows && <HistoryTable page={page} />}
+        {page && hasRows && (
+          <HistoryTable
+            page={page}
+            onOpen={openSnapshot}
+            onDelete={(scan) => {
+              cancelOpening()
+              setFeedback(undefined)
+              setDeleteTarget(scan)
+            }}
+            fallbackFocus={title}
+          />
+        )}
         {state.status === 'ready' && !hasRows && (
           <div className="space-y-2 rounded-lg border border-separator bg-background/40 px-4 py-6">
             <p className="font-medium">{filter ? 'No matching snapshots' : 'No saved scans yet'}</p>
@@ -139,6 +231,19 @@ export function HistoryPage({ snapshots }: { snapshots: SnapshotSelections }): R
           </div>
         )}
       </Card>
+      {deleteTarget && (
+        <DeleteSnapshotDialog
+          scan={deleteTarget}
+          latest={deleteTarget.id === history.latestCompletedScanId}
+          fallbackFocus={title}
+          onDismiss={() => setDeleteTarget(null)}
+          refreshHistory={history.retry}
+          onDeleted={() => {
+            setDeleteTarget(null)
+            setFeedback({ status: 'success', message: 'Saved snapshot deleted.' })
+          }}
+        />
+      )}
     </div>
   )
 }

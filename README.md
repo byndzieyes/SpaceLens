@@ -65,7 +65,11 @@ Automatic retention prunes the oldest eligible snapshot by publication sequence,
 
 History lists retained completed snapshots with literal path filtering, publication and size sorting, and 20-row pages. The table shows Latest by publication ID and flags partial scans with known error counts. It refreshes after publication, deletion, or retention pruning while keeping the selected filter, sort order, and page where possible. Browsing history does not hold snapshot protection.
 
-History actions and retention settings, the Comparison UI, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
+Each History row can open its exact snapshot in Explorer or Insights. History stays visible while the destination prepares and adopts the snapshot. Deleting a saved snapshot requires confirmation and removes only stored scan results. Main reports protected snapshots and publishes the authoritative replacement if Latest changes.
+
+History Settings loads and saves the profile's retention target. Reducing the target requires confirmation because older eligible snapshots may be permanently pruned. Settings can show a temporary overflow using the global retained count. Latest and protected snapshots are excluded from automatic pruning.
+
+The Comparison UI, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
 
 ## Snapshot comparison contracts
 

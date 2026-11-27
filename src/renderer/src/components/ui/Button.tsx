@@ -1,11 +1,12 @@
 import type { ComponentProps } from 'react'
 
 type ButtonProps = ComponentProps<'button'> & {
-  variant?: 'primary' | 'secondary'
+  variant?: 'primary' | 'secondary' | 'danger'
 }
 
 const variants = {
   primary: 'bg-accent text-on-accent hover:bg-accent-hover active:bg-accent-active',
+  danger: 'bg-error text-on-accent hover:bg-error/85 active:bg-error/75',
   secondary:
     'border border-border bg-surface-elevated text-text-primary hover:bg-surface-hover active:bg-surface-active'
 }

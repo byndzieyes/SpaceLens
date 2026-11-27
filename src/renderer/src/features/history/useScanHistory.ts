@@ -38,12 +38,23 @@ export function useScanHistory(snapshots: SnapshotSelections): {
   previous: (() => void) | null
   next: (() => void) | null
   retry: () => void
+  historyRevision: number
+  retainedCount: number | undefined
+  latestCompletedScanId: string | null | undefined
 } {
   const [filter, setDraft] = useState('')
   const [query, setQuery] = useState(initialQuery)
   const [result, setResult] = useState<{ query: HistoryQuery; state: HistoryState }>()
+  const [historyRevision, setHistoryRevision] = useState(0)
+  const [retained, setRetained] = useState<{ revision: number; count: number }>()
+  const [latestCompletedScanId, setLatestCompletedScanId] = useState<string | null>()
   const wantedRevision = useRef(0)
+  const wantedRead = useRef(0)
   const refresh = useRef<() => void>(null)
+  const retry = (): void => {
+    wantedRead.current++
+    refresh.current?.()
+  }
 
   useEffect(
     () =>
@@ -51,6 +62,8 @@ export function useScanHistory(snapshots: SnapshotSelections): {
         const revision = snapshot.historyRevision ?? 0
         if (revision <= wantedRevision.current) return
         wantedRevision.current = revision
+        wantedRead.current++
+        setHistoryRevision(revision)
         refresh.current?.()
       }),
     [snapshots]
@@ -82,8 +95,8 @@ export function useScanHistory(snapshots: SnapshotSelections): {
     }
 
     const load = async (): Promise<void> => {
-      const revision = wantedRevision.current
-      const isCurrent = (): boolean => active && revision === wantedRevision.current
+      const read = wantedRead.current
+      const isCurrent = (): boolean => active && read === wantedRead.current
       const update = (state: HistoryState): void => setResult({ query, state })
       reading = true
       update({ status: 'loading', page })
@@ -100,6 +113,9 @@ export function useScanHistory(snapshots: SnapshotSelections): {
           return
         }
         const nextPage = result.value
+        setLatestCompletedScanId(nextPage.latestCompletedScanId)
+        if (!query.path)
+          setRetained({ revision: wantedRevision.current, count: nextPage.totalCount })
         if (query.offset > 0 && query.offset >= nextPage.totalCount) {
           const lastOffset = Math.max(0, Math.ceil(nextPage.totalCount / pageSize) - 1) * pageSize
           // An offset correction can only move back, even if more snapshots disappear.
@@ -112,7 +128,7 @@ export function useScanHistory(snapshots: SnapshotSelections): {
         if (isCurrent()) update({ status: 'error', page, message: errorMessage() })
       } finally {
         reading = false
-        if (revision !== wantedRevision.current) schedule()
+        if (read !== wantedRead.current) schedule()
       }
     }
 
@@ -146,6 +162,9 @@ export function useScanHistory(snapshots: SnapshotSelections): {
       setQuery((current) => (current.sort === sort ? current : { path: filter, sort, offset: 0 })),
     previous: previous === null ? null : () => goTo(previous),
     next: next === null ? null : () => goTo(next),
-    retry: () => refresh.current?.()
+    retry,
+    historyRevision,
+    retainedCount: retained?.revision === historyRevision ? retained.count : undefined,
+    latestCompletedScanId
   }
 }

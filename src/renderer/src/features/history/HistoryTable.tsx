@@ -1,8 +1,11 @@
 import { ChevronRight, Folder } from 'lucide-react'
-import type { ScanHistoryPage } from '../../../../shared/history'
+import type { RefObject } from 'react'
+import type { ScanHistoryItem, ScanHistoryPage } from '../../../../shared/history'
+import type { SnapshotView } from '../../../../shared/snapshotSelection'
 import { Badge } from '../../components/ui/Badge'
 import { formatPreciseScanDate, formatScanDate, formatScanDuration } from '../../lib/scanDisplay'
 import { formatBytes } from '../../lib/storage'
+import { SnapshotActions } from './SnapshotActions'
 
 const counts = new Intl.NumberFormat('en-US')
 const heading = 'px-2 py-3 font-medium'
@@ -42,11 +45,21 @@ function NumericCell({ value, exact }: { value: string; exact?: string }): React
   )
 }
 
-export function HistoryTable({ page }: { page: ScanHistoryPage }): React.JSX.Element {
+export function HistoryTable({
+  page,
+  onOpen,
+  onDelete,
+  fallbackFocus
+}: {
+  page: ScanHistoryPage
+  onOpen: (view: SnapshotView, scan: ScanHistoryItem) => void
+  onDelete: (scan: ScanHistoryItem) => void
+  fallbackFocus: RefObject<HTMLElement | null>
+}): React.JSX.Element {
   const rows = page.items.map((scan) => ({ scan, completed: formatScanDate(scan.finishedAt) }))
   return (
     <div className="@container -mx-5 -mb-5 min-w-0 sm:-mx-6 sm:-mb-6">
-      <p className="px-5 pb-2 text-xs text-text-secondary @min-[38rem]:hidden sm:px-6">
+      <p className="px-5 pb-2 text-xs text-text-secondary @min-[41rem]:hidden sm:px-6">
         Scroll sideways to see all columns.
       </p>
       <div
@@ -55,30 +68,36 @@ export function HistoryTable({ page }: { page: ScanHistoryPage }): React.JSX.Ele
         tabIndex={0}
         className="overflow-x-auto rounded-b-xl border-t border-separator focus-visible:-outline-offset-2"
       >
-        <table className="w-full min-w-[38rem] table-fixed text-left text-sm">
+        <table className="w-full min-w-[41rem] table-fixed text-left text-sm">
           <caption className="sr-only">Completed scan snapshots</caption>
           <thead className="bg-surface-elevated text-xs text-text-secondary">
             <tr>
-              <th scope="col" className="w-[23%] py-3 pr-2 pl-5 font-medium sm:pl-6">
+              <th scope="col" className="w-[20%] py-3 pr-2 pl-5 font-medium sm:pl-6">
                 Scan root
               </th>
-              <th scope="col" className={`w-[19%] ${heading}`}>
+              <th scope="col" className={`w-[18%] ${heading}`}>
                 Completed
               </th>
-              <th scope="col" className={`w-[15%] ${numericHeading}`}>
+              <th scope="col" className={`w-[13.5%] ${numericHeading}`}>
                 Known logical size
               </th>
-              <th scope="col" className={`w-[8.5%] ${numericHeading}`}>
+              <th scope="col" className={`w-[8%] ${numericHeading}`}>
                 Files
               </th>
-              <th scope="col" className={`w-[8.5%] ${numericHeading}`}>
+              <th scope="col" className={`w-[8%] ${numericHeading}`}>
                 Folders
               </th>
-              <th scope="col" className={`w-[11%] ${numericHeading}`}>
+              <th scope="col" className={`w-[10%] ${numericHeading}`}>
                 Duration
               </th>
-              <th scope="col" className={`w-[15%] ${heading}`}>
+              <th scope="col" className={`w-[14%] ${heading}`}>
                 Coverage
+              </th>
+              <th
+                scope="col"
+                className="sticky right-0 z-10 w-14 border-l border-separator bg-surface-elevated px-1 py-3 text-center font-medium"
+              >
+                Actions
               </th>
             </tr>
           </thead>
@@ -138,6 +157,14 @@ export function HistoryTable({ page }: { page: ScanHistoryPage }): React.JSX.Ele
                     ) : (
                       <span className="text-sm text-text-secondary">Complete</span>
                     )}
+                  </td>
+                  <td className="sticky right-0 z-10 border-l border-separator bg-surface p-2 text-center">
+                    <SnapshotActions
+                      scan={scan}
+                      onOpen={onOpen}
+                      onDelete={onDelete}
+                      fallbackFocus={fallbackFocus}
+                    />
                   </td>
                 </tr>
               )

@@ -1,6 +1,7 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { followLatest } from '../../../../shared/snapshotSelection'
 import type { SnapshotView } from '../../../../shared/snapshotSelection'
+import type { ScannerIpcErrorCode } from '../../../../shared/ipc'
 import {
   isSnapshotView,
   type ExplorerTarget,
@@ -22,11 +23,13 @@ interface PendingHandoff {
   readonly source?: SnapshotView
 }
 
+export type SnapshotOpenFailure = (code?: ScannerIpcErrorCode) => void
+
 export function useSnapshotNavigation(selections: SnapshotSelections): {
   destination: Destination
   viewOptions: ViewSnapshotOptions
   navigate: (page: PageId) => void
-  navigateToSnapshot: (target: SnapshotNavigationTarget) => void
+  navigateToSnapshot: (target: SnapshotNavigationTarget, onNotOpened?: SnapshotOpenFailure) => void
   consumeTarget: (target: ExplorerTarget) => void
 } {
   const [destination, setDestination] = useState<Destination>({ page: 'overview', activation: 0 })
@@ -72,7 +75,10 @@ export function useSnapshotNavigation(selections: SnapshotSelections): {
         : { page, activation: current.activation + 1 }
     )
   }
-  const navigateToSnapshot = (target: SnapshotNavigationTarget): void => {
+  const navigateToSnapshot = (
+    target: SnapshotNavigationTarget,
+    onNotOpened?: SnapshotOpenFailure
+  ): void => {
     const previous = committedPage.current
     const retained = pending.current?.source
     const source =
@@ -84,22 +90,39 @@ export function useSnapshotNavigation(selections: SnapshotSelections): {
     abandon(target.view, source)
     const transition = { target, source }
     pending.current = transition
-    // Open the shell immediately. The destination waits for adoption before starting its reads.
     const handoff = selections.select(target.view, target.selection).then((result) => {
-      if (pending.current === transition) {
-        pending.current = undefined
-        if (transition.source && transition.source !== committedPage.current)
-          selections.release(transition.source)
+      if (pending.current !== transition) {
+        onNotOpened?.()
+        return result
+      }
+      pending.current = undefined
+      if (transition.source && transition.source !== committedPage.current)
+        selections.release(transition.source)
+      if (onNotOpened) {
+        const valid =
+          result?.status === 'resolved' &&
+          (target.view !== 'explorer' ||
+            target.selection.mode !== 'explicit' ||
+            result.explorerSnapshot?.entries.scanId === target.selection.scanId)
+        if (valid) open()
+        else {
+          selections.release(target.view)
+          onNotOpened(result && 'error' in result ? result.error.code : 'SNAPSHOT_UNAVAILABLE')
+        }
       }
       return result
     })
-    setDestination((current) => ({
-      page: target.view,
-      activation: current.activation + 1,
-      snapshot: target,
-      handoff,
-      target: target.view === 'explorer' ? target.entry : undefined
-    }))
+    const open = (): void => {
+      setDestination((current) => ({
+        page: target.view,
+        activation: current.activation + 1,
+        snapshot: target,
+        handoff,
+        target: target.view === 'explorer' ? target.entry : undefined
+      }))
+    }
+    // History stays visible until adoption succeeds. Existing eager handoffs keep their behavior.
+    if (!onNotOpened) open()
   }
   const consumeTarget = (opened: ExplorerTarget): void => {
     setDestination((current) =>

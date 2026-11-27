@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { afterEach, beforeEach, expect, test, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, expect, test, vi } from 'vitest'
 import type { ScanHistoryItem, ScanHistoryPage } from '../src/shared/history'
 import { resolveScanHistoryQuery } from '../src/shared/history'
 import type { ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
@@ -34,10 +34,35 @@ const unlisten = vi.fn()
 const listeners = new Set<Parameters<SpaceLensAPI['onScanStateChanged']>[0]>()
 const prepare = vi.fn<SpaceLensAPI['prepareSnapshotSelection']>()
 const getScanSnapshot = vi.fn<SpaceLensAPI['getScanSnapshot']>()
+const removeSnapshot = vi.fn<SpaceLensAPI['deleteSnapshot']>()
+const getRetention = vi.fn<SpaceLensAPI['getRetentionSettings']>()
+const setRetention = vi.fn<SpaceLensAPI['setRetentionSettings']>()
 let rows: ScanHistoryItem[]
 let revision: number
 let historyRevision: number
 let snapshots: SnapshotSelections
+
+// jsdom renders the dialog element. Native top-layer focus and Escape are verified in Electron.
+beforeAll(() => {
+  Object.defineProperties(HTMLDialogElement.prototype, {
+    showModal: {
+      configurable: true,
+      value(this: HTMLDialogElement): void {
+        this.setAttribute('open', '')
+      }
+    },
+    close: {
+      configurable: true,
+      value(this: HTMLDialogElement): void {
+        this.removeAttribute('open')
+      }
+    }
+  })
+})
+afterAll(() => {
+  Reflect.deleteProperty(HTMLDialogElement.prototype, 'showModal')
+  Reflect.deleteProperty(HTMLDialogElement.prototype, 'close')
+})
 
 function seed(count: number, prefix = '/archive/'): ScanHistoryItem[] {
   return Array.from({ length: count }, (_, index) => saved(count - index, prefix + (count - index)))
@@ -58,6 +83,22 @@ function pageFrom(items: readonly ScanHistoryItem[]): ScanHistoryPage {
 beforeEach(() => {
   rows = []
   revision = historyRevision = 0
+  let limit = 10
+  getRetention.mockImplementation(async () => ({
+    ok: true,
+    value: { maxCompletedSnapshots: limit }
+  }))
+  setRetention.mockImplementation(async (value) => {
+    limit = value.maxCompletedSnapshots
+    return { ok: true, value }
+  })
+  removeSnapshot.mockImplementation(async ({ scanId }) => {
+    if (!rows.some((row) => row.id === scanId))
+      return { ok: false, error: { code: 'SNAPSHOT_EXPIRED', message: 'Missing fixture.' } }
+    rows = rows.filter((row) => row.id !== scanId)
+    queueMicrotask(() => notify())
+    return { ok: true, value: { scanId, latestCompletedScanId: rows[0]?.id ?? null } }
+  })
   listen.mockImplementation((callback) => {
     listeners.add(callback)
     return () => {
@@ -95,6 +136,9 @@ beforeEach(() => {
     ...mockSnapshotSelection(getScanSnapshot),
     prepareSnapshotSelection: prepare,
     getScanSnapshot,
+    deleteSnapshot: removeSnapshot,
+    getRetentionSettings: getRetention,
+    setRetentionSettings: setRetention,
     listScanHistory: list,
     onScanStateChanged: listen,
     getScanState: async () => ({ ok: true, value: { revision: 0, state: null } })
@@ -126,7 +170,7 @@ function notify({
 }
 
 function mount(): ReturnType<typeof render> {
-  return render(<HistoryPage snapshots={snapshots} />)
+  return render(<HistoryPage snapshots={snapshots} onOpenSnapshot={vi.fn()} />)
 }
 
 function filter(text: string): void {
@@ -145,6 +189,30 @@ function next(): HTMLElement {
 
 function previous(): HTMLElement {
   return screen.getByRole('button', { name: 'Previous history page' })
+}
+
+function actionsFor(path: string): HTMLElement {
+  const row = screen.getByRole('row', { name: new RegExp(path) })
+  return within(row).getByRole('button', { name: /Actions for/ })
+}
+
+function deleteFrom(path: string): HTMLElement {
+  fireEvent.click(actionsFor(path))
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Delete snapshot' }))
+  return screen.getByRole('dialog', { name: 'Delete snapshot?' })
+}
+
+async function openSettings(): Promise<HTMLElement> {
+  fireEvent.click(screen.getByRole('button', { name: 'History Settings' }))
+  const dialog = screen.getByRole('dialog', { name: 'History Settings' })
+  await within(dialog).findByRole('textbox', { name: 'Maximum retained snapshots' })
+  return dialog
+}
+
+function editLimit(draft: string): void {
+  fireEvent.change(screen.getByRole('textbox', { name: 'Maximum retained snapshots' }), {
+    target: { value: draft }
+  })
 }
 
 test('keeps Overview as startup and opens History from the fourth sidebar item', async () => {
@@ -464,4 +532,278 @@ test('unsubscribes on unmount and ignores a response from an earlier visit', asy
   expect(screen.queryByText('/old-visit')).not.toBeInTheDocument()
   expect(listeners.size).toBe(1)
   expect(prepare).not.toHaveBeenCalled()
+})
+
+test('keeps the row menu outside the scroll region and supports keyboard dismissal and focus return', async () => {
+  rows = [saved(1, '/archive')]
+  mount()
+  await screen.findByText('/archive')
+  const trigger = actionsFor('/archive')
+  trigger.focus()
+  fireEvent.keyDown(trigger, { key: 'ArrowDown' })
+  const menu = screen.getByRole('menu', { name: 'Snapshot actions' })
+  const [explorer, insights, deletion] = within(menu).getAllByRole('menuitem')
+  expect(screen.getByRole('region', { name: 'Saved snapshots table' })).not.toContainElement(menu)
+  expect(explorer).toHaveTextContent('Open in Explorer')
+  expect(explorer).toHaveFocus()
+  fireEvent.keyDown(explorer, { key: 'ArrowDown' })
+  expect(insights).toHaveFocus()
+  fireEvent.keyDown(insights, { key: 'End' })
+  expect(deletion).toHaveFocus()
+  fireEvent.keyDown(deletion, { key: 'Escape' })
+  expect(screen.queryByRole('menu')).not.toBeInTheDocument()
+  expect(trigger).toHaveFocus()
+})
+
+test('keeps the open menu tied to its snapshot when a revision moves the row', async () => {
+  rows = [saved(2, '/target'), saved(1, '/earlier')]
+  mount()
+  await screen.findByText('/target')
+  fireEvent.click(actionsFor('/target'))
+  const explorer = screen.getByRole('menuitem', { name: 'Open in Explorer' })
+  rows = [saved(3, '/newLatest'), ...rows]
+  notify()
+  await screen.findByText('/newLatest')
+  expect(explorer).toHaveFocus()
+  fireEvent.click(screen.getByRole('menuitem', { name: 'Delete snapshot' }))
+  const dialog = screen.getByRole('dialog', { name: 'Delete snapshot?' })
+  expect(within(dialog).getByText('/target')).toBeVisible()
+  expect(within(dialog).queryByText('Latest')).not.toBeInTheDocument()
+})
+
+test('cancels deletion by button and Escape and identifies the exact Latest target', async () => {
+  rows = [saved(3, '/latest'), saved(1, '/archive')]
+  mount()
+  await screen.findByText('/latest')
+  const dialog = deleteFrom('/latest')
+  const confirmation = within(dialog)
+  expect(confirmation.getByText('/latest')).toBeVisible()
+  expect(confirmation.getByText('3 KB')).toBeVisible()
+  expect(confirmation.getByText('Latest')).toBeVisible()
+  expect(confirmation.getByText(/previous retained publication will become Latest/)).toBeVisible()
+  expect(confirmation.getByText(/actual files and folders will not be deleted/)).toBeVisible()
+  expect(confirmation.getByRole('button', { name: 'Cancel' })).toHaveFocus()
+  fireEvent.click(confirmation.getByRole('button', { name: 'Cancel' }))
+  expect(actionsFor('/latest')).toHaveFocus()
+  fireEvent(deleteFrom('/archive'), new Event('cancel', { cancelable: true }))
+  expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  expect(actionsFor('/archive')).toHaveFocus()
+  expect(removeSnapshot).not.toHaveBeenCalled()
+})
+
+test('a revision during confirmation preserves the target, and a successful deletion refreshes once', async () => {
+  rows = [saved(2, '/target'), saved(1, '/previous')]
+  mount()
+  await screen.findByText('/target')
+  const dialog = deleteFrom('/target')
+  rows = [saved(3, '/newLatest'), ...rows]
+  notify()
+  await screen.findByText('/newLatest')
+  expect(within(dialog).queryByText('Latest')).not.toBeInTheDocument()
+  list.mockClear()
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete snapshot' }))
+  await screen.findByText('Saved snapshot deleted.')
+  await waitFor(() => expect(screen.queryByText('/target')).not.toBeInTheDocument())
+  expect(removeSnapshot).toHaveBeenCalledExactlyOnceWith({ scanId: '2' })
+  expect(list).toHaveBeenCalledTimes(1)
+  expect(within(screen.getByRole('row', { name: /newLatest/ })).getByText('Latest')).toBeVisible()
+  expect(screen.getByRole('heading', { name: 'Scan History' })).toHaveFocus()
+})
+
+test('uses authoritative Latest fallback after deletion and shows the empty state for the final snapshot', async () => {
+  rows = [saved(2, '/latest'), saved(1, '/fallback')]
+  mount()
+  await screen.findByText('/latest')
+  fireEvent.click(within(deleteFrom('/latest')).getByRole('button', { name: 'Delete snapshot' }))
+  await waitFor(() =>
+    expect(within(screen.getByRole('row', { name: /fallback/ })).getByText('Latest')).toBeVisible()
+  )
+  fireEvent.click(within(deleteFrom('/fallback')).getByRole('button', { name: 'Delete snapshot' }))
+  await screen.findByText('No saved scans yet')
+  expect(screen.queryByText('Latest')).not.toBeInTheDocument()
+  expect(removeSnapshot.mock.calls).toEqual([[{ scanId: '2' }], [{ scanId: '1' }]])
+})
+
+test.each([
+  ['SNAPSHOT_IN_USE', /currently in use/],
+  ['SNAPSHOT_EXPIRED', /already been removed/],
+  ['SNAPSHOT_UNAVAILABLE', /unavailable for deletion/],
+  ['UNAVAILABLE', /storage is busy or unavailable/],
+  ['SNAPSHOT_DELETE_UNCERTAIN', /Deletion could not be confirmed/]
+] as const)('handles deletion failure %s without automatically retrying', async (code, text) => {
+  rows = [saved(1, '/target')]
+  if (code === 'SNAPSHOT_EXPIRED') {
+    removeSnapshot.mockImplementationOnce(async () => {
+      rows = []
+      return { ok: false, error: { code, message: 'private SQLite details' } }
+    })
+  } else {
+    removeSnapshot.mockResolvedValueOnce({
+      ok: false,
+      error: { code, message: 'private SQLite details' }
+    })
+  }
+  mount()
+  await screen.findByText('/target')
+  const dialog = deleteFrom('/target')
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Delete snapshot' }))
+  expect(await within(dialog).findByRole('alert')).toHaveTextContent(text)
+  expect(dialog).not.toHaveTextContent('private SQLite details')
+  if (code === 'SNAPSHOT_EXPIRED') await screen.findByText('No saved scans yet')
+  if (code === 'SNAPSHOT_EXPIRED' || code === 'SNAPSHOT_DELETE_UNCERTAIN')
+    expect(within(dialog).getByRole('button', { name: 'Delete snapshot' })).toBeDisabled()
+  expect(removeSnapshot).toHaveBeenCalledOnce()
+})
+
+test('prevents duplicate deletion while pending and ignores settlement after unmount', async () => {
+  rows = [saved(1, '/target')]
+  const pending = Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['deleteSnapshot']>>>()
+  removeSnapshot.mockReturnValueOnce(pending.promise)
+  const view = mount()
+  await screen.findByText('/target')
+  const dialog = deleteFrom('/target')
+  const button = within(dialog).getByRole('button', { name: 'Delete snapshot' })
+  fireEvent.click(button)
+  fireEvent.click(button)
+  fireEvent(dialog, new Event('cancel', { cancelable: true }))
+  expect(within(dialog).getByRole('button', { name: 'Deleting snapshot…' })).toBeDisabled()
+  expect(removeSnapshot).toHaveBeenCalledOnce()
+  view.unmount()
+  rows = []
+  await act(async () =>
+    pending.resolve({ ok: true, value: { scanId: '1', latestCompletedScanId: null } })
+  )
+  mount()
+  await screen.findByText('No saved scans yet')
+  expect(screen.queryByText('Saved snapshot deleted.')).not.toBeInTheDocument()
+})
+
+test('recovers a last page after deleting its only row while retaining filter and sort', async () => {
+  rows = seed(21, '/filtered/')
+  mount()
+  await screen.findByText(/Showing 1–20 of 21 scans/)
+  sort('oldest')
+  filter('filtered')
+  await screen.findByText(/Showing 1–20 of 21 matching scans/)
+  fireEvent.click(next())
+  await screen.findByText(/Showing 21–21 of 21 matching scans/)
+  fireEvent.click(
+    within(deleteFrom('/filtered/21')).getByRole('button', { name: 'Delete snapshot' })
+  )
+  await screen.findByText(/Showing 1–20 of 20 matching scans/)
+  expect(screen.getByRole('combobox')).toHaveValue('oldest')
+  expect(screen.getByRole('searchbox')).toHaveValue('filtered')
+  expect(previous()).toHaveAttribute('aria-disabled', 'true')
+})
+
+test('loads the authoritative setting and validates the safe-integer boundary before saving an increase', async () => {
+  mount()
+  const dialog = await openSettings()
+  const save = within(dialog).getByRole('button', { name: 'Save changes' })
+  expect(within(dialog).getByRole('textbox')).toHaveValue('10')
+  expect(save).toBeDisabled()
+  for (const input of ['', '0', '-1', '2.5', 'wrong', '1e3', '9007199254740992']) {
+    editLimit(input)
+    expect(within(dialog).getByRole('textbox')).toHaveAttribute('aria-invalid', 'true')
+    expect(save).toBeDisabled()
+  }
+  expect(setRetention).not.toHaveBeenCalled()
+  editLimit('9007199254740991')
+  expect(save).toBeEnabled()
+  fireEvent.click(save)
+  await within(dialog).findByText('History retention limit saved.')
+  expect(setRetention).toHaveBeenCalledExactlyOnceWith({
+    maxCompletedSnapshots: Number.MAX_SAFE_INTEGER
+  })
+  fireEvent.click(within(dialog).getByRole('button', { name: 'Close' }))
+  expect(screen.getByRole('button', { name: 'History Settings' })).toHaveFocus()
+  const reopened = await openSettings()
+  expect(within(reopened).getByRole('textbox')).toHaveValue('9007199254740991')
+})
+
+test('handles loading failure and explicitly repairs invalid persisted settings', async () => {
+  getRetention.mockRejectedValueOnce(new Error('private settings path')).mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'INTERNAL_ERROR', message: 'invalid private config' }
+  })
+  mount()
+  fireEvent.click(screen.getByRole('button', { name: 'History Settings' }))
+  expect(await within(screen.getByRole('dialog')).findByRole('alert')).toHaveTextContent(
+    'Retention settings are unavailable.'
+  )
+  fireEvent.click(within(screen.getByRole('dialog')).getByRole('button', { name: 'Retry' }))
+  expect(
+    await within(screen.getByRole('dialog')).findByText(/Save a valid limit to resume pruning/)
+  ).toBeVisible()
+  expect(screen.getByRole('textbox')).toHaveValue('')
+  expect(setRetention).not.toHaveBeenCalled()
+  editLimit('14')
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(screen.getByRole('dialog', { name: 'Apply retention limit?' })).toBeVisible()
+  expect(setRetention).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Apply limit' }))
+  await screen.findByText('Saved limit 14')
+  expect(setRetention).toHaveBeenCalledExactlyOnceWith({ maxCompletedSnapshots: 14 })
+})
+
+test('confirms a reduction and uses the global retained count through deferred pruning', async () => {
+  rows = seed(23)
+  mount()
+  await screen.findByText(/Showing 1–20 of 23 scans/)
+  filter('/archive/23')
+  await screen.findByText(/Showing 1–1 of 1 matching scan/)
+  const settings = await openSettings()
+  expect(within(settings).getByText('Retained snapshots 23')).toBeVisible()
+  editLimit('1')
+  fireEvent.click(within(settings).getByRole('button', { name: 'Save changes' }))
+  const confirmation = screen.getByRole('dialog', { name: 'Reduce retention limit?' })
+  expect(
+    within(confirmation).getByText(/Latest and protected snapshots are excluded/)
+  ).toBeVisible()
+  fireEvent.click(within(confirmation).getByRole('button', { name: 'Back' }))
+  expect(setRetention).not.toHaveBeenCalled()
+  expect(screen.getByRole('textbox')).toHaveValue('1')
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Reduce limit' }))
+  await screen.findByText('Saved limit 1')
+  expect(screen.getByText(/Some snapshots may be retained temporarily/)).toBeVisible()
+  expect(removeSnapshot).not.toHaveBeenCalled()
+  rows = [rows[0], rows.at(-1)!]
+  notify()
+  await screen.findByText('Retained snapshots 2')
+  expect(list).toHaveBeenCalledWith({ limit: 1 })
+  rows = [rows[0]]
+  notify()
+  await screen.findByText('Retained snapshots 1')
+  expect(screen.queryByText(/Some snapshots may be retained temporarily/)).not.toBeInTheDocument()
+  expect(screen.getByRole('searchbox')).toHaveValue('/archive/23')
+})
+
+test('preserves a draft after save failure and prevents duplicate saves if settings closes while pending', async () => {
+  setRetention.mockResolvedValueOnce({
+    ok: false,
+    error: { code: 'UNAVAILABLE', message: 'private path' }
+  })
+  mount()
+  await openSettings()
+  editLimit('19')
+  fireEvent.click(screen.getByRole('button', { name: 'Save changes' }))
+  expect(await within(screen.getByRole('dialog')).findByRole('alert')).toHaveTextContent(
+    /could not be saved/
+  )
+  expect(screen.getByRole('textbox')).toHaveValue('19')
+  const pending = Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['setRetentionSettings']>>>()
+  setRetention.mockReturnValueOnce(pending.promise)
+  const save = screen.getByRole('button', { name: 'Save changes' })
+  fireEvent.click(save)
+  fireEvent.click(save)
+  expect(screen.getByRole('button', { name: 'Saving…' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+  const reopened = await openSettings()
+  expect(within(reopened).getByRole('textbox')).toHaveValue('19')
+  expect(getRetention).toHaveBeenCalledOnce()
+  expect(setRetention).toHaveBeenCalledTimes(2)
+  await act(async () => pending.resolve({ ok: true, value: { maxCompletedSnapshots: 20 } }))
+  expect(within(reopened).getByRole('textbox')).toHaveValue('20')
+  expect(within(reopened).getByText('Saved limit 20')).toBeVisible()
 })

@@ -46,7 +46,15 @@ function App(): React.JSX.Element {
         }
       />
     ),
-    history: <HistoryPage snapshots={selections} />
+    history: (
+      <HistoryPage
+        snapshots={selections}
+        onCancelOpen={() => navigate('history')}
+        onOpenSnapshot={(view, scanId, onNotOpened) =>
+          navigateToSnapshot({ view, selection: { mode: 'explicit', scanId } }, onNotOpened)
+        }
+      />
+    )
   }
 
   return (

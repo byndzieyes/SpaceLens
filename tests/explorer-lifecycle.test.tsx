@@ -327,7 +327,7 @@ afterEach(() => {
 const panel = (name: string): ReturnType<typeof within> =>
   within(screen.getByRole('region', { name }))
 const button = (name: string): HTMLElement => screen.getByRole('button', { name })
-function open(page: 'Overview' | 'Explorer' | 'Insights'): void {
+function open(page: 'Overview' | 'Explorer' | 'Insights' | 'History'): void {
   fireEvent.click(
     within(screen.getByRole('navigation', { name: 'Main navigation' })).getByRole('button', {
       name: page
@@ -664,6 +664,140 @@ async function recentAction(view: 'Explorer' | 'Insights', path: string): Promis
     name: new RegExp(`^Open in ${view} for`)
   })
 }
+
+async function historyAction(view: 'Explorer' | 'Insights', path: string): Promise<void> {
+  const menu = await screen.findByRole('button', { name: new RegExp(`^Actions for ${path}`) })
+  fireEvent.click(menu)
+  fireEvent.click(screen.getByRole('menuitem', { name: `Open in ${view}` }))
+}
+
+test.each(['Explorer', 'Insights'] as const)(
+  'adopts the exact older History row before showing %s',
+  async (view) => {
+    const alpha = publishedFixture('scan-a', 'Alpha')
+    const beta = publishedFixture('scan-b', 'Beta')
+    const { api, restore } = historicalApp(alpha, beta)
+    restore(alpha)
+    restore(beta)
+    const pending =
+      Promise.withResolvers<Awaited<ReturnType<SpaceLensAPI['adoptSnapshotSelection']>>>()
+    api.adoptSnapshotSelection.mockReturnValueOnce(pending.promise)
+    render(<App />)
+    open('History')
+    await historyAction(view, '/scans/Alpha')
+    await waitFor(() => expect(api.adoptSnapshotSelection).toHaveBeenCalledOnce())
+    expect(screen.getByRole('heading', { name: 'Scan History' })).toBeVisible()
+    expect(api.prepareSnapshotSelection).toHaveBeenCalledExactlyOnceWith({
+      view: view.toLowerCase(),
+      selection: { mode: 'explicit', scanId: 'scan-a' }
+    })
+    expect(api.listScanDirectory).not.toHaveBeenCalled()
+    expect(api.getInsightsSummary).not.toHaveBeenCalled()
+    await act(async () =>
+      pending.resolve({ ok: true, value: view === 'Explorer' ? alpha.snapshot : null })
+    )
+    if (view === 'Explorer') await chart('Alpha')
+    else expect(await panel('Selected snapshot').findByText('/scans/Alpha')).toBeVisible()
+    expect(screen.getByText('Historical snapshot')).toBeVisible()
+    expect(button('Follow Latest')).toBeVisible()
+    open('History')
+    await screen.findByRole('heading', { name: 'Scan History' })
+    expect(api.releaseSnapshotSelection).toHaveBeenCalledExactlyOnceWith({
+      view: view.toLowerCase()
+    })
+  }
+)
+
+test('keeps an explicit History selection of Latest across publication', async () => {
+  const beta = publishedFixture('scan-b', 'Beta')
+  const gamma = publishedFixture('scan-c', 'Gamma')
+  const { api, restore, publish } = historicalApp(beta, gamma)
+  restore(beta)
+  render(<App />)
+  open('History')
+  await historyAction('Insights', '/scans/Beta')
+  const selected = await screen.findByRole('region', { name: 'Selected snapshot' })
+  expect(await within(selected).findByText('/scans/Beta')).toBeVisible()
+  expect(api.prepareSnapshotSelection).toHaveBeenCalledExactlyOnceWith({
+    view: 'insights',
+    selection: { mode: 'explicit', scanId: 'scan-b' }
+  })
+  act(() => publish(gamma))
+  expect(await screen.findByText('Historical snapshot')).toBeVisible()
+  expect(api.getInsightsSummary).toHaveBeenCalledExactlyOnceWith({ scanId: 'scan-b' })
+  fireEvent.click(button('Follow Latest'))
+  expect(await panel('Published scan').findByText('/scans/Gamma')).toBeVisible()
+})
+
+test.each([
+  ['SNAPSHOT_EXPIRED', /no longer retained/],
+  ['SNAPSHOT_UNAVAILABLE', /saved snapshot is unavailable/],
+  ['UNAVAILABLE', /storage is busy or unavailable/]
+] as const)(
+  'keeps History on selection failure %s and releases the attempted view',
+  async (code, message) => {
+    const alpha = publishedFixture('scan-a', 'Alpha')
+    const { api, restore } = historicalApp(alpha)
+    restore(alpha)
+    api.prepareSnapshotSelection.mockResolvedValueOnce({
+      ok: false,
+      error: { code, message: 'Private database path' }
+    })
+    render(<App />)
+    open('History')
+    // Capture the count once History has rendered its first authoritative page.
+    await screen.findByRole('table', { name: 'Completed scan snapshots' })
+    api.listScanHistory.mockClear()
+    await historyAction('Explorer', '/scans/Alpha')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent(message)
+    expect(alert).not.toHaveTextContent('Private database path')
+    expect(screen.getByRole('heading', { name: 'Scan History' })).toBeVisible()
+    expect(api.adoptSnapshotSelection).not.toHaveBeenCalled()
+    expect(api.releaseSnapshotSelection).toHaveBeenCalledExactlyOnceWith({ view: 'explorer' })
+    if (code === 'SNAPSHOT_EXPIRED')
+      await waitFor(() => expect(api.listScanHistory).toHaveBeenCalledOnce())
+    else expect(api.listScanHistory).not.toHaveBeenCalled()
+  }
+)
+
+test.each(['replacement', 'exit'] as const)(
+  'abandons a History handoff on %s without adopting its obsolete ticket',
+  async (mode) => {
+    const alpha = publishedFixture('scan-a', 'Alpha')
+    const beta = publishedFixture('scan-b', 'Beta')
+    const { api, restore } = historicalApp(alpha, beta)
+    restore(alpha)
+    restore(beta)
+    const first = Promise.withResolvers<void>()
+    const prepare = api.prepareSnapshotSelection.getMockImplementation()!
+    api.prepareSnapshotSelection.mockImplementationOnce(async (request) => {
+      const result = await prepare(request)
+      await first.promise
+      return result
+    })
+    render(<App />)
+    open('History')
+    await historyAction('Insights', '/scans/Alpha')
+    await waitFor(() => expect(api.prepareSnapshotSelection).toHaveBeenCalledOnce())
+    if (mode === 'replacement') {
+      await historyAction('Explorer', '/scans/Beta')
+      await screen.findByRole('region', { name: 'Treemap' })
+      await chart('Beta')
+    } else open('Overview')
+    await act(async () => first.resolve())
+    expect(api.releaseSnapshotSelection).toHaveBeenCalledWith({ view: 'insights' })
+    expect(api.adoptSnapshotSelection.mock.calls).toEqual(
+      mode === 'replacement' ? [[{ view: 'explorer', ticket: 'scan-b' }]] : []
+    )
+    expect(api.getInsightsSummary).not.toHaveBeenCalled()
+    expect(
+      screen.getByRole('heading', {
+        name: mode === 'replacement' ? 'Storage Explorer' : 'Storage Overview'
+      })
+    ).toBeVisible()
+  }
+)
 
 test('opens an older Recent Scans row at its Explorer root and releases it on exit', async () => {
   const alpha = publishedFixture('scan-a', 'Alpha')
