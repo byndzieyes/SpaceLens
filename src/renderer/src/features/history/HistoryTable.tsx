@@ -48,11 +48,13 @@ function NumericCell({ value, exact }: { value: string; exact?: string }): React
 export function HistoryTable({
   page,
   onOpen,
+  onCompare,
   onDelete,
   fallbackFocus
 }: {
   page: ScanHistoryPage
   onOpen: (view: SnapshotView, scan: ScanHistoryItem) => void
+  onCompare: (scan: ScanHistoryItem) => void
   onDelete: (scan: ScanHistoryItem) => void
   fallbackFocus: RefObject<HTMLElement | null>
 }): React.JSX.Element {
@@ -162,6 +164,7 @@ export function HistoryTable({
                     <SnapshotActions
                       scan={scan}
                       onOpen={onOpen}
+                      onCompare={onCompare}
                       onDelete={onDelete}
                       fallbackFocus={fallbackFocus}
                     />

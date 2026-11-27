@@ -1,10 +1,11 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import {
   DEFAULT_SCAN_HISTORY_PAGE_SIZE,
   type ScanHistoryErrorCode,
   type ScanHistoryPage,
   type ScanHistorySort
 } from '../../../../shared/history'
+import type { ScanStateSnapshot } from '../../../../shared/ipc'
 import type { SnapshotSelections } from '../snapshots/selection'
 
 type HistoryState =
@@ -29,7 +30,10 @@ function errorMessage(code?: ScanHistoryErrorCode): string {
   return 'Scan history could not be loaded.'
 }
 
-export function useScanHistory(snapshots: SnapshotSelections): {
+export function useScanHistory(
+  snapshots: SnapshotSelections,
+  showScans: boolean
+): {
   state: HistoryState
   filter: string
   sort: ScanHistorySort
@@ -41,6 +45,7 @@ export function useScanHistory(snapshots: SnapshotSelections): {
   historyRevision: number
   retainedCount: number | undefined
   latestCompletedScanId: string | null | undefined
+  scanActive: boolean | undefined
 } {
   const [filter, setDraft] = useState('')
   const [query, setQuery] = useState(initialQuery)
@@ -48,6 +53,8 @@ export function useScanHistory(snapshots: SnapshotSelections): {
   const [historyRevision, setHistoryRevision] = useState(0)
   const [retained, setRetained] = useState<{ revision: number; count: number }>()
   const [latestCompletedScanId, setLatestCompletedScanId] = useState<string | null>()
+  const [scanActive, setScanActive] = useState<boolean>()
+  const scannerRevision = useRef(-1)
   const wantedRevision = useRef(0)
   const wantedRead = useRef(0)
   const refresh = useRef<() => void>(null)
@@ -56,18 +63,43 @@ export function useScanHistory(snapshots: SnapshotSelections): {
     refresh.current?.()
   }
 
-  useEffect(
-    () =>
-      snapshots.subscribeScanState((snapshot) => {
-        const revision = snapshot.historyRevision ?? 0
-        if (revision <= wantedRevision.current) return
-        wantedRevision.current = revision
-        wantedRead.current++
-        setHistoryRevision(revision)
-        refresh.current?.()
-      }),
-    [snapshots]
-  )
+  const observe = useCallback((snapshot: ScanStateSnapshot): void => {
+    if (snapshot.revision > scannerRevision.current) {
+      scannerRevision.current = snapshot.revision
+      setScanActive(snapshot.state?.session.status === 'running')
+    }
+    const revision = snapshot.historyRevision ?? 0
+    if (revision <= wantedRevision.current) return
+    wantedRevision.current = revision
+    wantedRead.current++
+    setHistoryRevision(revision)
+    refresh.current?.()
+  }, [])
+
+  useEffect(() => snapshots.subscribeScanState(observe), [observe, snapshots])
+
+  useEffect(() => {
+    if (showScans) return
+    let active = true
+    const load = async (): Promise<void> => {
+      try {
+        const result = await window.spaceLens.getScanState()
+        if (!active) return
+        if (result.ok) {
+          snapshots.observeScanState(result.value)
+          observe(result.value)
+          return
+        }
+      } catch {
+        // Comparison IPC still enforces scanner admission if the state read fails.
+      }
+      if (active) setScanActive((current) => current ?? false)
+    }
+    void load()
+    return () => {
+      active = false
+    }
+  }, [observe, showScans, snapshots])
 
   useEffect(() => {
     if (filter === query.path) return
@@ -80,6 +112,7 @@ export function useScanHistory(snapshots: SnapshotSelections): {
   }, [filter, query.path])
 
   useEffect(() => {
+    if (!showScans) return
     let active = true
     let scheduled = false
     let reading = false
@@ -138,7 +171,7 @@ export function useScanHistory(snapshots: SnapshotSelections): {
       active = false
       refresh.current = null
     }
-  }, [query])
+  }, [query, showScans])
 
   const state = result?.query === query && filter === query.path ? result.state : loading
   const { page } = state
@@ -165,6 +198,7 @@ export function useScanHistory(snapshots: SnapshotSelections): {
     retry,
     historyRevision,
     retainedCount: retained?.revision === historyRevision ? retained.count : undefined,
-    latestCompletedScanId
+    latestCompletedScanId,
+    scanActive
   }
 }

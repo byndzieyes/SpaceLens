@@ -69,11 +69,13 @@ Each History row can open its exact snapshot in Explorer or Insights. History st
 
 History Settings loads and saves the profile's retention target. Reducing the target requires confirmation because older eligible snapshots may be permanently pruned. Settings can show a temporary overflow using the global retained count. Latest and protected snapshots are excluded from automatic pruning.
 
-The Comparison UI, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
+History's Comparison tab lets you choose, swap, and check two saved snapshots, including snapshots outside the first page. It suggests a recent draft using publication order. Selecting Compare snapshots validates and protects the pair until you clear it or leave the tab. Draft edits keep the active pair in place until a replacement is adopted. While a scan is active, storage-backed comparison checks wait for an explicit retry.
+
+Comparison Summary and Detailed Changes, storage trends, duplicate detection, file cleanup, and background monitoring are planned for later tasks.
 
 ## Snapshot comparison contracts
 
-A comparison is an ordered pair of distinct retained completed scan IDs. Baseline and Target stay fixed across publications. Reversing the pair swaps additions and removals and reverses signed deltas. A future default can use publication sequence for the older Baseline and newer Target.
+A comparison is an ordered pair of distinct retained completed scan IDs. Baseline and Target stay fixed across publications. Reversing the pair swaps additions and removals and reverses signed deltas.
 
 Schema v2 retains the Phase 4 root and entry metadata and adds publication order. The official scanners behind both schemas resolve absolute native paths, use read-only traversal with `lstat`, record symlinks without traversing them, and count logical bytes per regular-file entry. These shared invariants establish the traversal policy for current and migrated snapshots. Neither schema stores per-scan options, source platform, volume or inode identity, per-path coverage, or content hashes. The compatibility helper infers path style from recognizable native path syntax and reports insufficient metadata when style or policy cannot be established.
 

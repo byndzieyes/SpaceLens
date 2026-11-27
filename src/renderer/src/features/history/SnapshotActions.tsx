@@ -1,6 +1,6 @@
 import { useCallback, useId, useLayoutEffect, useRef, useState, type RefObject } from 'react'
 import { createPortal } from 'react-dom'
-import { ChartColumn, Ellipsis, FolderTree, Trash2 } from 'lucide-react'
+import { ChartColumn, Ellipsis, FolderTree, GitCompareArrows, Trash2 } from 'lucide-react'
 import type { ScanHistoryItem } from '../../../../shared/history'
 import type { SnapshotView } from '../../../../shared/snapshotSelection'
 import { formatPreciseScanDate } from '../../lib/scanDisplay'
@@ -8,11 +8,13 @@ import { formatPreciseScanDate } from '../../lib/scanDisplay'
 export function SnapshotActions({
   scan,
   onOpen,
+  onCompare,
   onDelete,
   fallbackFocus
 }: {
   scan: ScanHistoryItem
   onOpen: (view: SnapshotView, scan: ScanHistoryItem) => void
+  onCompare: (scan: ScanHistoryItem) => void
   onDelete: (scan: ScanHistoryItem) => void
   fallbackFocus: RefObject<HTMLElement | null>
 }): React.JSX.Element {
@@ -156,6 +158,15 @@ export function SnapshotActions({
               onClick={() => activate(() => onOpen('insights', scan))}
             >
               <ChartColumn size={16} aria-hidden="true" /> Open in Insights
+            </button>
+            <button
+              role="menuitem"
+              tabIndex={-1}
+              type="button"
+              className={menuItem}
+              onClick={() => activate(() => onCompare(scan))}
+            >
+              <GitCompareArrows size={16} aria-hidden="true" /> Compare snapshot
             </button>
             <div role="separator" className="my-1 border-t border-separator" />
             <button

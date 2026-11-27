@@ -4,6 +4,7 @@ import type { ScanHistoryItem, ScanHistoryPage } from '../src/shared/history'
 import { resolveScanHistoryQuery } from '../src/shared/history'
 import type { ScanStateSnapshot, SpaceLensAPI } from '../src/shared/ipc'
 import App from '../src/renderer/src/App'
+import { ComparisonMutations } from '../src/renderer/src/features/comparison/selection'
 import { HistoryPage } from '../src/renderer/src/pages/HistoryPage'
 import { SnapshotSelections } from '../src/renderer/src/features/snapshots/selection'
 import { mockSnapshotSelection } from './snapshot-selection-fixture'
@@ -170,7 +171,13 @@ function notify({
 }
 
 function mount(): ReturnType<typeof render> {
-  return render(<HistoryPage snapshots={snapshots} onOpenSnapshot={vi.fn()} />)
+  return render(
+    <HistoryPage
+      snapshots={snapshots}
+      comparisonMutations={new ComparisonMutations()}
+      onOpenSnapshot={vi.fn()}
+    />
+  )
 }
 
 function filter(text: string): void {
@@ -542,7 +549,9 @@ test('keeps the row menu outside the scroll region and supports keyboard dismiss
   trigger.focus()
   fireEvent.keyDown(trigger, { key: 'ArrowDown' })
   const menu = screen.getByRole('menu', { name: 'Snapshot actions' })
-  const [explorer, insights, deletion] = within(menu).getAllByRole('menuitem')
+  const explorer = within(menu).getByRole('menuitem', { name: 'Open in Explorer' })
+  const insights = within(menu).getByRole('menuitem', { name: 'Open in Insights' })
+  const deletion = within(menu).getByRole('menuitem', { name: 'Delete snapshot' })
   expect(screen.getByRole('region', { name: 'Saved snapshots table' })).not.toContainElement(menu)
   expect(explorer).toHaveTextContent('Open in Explorer')
   expect(explorer).toHaveFocus()
