@@ -234,6 +234,7 @@ test('table navigation synchronizes breadcrumbs, history and visible tree highli
       })
     }),
     getScanState: vi.fn(async () => ({ ok: true, value: { revision: 0, state: null } })),
+    getStorageDevices: vi.fn(async () => ({ ok: true, value: [] })),
     listScanHistory: vi.fn(async () => ({ ok: true, value: recentHistoryPage() })),
     onScanStateChanged: vi.fn(() => () => {}),
     getScanSnapshot,

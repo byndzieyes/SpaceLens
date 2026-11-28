@@ -259,6 +259,7 @@ beforeEach(() => {
   api = {
     ...mockSnapshotSelection(() => api.getScanSnapshot()),
     getAppInfo: vi.fn(),
+    getStorageDevices: vi.fn(async () => ({ ok: true, value: [] })),
     getScanState: vi.fn(async () => success(update(0))),
     listScanHistory: vi.fn(async () => ({ ok: true, value: recentHistoryPage() })),
     getScanHistoryMetadata: vi.fn(),

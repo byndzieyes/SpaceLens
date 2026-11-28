@@ -14,6 +14,7 @@ export default defineConfig(({ command, mode }) => {
   return {
     main: {
       build: {
+        externalizeDeps: { exclude: ['@electron-toolkit/utils'] },
         rolldownOptions: {
           input: {
             index: resolve('src/main/index.ts'),

@@ -1,4 +1,5 @@
 import type { StorageTrends, TrendSelection } from './trends'
+import type { StorageDevice, StorageDevicesErrorCode } from './storage'
 import type {
   ScanHistoryErrorCode,
   ScanHistoryItem,
@@ -67,6 +68,9 @@ export interface ComparisonAPI {
 
 export interface SpaceLensAPI extends ComparisonAPI {
   getAppInfo: () => Promise<AppInfo>
+  getStorageDevices: () => Promise<
+    ScannerIpcResult<readonly StorageDevice[], StorageDevicesErrorCode>
+  >
   selectScanDirectory: () => Promise<ScannerIpcResult<ScanDirectorySelection>>
   startScan: (request: StartScanRequest) => Promise<ScannerIpcResult<ScanAccepted>>
   getScanState: () => Promise<ScannerIpcResult<ScanStateSnapshot>>
@@ -124,6 +128,7 @@ export interface SpaceLensAPI extends ComparisonAPI {
 
 export const IPC_CHANNELS = {
   getAppInfo: 'spacelens:get-app-info',
+  getStorageDevices: 'spacelens:get-storage-devices',
   selectScanDirectory: 'spacelens:select-scan-directory',
   startScan: 'spacelens:start-scan',
   getScanState: 'spacelens:get-scan-state',

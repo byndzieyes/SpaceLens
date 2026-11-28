@@ -1,5 +1,6 @@
 import { expect, test } from 'vitest'
-import { formatStorageSize, getStorageUsage } from '../src/renderer/src/lib/storage'
+import { readDriveCapacity } from '../src/main/storageDevices'
+import { formatStorageSize } from '../src/renderer/src/lib/storage'
 
 test('formats decimal gigabytes consistently, with at most one decimal place', () => {
   expect(formatStorageSize(0)).toBe('0 GB')
@@ -8,29 +9,33 @@ test('formats decimal gigabytes consistently, with at most one decimal place', (
   expect(formatStorageSize(476_000_000_000)).toBe('476 GB')
 })
 
-test('derives available space and percentage for both demo drives', () => {
-  expect(getStorageUsage(476_000_000_000, 382_000_000_000)).toEqual({
-    availableBytes: 94_000_000_000,
+test('preserves reported free space and derives used bytes and percentages', () => {
+  expect(readDriveCapacity('476000000000', '94000000000')).toEqual({
+    totalBytes: '476000000000',
+    freeBytes: '94000000000',
+    usedBytes: '382000000000',
     usedPercentage: 80.3
   })
-  expect(getStorageUsage(256_000_000_000, 128_000_000_000)).toEqual({
-    availableBytes: 128_000_000_000,
+  expect(readDriveCapacity('256000000000', '128000000000')).toEqual({
+    totalBytes: '256000000000',
+    freeBytes: '128000000000',
+    usedBytes: '128000000000',
     usedPercentage: 50
   })
 })
 
 test('handles zero capacity, empty and full devices without invalid percentages', () => {
-  expect(getStorageUsage(0, 0)).toEqual({ availableBytes: 0, usedPercentage: 0 })
-  expect(getStorageUsage(1_000, 0)).toEqual({ availableBytes: 1_000, usedPercentage: 0 })
-  expect(getStorageUsage(1_000, 1_000)).toEqual({ availableBytes: 0, usedPercentage: 100 })
+  expect(readDriveCapacity('0', '0')).toMatchObject({ freeBytes: '0', usedPercentage: 0 })
+  expect(readDriveCapacity('1000', '1000')).toMatchObject({ freeBytes: '1000', usedPercentage: 0 })
+  expect(readDriveCapacity('1000', '0')).toMatchObject({ freeBytes: '0', usedPercentage: 100 })
 })
 
 test('rejects invalid sizes and inconsistent capacity rather than displaying invalid usage', () => {
   for (const bytes of [-1, NaN, Infinity, -Infinity]) {
     expect(() => formatStorageSize(bytes)).toThrow(RangeError)
-    expect(() => getStorageUsage(bytes, 0)).toThrow(RangeError)
-    expect(() => getStorageUsage(1_000, bytes)).toThrow(RangeError)
+    expect(readDriveCapacity(String(bytes), '0')).toBeNull()
+    expect(readDriveCapacity('1000', String(bytes))).toBeNull()
   }
-  expect(() => getStorageUsage(100, 101)).toThrow(RangeError)
-  expect(() => getStorageUsage(0, 1)).toThrow(RangeError)
+  expect(readDriveCapacity('100', '101')).toBeNull()
+  expect(readDriveCapacity('0', '1')).toBeNull()
 })

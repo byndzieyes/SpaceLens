@@ -51,6 +51,7 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     'getScanHistoryMetadata',
     'getScanSnapshot',
     'getScanState',
+    'getStorageDevices',
     'getStorageTrends',
     'listComparisonDirectoryChanges',
     'listComparisonFileChanges',
@@ -178,6 +179,13 @@ test('exposes only the typed application API and uses fixed invoke channels', as
     IPC_CHANNELS.releaseSnapshotSelection,
     release
   )
+})
+
+test('invokes only the fixed drive discovery channel with no arguments', async () => {
+  const response = { ok: true, value: [] }
+  vi.mocked(ipcRenderer.invoke).mockResolvedValue(response)
+  expect(await api.getStorageDevices()).toBe(response)
+  expect(ipcRenderer.invoke).toHaveBeenCalledExactlyOnceWith(IPC_CHANNELS.getStorageDevices)
 })
 
 test('forwards the public Trends selection without exposing a Worker cursor', async () => {

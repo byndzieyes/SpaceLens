@@ -4,7 +4,6 @@ import {
   HardDrive,
   History,
   LayoutDashboard,
-  Settings,
   type LucideIcon
 } from 'lucide-react'
 import { pageTitles, type PageId } from '../../navigation'
@@ -56,19 +55,6 @@ export function Sidebar({ activePage, onNavigate }: SidebarProps): React.JSX.Ele
           ))}
         </ul>
       </nav>
-
-      <div className="shrink-0 border-t border-separator p-2 md:p-3">
-        <button
-          type="button"
-          disabled
-          title="Settings — coming soon"
-          aria-label="Settings — coming soon"
-          className="flex min-h-10 w-full cursor-default items-center justify-center gap-3 rounded-md px-2 py-2 text-sm text-text-secondary md:justify-start md:px-3"
-        >
-          <Settings size={18} className="shrink-0" aria-hidden="true" />
-          <span className="sr-only md:not-sr-only">Settings</span>
-        </button>
-      </div>
     </aside>
   )
 }

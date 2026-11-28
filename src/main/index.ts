@@ -5,6 +5,7 @@ import { pathToFileURL } from 'url'
 import { electronApp, optimizer, is } from '@electron-toolkit/utils'
 import icon from '../../resources/icon.png?asset'
 import { registerAppInfoHandler } from './ipc'
+import { registerStorageDevicesHandler } from './storageDevicesIpc'
 import { ScanSessionManager } from './scanner/sessionManager'
 import { writeScan } from './scanner/persistence'
 import { registerScannerIpc, registerScannerShutdown } from './scannerIpc'
@@ -16,6 +17,7 @@ import type { StorageWorkerClient } from './storage/workerClient'
 
 let scanManager: ScanSessionManager | undefined
 let scannerIpc: ReturnType<typeof registerScannerIpc> | undefined
+let storageDevicesIpc: ReturnType<typeof registerStorageDevicesHandler> | undefined
 let storage: StorageWorkerClient | undefined
 let storageReady: Promise<StorageWorkerClient> | undefined
 let storageRequests: ScanStorageCoordinator | undefined
@@ -23,6 +25,7 @@ let historyRetention: HistoryRetention | undefined
 let quitting = false
 registerScannerShutdown(async () => {
   quitting = true
+  storageDevicesIpc?.dispose()
   const maintenanceStopped = historyRetention?.stop()
   storageRequests?.stopReads()
   try {
@@ -70,6 +73,7 @@ function createWindow(): void {
   mainWindow.webContents.setWindowOpenHandler(() => ({ action: 'deny' }))
   mainWindow.webContents.on('will-navigate', (event) => event.preventDefault())
   scannerIpc?.attachRenderer(mainWindow.webContents)
+  storageDevicesIpc?.attachRenderer(mainWindow.webContents)
 
   // HMR for renderer base on electron-vite cli.
   // Load the remote URL for development or the local html file for production.
@@ -102,6 +106,7 @@ app.whenReady().then(async () => {
   })
 
   registerAppInfoHandler(rendererUrl)
+  storageDevicesIpc = registerStorageDevicesHandler(rendererUrl)
   const directory = app.getPath('userData')
   const startup = (async () => {
     await mkdir(directory, { recursive: true })

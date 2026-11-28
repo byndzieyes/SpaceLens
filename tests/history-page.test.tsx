@@ -142,7 +142,8 @@ beforeEach(() => {
     setRetentionSettings: setRetention,
     listScanHistory: list,
     onScanStateChanged: listen,
-    getScanState: async () => ({ ok: true, value: { revision: 0, state: null } })
+    getScanState: async () => ({ ok: true, value: { revision: 0, state: null } }),
+    getStorageDevices: async () => ({ ok: true, value: [] })
   }
   snapshots = new SnapshotSelections(api)
   vi.stubGlobal('spaceLens', api)

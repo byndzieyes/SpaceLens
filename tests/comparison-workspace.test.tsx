@@ -227,6 +227,7 @@ beforeEach(() => {
     ...mockSnapshotSelection(readSnapshot),
     getScanSnapshot: readSnapshot,
     getScanState: async () => ({ ok: true, value: scanner }),
+    getStorageDevices: async () => ({ ok: true, value: [] }),
     onScanStateChanged: (callback: Parameters<SpaceLensAPI['onScanStateChanged']>[0]) => {
       listen.add(callback)
       return () => listen.delete(callback)

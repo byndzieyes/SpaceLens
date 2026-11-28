@@ -1,4 +1,5 @@
-import { useMemo } from 'react'
+import { useMemo, useRef } from 'react'
+import type { StorageDevice } from '../../shared/storage'
 import { AppShell } from './components/layout/AppShell'
 import { rankedExplorerTarget, type PageId } from './navigation'
 import { useSnapshotSelections } from './features/snapshots/selection'
@@ -11,6 +12,7 @@ import { ComparisonMutations } from './features/comparison/selection'
 
 function App(): React.JSX.Element {
   const selections = useSnapshotSelections()
+  const driveCache = useRef<readonly StorageDevice[] | null>(null)
   const comparisonMutations = useMemo(() => new ComparisonMutations(), [])
   const {
     destination: { page: activePage, activation, target, arrival },
@@ -23,6 +25,7 @@ function App(): React.JSX.Element {
     overview: (
       <OverviewPage
         snapshots={selections}
+        driveCache={driveCache}
         onOpenExplorer={() => navigate('explorer')}
         onOpenSnapshot={(view, scanId) =>
           navigateToSnapshot({ view, selection: { mode: 'explicit', scanId } })

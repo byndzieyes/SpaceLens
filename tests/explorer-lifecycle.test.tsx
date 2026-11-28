@@ -212,6 +212,7 @@ function mockApp(): {
   const api: Mocked<SpaceLensAPI> = {
     ...mockSnapshotSelection(() => api.getScanSnapshot()),
     getAppInfo: vi.fn<SpaceLensAPI['getAppInfo']>(),
+    getStorageDevices: vi.fn(async () => ({ ok: true, value: [] })),
     getInsightsSummary: vi.fn(async ({ scanId }) =>
       read(scanId, (store) => {
         const { rootPath, summary, finishedAt } = store.requireValidatedScan(scanId)

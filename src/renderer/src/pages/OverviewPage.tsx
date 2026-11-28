@@ -1,8 +1,7 @@
 import { FolderSearch } from 'lucide-react'
-import { Badge } from '../components/ui/Badge'
 import { Button } from '../components/ui/Button'
-import { DiskCard } from '../features/overview/DiskCard'
-import { demoDevices } from '../features/overview/demoDevices'
+import { StorageDevices } from '../features/overview/StorageDevices'
+import type { StorageDeviceCache } from '../features/overview/useStorageDevices'
 import { RecentScans } from '../features/overview/RecentScans'
 import { useRecentScans } from '../features/overview/useRecentScans'
 import { ScanPanel } from '../features/scanner/ScanPanel'
@@ -13,14 +12,22 @@ import type { SnapshotView } from '../../../shared/snapshotSelection'
 export function OverviewPage({
   onOpenExplorer,
   onOpenSnapshot,
-  snapshots
+  snapshots,
+  driveCache
 }: {
   onOpenExplorer?: () => void
   onOpenSnapshot?: (view: SnapshotView, scanId: string) => void
   snapshots?: SnapshotSelections
+  driveCache?: StorageDeviceCache
 }): React.JSX.Element {
   const recent = useRecentScans()
   const scanner = useScanner(snapshots, recent.observeRevision)
+  const scan = scanner.scan?.session
+  const completedScanId = scanner.ready
+    ? scan?.status === 'completed'
+      ? scan.id
+      : null
+    : undefined
   return (
     <div className="space-y-8 sm:space-y-10">
       <header className="flex flex-wrap items-center justify-between gap-5">
@@ -46,19 +53,7 @@ export function OverviewPage({
 
       <ScanPanel scanner={scanner} onOpenExplorer={onOpenExplorer} />
 
-      <section aria-labelledby="storage-devices-title" className="space-y-4">
-        <div className="flex flex-wrap items-center gap-3">
-          <h3 id="storage-devices-title" className="text-base font-semibold">
-            Storage Devices
-          </h3>
-          <Badge>Demo data</Badge>
-        </div>
-        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,15rem),1fr))] gap-4">
-          {demoDevices.map((device) => (
-            <DiskCard key={device.id} device={device} />
-          ))}
-        </div>
-      </section>
+      <StorageDevices completedScanId={completedScanId} cache={driveCache} />
 
       <RecentScans state={recent.state} onRetry={recent.retry} onOpenSnapshot={onOpenSnapshot} />
     </div>

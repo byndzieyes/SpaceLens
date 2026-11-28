@@ -9,6 +9,10 @@ import { ExplorerPage } from '../src/renderer/src/pages/ExplorerPage'
 const api: SpaceLensAPI = {
   ...mockSnapshotSelection(() => api.getScanSnapshot()),
   getAppInfo: vi.fn(),
+  getStorageDevices: vi.fn<SpaceLensAPI['getStorageDevices']>(async () => ({
+    ok: true,
+    value: []
+  })),
   getScanState: vi.fn(),
   listScanHistory: vi.fn<SpaceLensAPI['listScanHistory']>(async () => ({
     ok: true,

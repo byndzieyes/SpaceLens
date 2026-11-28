@@ -2,7 +2,7 @@
 
 SpaceLens analyzes the logical sizes of files in a selected folder. **Scan Folder** opens the native directory picker. A worker reads the selected folder and reports progress, and you can cancel an active scan.
 
-- **Overview** shows the active scan and the latest published summary. The storage device cards use example drives and decimal GB (1 GB = 1,000,000,000 bytes).
+- **Overview** shows Windows drive capacity and usage, the active scan, and recent saved scans.
 - **Explorer** browses the published directory tree, file details, contents pages, and Treemap.
 - **Insights** shows file categories, extensions, size distribution, the largest files and directories, and storage observations. Extensions displays 20 groups per page, and ranked entries can open directly in Explorer.
 - **History** browses and manages retained scans, compares two snapshots, and charts changes across compatible scans.
@@ -20,6 +20,14 @@ npm run build:win
 ```
 
 The installer is generated in `dist/`. The installed app uses the bundled runtime and production resources.
+
+## Windows drive information
+
+Overview queries Windows PowerShell's local `Win32_LogicalDisk` CIM provider for fixed and removable drive letters. It shows the drive identifier, root, volume label when present, and Windows-reported total and free bytes. Used bytes are total minus free. Capacity labels use decimal units, and the provider supplies no separate quota-adjusted available-space value. Folder scans report logical sizes for the selected directory independently of drive usage.
+
+Network drives, optical drives, RAM disks, and volumes without a drive letter are outside this view. A drive whose capacity Windows cannot report may appear with **Capacity unavailable**. Non-Windows platforms show a provider availability message.
+
+Drive information refreshes on startup, on returning to Overview, after a completed scan while Overview is open, and through **Refresh**. A failed refresh keeps the last successful result with an outdated-data notice and a **Retry** action. Main limits each discovery to five seconds and shares a pending query across simultaneous requests. Drive discovery is independent of scanning and saved history.
 
 ## Scan storage
 
@@ -337,7 +345,7 @@ Based on the [official electron-vite React + TypeScript template](https://electr
 ## Windows MVP limitations
 
 - Windows x64 is the verified MVP platform. The installer is unsigned. macOS and Linux package behavior is unverified.
-- Overview's device cards show example drive data. Scanning and analytics use the selected folder's logical file sizes. A logical reduction does not measure freed disk space.
+- Scanning and analytics use the selected folder's logical file sizes. A logical reduction does not measure freed disk space.
 - Comparison and conflicting scanner operations are mutually exclusive. Cold Summary can exceed 22 seconds at approximately 210,000 entries per snapshot. Logical preparation has a separate 60-second budget, with the 10-second deadline still applying to individual Worker commands.
 - The complete Comparison workflow is verified through approximately 210,000 entries per snapshot. The exploratory 500,000-entry run covered Summary only. The optional million-entry workload is unmeasured.
 - Trends shows up to the latest 100 retained observations in each compatible series. The displayed changes reflect observations at scan time. Partial scans can omit entries and affect analytical certainty.

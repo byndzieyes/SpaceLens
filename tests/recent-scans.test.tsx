@@ -45,6 +45,7 @@ function scannerApi(items: readonly ScanHistoryItem[] = []): {
   const listeners = new Set<Parameters<SpaceLensAPI['onScanStateChanged']>[0]>()
   vi.stubGlobal('spaceLens', {
     getScanState: async () => ({ ok: true, value: state }),
+    getStorageDevices: async () => ({ ok: true, value: [] }),
     onScanStateChanged: (listener: Parameters<SpaceLensAPI['onScanStateChanged']>[0]) => {
       listeners.add(listener)
       return () => listeners.delete(listener)
@@ -175,12 +176,13 @@ test.each([1, 4, 5, 7])(
   }
 )
 
-test('Overview preserves demo devices and empty Recent Scans while enabling folder selection', async () => {
+test('Overview preserves empty Recent Scans and enables scanning on a machine without supported drives', async () => {
   scannerApi()
   render(<OverviewPage />)
   expect(await screen.findByRole('heading', { name: 'No scans yet' })).toBeVisible()
   expect(screen.queryByRole('list')).not.toBeInTheDocument()
-  expect(screen.getAllByText('Demo data')).toHaveLength(1)
+  expect(await screen.findByText('No supported drives were found.')).toBeVisible()
+  expect(screen.queryByText('Demo data')).not.toBeInTheDocument()
   expect(screen.queryByRole('button', { name: 'Demo scans' })).not.toBeInTheDocument()
   await screen.findByText('Ready to scan')
   expect(screen.getByRole('button', { name: 'Scan Folder' })).toBeEnabled()

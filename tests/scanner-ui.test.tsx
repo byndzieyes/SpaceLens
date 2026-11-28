@@ -78,6 +78,10 @@ beforeEach(() => {
   api = {
     ...mockSnapshotSelection(() => api.getScanSnapshot()),
     getAppInfo: vi.fn(),
+    getStorageDevices: vi.fn<SpaceLensAPI['getStorageDevices']>(async () => ({
+      ok: true,
+      value: []
+    })),
     getScanState: vi.fn<SpaceLensAPI['getScanState']>(async () => ({ ok: true, value: latest })),
     listScanHistory: vi.fn<SpaceLensAPI['listScanHistory']>(async () => ({
       ok: true,
@@ -135,6 +139,20 @@ test('loads current state without starting a scan and exposes an accessible acti
   expect(screen.getByRole('button', { name: 'Scan Folder' })).toBeEnabled()
   expect(within(panel()).queryByRole('button', { name: 'Cancel Scan' })).not.toBeInTheDocument()
   expect(within(panel()).getByRole('status')).toHaveTextContent('Ready to scan')
+})
+
+test('refreshes live drive information after publication while retaining scanner controls and history', async () => {
+  await mount()
+  expect(api.getStorageDevices).toHaveBeenCalledTimes(1)
+  emit(snapshot(1))
+  emit(snapshot(2, 'cancelled'))
+  expect(api.getStorageDevices).toHaveBeenCalledTimes(1)
+  emit(snapshot(3, 'running', 'scan-b'))
+  emit(snapshot(4, 'completed', 'scan-b'))
+  await waitFor(() => expect(api.getStorageDevices).toHaveBeenCalledTimes(2))
+  expect(await within(panel()).findByText('Scan completed')).toBeVisible()
+  expect(screen.getByRole('button', { name: 'Scan Folder' })).toBeEnabled()
+  expect(screen.getByRole('heading', { name: 'Recent Scans' })).toBeVisible()
 })
 
 test('selects once and starts once with the exact returned path despite repeated clicks', async () => {
