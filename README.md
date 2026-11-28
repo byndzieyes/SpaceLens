@@ -5,6 +5,7 @@ SpaceLens analyzes the logical sizes of files in a selected folder. **Scan Folde
 - **Overview** shows the active scan and the latest published summary. The storage device cards use example drives and decimal GB (1 GB = 1,000,000,000 bytes).
 - **Explorer** browses the published directory tree, file details, contents pages, and Treemap.
 - **Insights** shows file categories, extensions, size distribution, the largest files and directories, and storage observations. Extensions displays 20 groups per page, and ranked entries can open directly in Explorer.
+- **History** browses and manages retained scans, compares two snapshots, and charts changes across compatible scans.
 
 ## Windows x64 installation
 
@@ -15,8 +16,7 @@ SpaceLens stores its SQLite database in `%APPDATA%\spacelens\scans.sqlite` on Wi
 To build the installer from this repository after `npm ci`:
 
 ```sh
-npm run build
-npm exec -- electron-builder --win --x64 --config.electronDist=node_modules/electron/dist --publish never
+npm run build:win
 ```
 
 The installer is generated in `dist/`. The installed app uses the bundled runtime and production resources.
@@ -53,13 +53,13 @@ The Storage Worker validates retained trees on demand using the publication chec
 
 The analytics cache holds aggregates for one scan, with a 512 KiB estimated JavaScript value budget and a 1,024-group cap on complete extension caches. Aggregating another scan switches the cache. Publications and deletions of unrelated scans leave cached results usable. Deleting the cached scan invalidates it after commit, and worker restart clears it.
 
-In a disposable Windows run against the production Storage Worker, a historical snapshot with 100,151 entries and 70,150 root children took 200 ms to validate and 240 ms to open through the first page. A cached reopen took under 1 ms, and repeated 100-entry pages at offset 10,000 took 24 ms at the median. A 128-entry scanner batch acknowledged in 210 ms when queued during validation and 12 ms without competing work. The scanner batch ran before an already queued read once validation finished. Task 5.23 should account for cold validation on larger snapshots because synchronous validation occupies the Storage Worker until it finishes.
+In a disposable Windows run against the production Storage Worker, a historical snapshot with 100,151 entries and 70,150 root children took 200 ms to validate and 240 ms to open through the first page. A cached reopen took under 1 ms, and repeated 100-entry pages at offset 10,000 took 24 ms at the median. A 128-entry scanner batch acknowledged in 210 ms when queued during validation and 12 ms without competing work. The scanner batch ran before an already queued read once validation finished.
 
 A separate disposable production Worker run analyzed two archives with 100,151 and 80,101 entries and a Latest snapshot with 60,076 entries. The first historical Insights adoption took 109 ms, including 105 ms of tree validation. After Explorer validated the second archive, Insights adopted it in 1.71 ms with no second validation. Switching through category results took 86 ms to Latest and 156 ms back to the first archive. Cold category and extension queries took 351 and 403 ms, while cached aggregate medians ranged from 0.17 to 0.22 ms. The cache peaked at 51,132 estimated bytes and the largest analytics SQL result contained 50 aggregate rows.
 
-The 128-entry scanner batch acknowledged in 366 ms when queued during the cold category query and 11 ms uncontended. The batch dispatched ahead of a read already queued when the category query finished. Task 5.23 should account for cold aggregate queries as well as tree validation when assessing scanner acknowledgement latency.
+The 128-entry scanner batch acknowledged in 366 ms when queued during the cold category query and 11 ms uncontended. The batch dispatched ahead of a read already queued when the category query finished.
 
-The global history target defaults to 10 completed snapshots and accepts integers from 1 through JavaScript’s maximum safe integer. The settings API saves the limit as `history-retention.json` in Electron’s `userData` directory by syncing a temporary file and atomically replacing the previous file. A missing file uses the default. Invalid persisted settings suspend pruning until an explicit valid save. Settings controls are planned for Task 5.18.
+The global history target defaults to 10 completed snapshots and accepts integers from 1 through JavaScript’s maximum safe integer. The settings API saves the limit as `history-retention.json` in Electron’s `userData` directory by syncing a temporary file and atomically replacing the previous file. A missing file uses the default. Invalid persisted settings suspend pruning until an explicit valid save in History Settings.
 
 Automatic retention prunes the oldest eligible snapshot by publication sequence, one transaction per snapshot. It preserves Latest and protected snapshots and can temporarily exceed the target. Maintenance resumes when a relevant lease is released and defers while a scan is building. A confirmed publication stands independently of pruning. The limit controls retained snapshot count. Deleted rows free SQLite pages for later writes, so the database file may stay near its previous peak size.
 
@@ -323,7 +323,63 @@ At 10,000 snapshots a History exact-path query took 2.8 ms, a literal substring 
 
 Three consecutive two-worker test runs passed 1,308 tests with the existing skip in 142.41, 81.52, and 111.27 seconds. The final default configuration passed the same suite in 40.42 seconds. The benchmark scripts and Electron verification use isolated profiles.
 
+The Task 5.24 Windows regression run used one repetition per comparison fixture.
+
+| Entries per snapshot | Cold Summary | First File Changes | First Directory Changes | Warm Summary |
+| -------------------: | -----------: | -----------------: | ----------------------: | -----------: |
+|      100,039–100,040 |       2.81 s |            3.61 ms |                  0.92 s |      1.95 ms |
+|      210,039–210,040 |       6.54 s |            4.13 ms |                  2.44 s |      1.96 ms |
+
+The 10,000-snapshot Trends regression returned the exact compatible count of 3,335 with a 100-point window in 308 ms through the production Worker and coordinator. Earlier runs above show the variation across benchmark sessions.
+
 Based on the [official electron-vite React + TypeScript template](https://electron-vite.org/guide/).
+
+## Windows MVP limitations
+
+- Windows x64 is the verified MVP platform. The installer is unsigned. macOS and Linux package behavior is unverified.
+- Overview's device cards show example drive data. Scanning and analytics use the selected folder's logical file sizes. A logical reduction does not measure freed disk space.
+- Comparison and conflicting scanner operations are mutually exclusive. Cold Summary can exceed 22 seconds at approximately 210,000 entries per snapshot. Logical preparation has a separate 60-second budget, with the 10-second deadline still applying to individual Worker commands.
+- The complete Comparison workflow is verified through approximately 210,000 entries per snapshot. The exploratory 500,000-entry run covered Summary only. The optional million-entry workload is unmeasured.
+- Trends shows up to the latest 100 retained observations in each compatible series. The displayed changes reflect observations at scan time. Partial scans can omit entries and affect analytical certainty.
+- Comparison uses available metadata. It does not hash file contents or detect renames. Unchanged means the recorded metadata matched.
+
+## Coursework demonstration
+
+Create the fixture and launch SpaceLens with a disposable profile. This example uses the default per-user installation path. Keep the same PowerShell session for the second scan and restart. The command prints the folder to select in SpaceLens.
+
+```powershell
+$demoRoot = Join-Path ([System.IO.Path]::GetTempPath()) "SpaceLens-Demo-$([Guid]::NewGuid().ToString('N'))"
+$demoProfile = "$demoRoot-profile"
+$appExe = Join-Path $env:LOCALAPPDATA 'Programs/spacelens/spacelens.exe'
+New-Item -ItemType Directory -Path "$demoRoot/grow", "$demoRoot/shrink" | Out-Null
+[System.IO.File]::WriteAllBytes("$demoRoot/grow/report.bin", [byte[]]::new(100))
+[System.IO.File]::WriteAllBytes("$demoRoot/shrink/old.bin", [byte[]]::new(80))
+[System.IO.File]::WriteAllBytes("$demoRoot/keep.bin", [byte[]]::new(20))
+& $appExe "--user-data-dir=$demoProfile"
+$demoRoot
+```
+
+1. In **Overview**, click **Scan Folder**, choose the printed path, and wait for completion.
+2. Check that Overview reports **200 B**, **3 files** and **3 directories**, including the root.
+3. Open **Explorer** and navigate into `grow` with the Treemap. Select `report.bin` and check its **100 B** size.
+4. Open **Insights** and check the **200 B** summary, the `.bin` extension and `report.bin` at the top of Largest Files.
+5. In the same PowerShell session, apply these changes to the fixture.
+
+   ```powershell
+   [System.IO.File]::WriteAllBytes("$demoRoot/grow/report.bin", [byte[]]::new(160))
+   [System.IO.File]::WriteAllBytes("$demoRoot/grow/new.bin", [byte[]]::new(40))
+   [System.IO.File]::Delete("$demoRoot/shrink/old.bin")
+   [System.IO.File]::WriteAllBytes("$demoRoot/shrink/empty.bin", [byte[]]::new(0))
+   New-Item -ItemType Directory -Path "$demoRoot/empty" | Out-Null
+   ```
+
+6. Scan the same folder again. Check the new totals of **220 B**, **4 files** and **4 directories**.
+7. Open **History → Scans**. Check the Latest badge on the second scan, then open the first scan's Explorer or Insights action and verify its **200 B** total.
+8. Open **History → Comparison**. Set the first scan as Baseline and the second as Target, then choose **Compare snapshots**. Check **+20 B**, **+1 file** and **+1 directory**.
+9. In **File Changes**, check two additions, one removal, one modification and one unchanged file. In **Directory Changes**, look for `grow` **+100 B**, `shrink` **−80 B**, and the added `empty` directory with a known **0 B** size.
+10. Open the Baseline entry for removed `shrink/old.bin` in Explorer. Check that the historical snapshot still shows the entry at **80 B**.
+11. Open **History → Trends** and choose the fixture's series. Check the two observations and switch between Logical Size, Files and Directories. The timeline shows **+20 B**, **+1 file** and **+1 directory**.
+12. Close SpaceLens, then run `& $appExe "--user-data-dir=$demoProfile"` again. Reopen History and verify that both scans are still available and that the first scan's Explorer view still shows `old.bin`.
 
 ## Development
 
