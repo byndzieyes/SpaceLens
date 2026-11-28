@@ -183,6 +183,49 @@ test('reconciles every group to the published regular-file counts and exact size
   expect(database.getScanEntry({ scanId: saved.id, entryId: 'blank' }).sizeBytes).toBe(0)
 })
 
+test('uses expanded categories consistently in the chart totals and extension rows of a saved scan', () => {
+  const scan = publish([
+    entry('cache.SQLite', 120, 'database'),
+    entry('events.parquet', 80, 'dataset'),
+    entry('interface.WOFF2', 50, 'font'),
+    entry('scene.GLB', 70, 'design'),
+    entry('addon.node', 40, 'binary'),
+    entry('bundle.js.map', 30, 'code'),
+    entry('app.asar', 20, 'archive'),
+    entry('opaque.unknown-suffix', 10, 'other')
+  ])
+
+  const categories = database.getInsightsCategories(scan.id)
+  const extensions = page()
+  expect(categories.totals).toEqual({ fileCount: 8, knownBytes: 420, unknownSizeCount: 0 })
+  expect(extensions.totals).toEqual(categories.totals)
+  expect(
+    categories.categories.map(({ category, fileCount, knownBytes }) => [
+      category,
+      fileCount,
+      knownBytes
+    ])
+  ).toEqual([
+    ['archives', 1, 20],
+    ['code', 1, 30],
+    ['applications', 1, 40],
+    ['data', 2, 200],
+    ['fonts', 1, 50],
+    ['design', 1, 70],
+    ['other', 1, 10]
+  ])
+  expect(extensions.extensions.map(({ extension, category }) => [extension, category])).toEqual([
+    ['sqlite', 'data'],
+    ['parquet', 'data'],
+    ['glb', 'design'],
+    ['woff2', 'fonts'],
+    ['node', 'applications'],
+    ['map', 'code'],
+    ['asar', 'archives'],
+    ['unknown-suffix', 'other']
+  ])
+})
+
 test('paginates size ties by file count, then normalized UTF-16 order with null first', () => {
   const names: [string, number][] = [
     ['one.ZZZ', 0],

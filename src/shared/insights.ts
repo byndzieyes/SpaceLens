@@ -24,6 +24,9 @@ export const INSIGHTS_FILE_CATEGORIES = [
   'archives',
   'code',
   'applications',
+  'data',
+  'fonts',
+  'design',
   'other'
 ] as const
 

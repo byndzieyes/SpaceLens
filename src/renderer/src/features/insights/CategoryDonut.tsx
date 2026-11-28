@@ -16,6 +16,9 @@ const categoryColors: Record<InsightsFileCategory, string> = {
   archives: '#fb923c',
   code: '#c084fc',
   applications: '#f9a8d4',
+  data: '#bef264',
+  fonts: '#fca5a5',
+  design: '#67e8f9',
   other: '#94a3b8'
 }
 

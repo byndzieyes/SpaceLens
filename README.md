@@ -4,7 +4,7 @@ SpaceLens analyzes the logical sizes of files in a selected folder. **Scan Folde
 
 - **Overview** shows Windows drive capacity and usage, the active scan, and recent saved scans.
 - **Explorer** browses the published directory tree, file details, contents pages, and Treemap.
-- **Insights** shows file categories, extensions, size distribution, the largest files and directories, and storage observations. Extensions displays 20 groups per page, and ranked entries can open directly in Explorer.
+- **Insights** shows file categories, extensions, size distribution, the largest files and directories, and storage observations. Categories such as Data & Databases, Fonts, and Design & 3D use filename suffixes. The extension table displays 20 groups per page, and ranked entries can open directly in Explorer.
 - **History** browses and manages retained scans, compares two snapshots, and charts changes across compatible scans.
 
 ## Windows x64 installation
