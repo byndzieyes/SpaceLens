@@ -56,13 +56,13 @@ export function ChangePath({ path }: { path: string }): React.JSX.Element {
 
 function Classification({ kind }: { kind: EntryChangeKind }): React.JSX.Element {
   return (
-    <span className="inline-flex items-center gap-1.5 text-xs font-medium">
+    <span className="inline-flex max-w-full items-baseline gap-1.5 text-xs font-medium">
       <span
         aria-hidden="true"
         className="size-2 shrink-0 rounded-full"
         style={{ backgroundColor: fileKinds[kind].color }}
       />
-      {fileKinds[kind].label}
+      <span className="min-w-0 [overflow-wrap:anywhere]">{fileKinds[kind].label}</span>
     </span>
   )
 }
@@ -203,10 +203,13 @@ export function ChangeTable({
           <caption className="sr-only">{title}</caption>
           <thead className="bg-surface-elevated text-xs text-text-secondary">
             <tr>
-              <th scope="col" className="w-[22%] px-3 py-2.5 font-medium">
+              <th scope="col" className="w-[35cqw] px-3 py-2.5 font-medium @min-[20rem]:w-[22%]">
                 Relative path
               </th>
-              <th scope="col" className="w-[14%] px-2 py-2.5 font-medium">
+              <th
+                scope="col"
+                className="w-[calc(65cqw-3.625rem)] px-2 py-2.5 font-medium @min-[20rem]:w-[14%]"
+              >
                 Status
               </th>
               <th scope="col" className="w-[11%] px-2 py-2.5 text-right font-medium">

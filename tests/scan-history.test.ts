@@ -201,7 +201,18 @@ test('matches root substrings only on UTF-16 code unit boundaries', () => {
 })
 
 test('pages 113 scans without gaps, duplicates, or unbounded results', () => {
-  const order = Array.from({ length: 113 }, (_, index) => publish(`scan-${index}`).id)
+  const order = Array.from({ length: 113 }, (_, index) => `scan-${index}`)
+  // Pagination reads only committed scan metadata. Publication and entry validation are
+  // exercised separately, so seed these rows with one disk commit.
+  db.transaction(() => {
+    for (const id of order)
+      db.insertScan({
+        ...legacyScan,
+        id,
+        rootPath: workingRoot,
+        summary: { totalBytes: 0, fileCount: 1, directoryCount: 1, errorCount: 0 }
+      })
+  })
   const first = db.listScanHistory({ sort: 'oldest' })
   expect(first).toMatchObject({
     offset: 0,

@@ -1,6 +1,11 @@
+import { randomUUID } from 'node:crypto'
 import type { ScanPersistence } from '../scanner/persistence'
 import type { ScanHistoryItem, SnapshotDeletionRequest } from '../../shared/history'
 import type { ComparisonPair } from '../../shared/comparison'
+import type {
+  ComparisonPreparationRequest,
+  ComparisonPreparationStatus
+} from './comparisonPreparation'
 import type {
   BuildingScan,
   CompletedScan,
@@ -19,6 +24,19 @@ import {
 } from './workerClient'
 
 export const MAX_QUEUED_EXPLORER_READS = 16
+export const COMPARISON_PREPARATION_TIMEOUT_MS = 60_000
+
+type ComparisonWorkspace = Pick<ComparisonPreparationRequest, 'pair' | 'id' | 'scope'>
+type ComparisonWorkScope = ComparisonWorkspace['scope']
+interface AdoptedWorkspace extends ComparisonWorkspace {
+  readonly selectionId: string
+  directories: boolean
+}
+interface PreparingComparison extends ComparisonWorkspace {
+  readonly selectionId: string
+  started: boolean
+  promise: Promise<void>
+}
 
 export type RetentionOpportunity =
   | { readonly type: 'idle' | 'publication' | 'manual-deletion' }
@@ -95,6 +113,14 @@ export class ScanStorageCoordinator implements ScanPersistence {
   private retentionListener: ((opportunity: RetentionOpportunity) => void) | undefined
   private buildingScanId: string | undefined
   private startingScan = false
+  private preparingComparison?: PreparingComparison
+  private comparisonWorkspace?: AdoptedWorkspace
+  private comparisonReaders = 0
+  private workspaceCleanup?: {
+    readonly id: string
+    readonly job: Job
+    readonly promise: Promise<void>
+  }
   private readonly reads: Job[] = []
   private readsStopped = false
   private readonly readLifetime = new AbortController()
@@ -117,9 +143,155 @@ export class ScanStorageCoordinator implements ScanPersistence {
   readPair<T>(
     signal: AbortSignal,
     query: (client: ComparisonQueries) => Promise<T>,
-    pair: ComparisonPair
+    pair: ComparisonPair,
+    selectionId?: string,
+    scope: ComparisonWorkScope = 'workspace'
   ): Promise<T> {
-    return this.enqueue(query, signal, pair)
+    if (!selectionId) return this.enqueue(query, signal, pair)
+    if (
+      this.comparisonReaders >=
+      MAX_QUEUED_EXPLORER_READS + Number(this.active?.comparison === true)
+    )
+      return Promise.reject(
+        new StorageUnavailableError('Saved scan storage is busy. Retry the request.')
+      )
+    this.comparisonReaders++
+    const { baselineScanId, targetScanId } = pair
+    return this.ensureComparisonWorkspace(
+      { baselineScanId, targetScanId },
+      selectionId,
+      scope,
+      signal
+    )
+      .then(() => this.enqueue(query, signal, pair))
+      .finally(() => {
+        this.comparisonReaders--
+      })
+  }
+
+  releaseComparisonWorkspace(): void {
+    const workspace = this.comparisonWorkspace
+    if (!workspace) return
+    this.comparisonWorkspace = undefined
+    void this.discardComparisonWorkspace(workspace)
+  }
+
+  private async ensureComparisonWorkspace(
+    pair: ComparisonPair,
+    selectionId: string,
+    scope: ComparisonWorkScope,
+    signal: AbortSignal
+  ): Promise<void> {
+    this.assertComparisonAvailable()
+    if (signal.aborted) throw new StorageUnavailableError('Comparison preparation was cancelled.')
+    const active = this.comparisonWorkspace
+    if (active?.selectionId === selectionId && (scope === 'workspace' || active.directories)) return
+    const preparing = this.preparingComparison
+    if (preparing) {
+      if (preparing.selectionId === selectionId && preparing.scope === scope)
+        return preparing.promise
+      await preparing.promise.catch(() => {})
+      return this.ensureComparisonWorkspace(pair, selectionId, scope, signal)
+    }
+    if (scope === 'directories' && active?.selectionId !== selectionId) {
+      await this.ensureComparisonWorkspace(pair, selectionId, 'workspace', signal)
+      return this.ensureComparisonWorkspace(pair, selectionId, scope, signal)
+    }
+    const completion = Promise.withResolvers<void>()
+    const candidate = {
+      pair,
+      scope,
+      selectionId,
+      id: randomUUID(),
+      started: false,
+      promise: completion.promise
+    }
+    this.preparingComparison = candidate
+    void this.prepareComparisonWorkspace(candidate, signal).then(
+      completion.resolve,
+      completion.reject
+    )
+    return completion.promise
+  }
+
+  private async prepareComparisonWorkspace(
+    candidate: PreparingComparison,
+    signal: AbortSignal
+  ): Promise<void> {
+    const budget = new AbortController()
+    const timer = setTimeout(() => budget.abort(), COMPARISON_PREPARATION_TIMEOUT_MS)
+    const lifetime = AbortSignal.any([signal, budget.signal])
+    let release: (() => void) | undefined
+    try {
+      release = this.protection.reservePair(
+        candidate.pair.baselineScanId,
+        candidate.pair.targetScanId
+      )
+      const { id, pair, scope, selectionId } = candidate
+      const step = (action: 'start' | 'advance'): Promise<ComparisonPreparationStatus> =>
+        this.enqueue(
+          (client) => {
+            candidate.started = true
+            return client.prepareComparisonWorkspace({ id, pair, scope, action })
+          },
+          lifetime,
+          pair
+        )
+      let status = await step('start')
+      while (status.phase !== 'ready') {
+        const next = await step('advance')
+        if (next.completed !== status.completed + 1)
+          throw new Error('Comparison preparation did not progress.')
+        status = next
+      }
+      if (lifetime.aborted)
+        throw new StorageUnavailableError('Comparison preparation was cancelled.')
+      if (scope === 'workspace')
+        this.comparisonWorkspace = { id, pair, scope, selectionId, directories: false }
+      else if (this.comparisonWorkspace?.selectionId === selectionId)
+        this.comparisonWorkspace.directories = true
+      else throw new StorageUnavailableError('The comparison workspace is no longer active.')
+    } catch (error) {
+      if (candidate.started && this.client?.isReady)
+        await this.discardComparisonWorkspace(candidate)
+      if (budget.signal.aborted && !signal.aborted)
+        throw new StorageRequestTimeoutError('Comparison preparation exceeded its time budget.')
+      throw error
+    } finally {
+      clearTimeout(timer)
+      release?.()
+      if (this.preparingComparison === candidate) this.preparingComparison = undefined
+    }
+  }
+
+  private discardComparisonWorkspace(workspace: ComparisonWorkspace): Promise<void> {
+    if (this.failure || this.readsStopped) return Promise.resolve()
+    const queued = this.workspaceCleanup
+    if (queued)
+      return queued.id === workspace.id
+        ? queued.promise
+        : queued.promise.then(() => this.discardComparisonWorkspace(workspace))
+    const { promise, resolve } = Promise.withResolvers<void>()
+    const { id, pair, scope } = workspace
+    const job: Job = {
+      read: false,
+      comparison: true,
+      run: async (client) => {
+        try {
+          await client.prepareComparisonWorkspace({ action: 'discard', id, pair, scope })
+        } catch {
+          // Worker termination also releases all connection-local temporary state.
+          if (!client.isReady) await client.waitForExit()
+        } finally {
+          resolve()
+        }
+      },
+      reject: () => resolve(),
+      drop: () => resolve()
+    }
+    this.workspaceCleanup = { id, job, promise }
+    this.drain()
+    return promise
   }
 
   protectComparisonPair(signal: AbortSignal, pair: ComparisonPair): () => void {
@@ -253,7 +425,8 @@ export class ScanStorageCoordinator implements ScanPersistence {
     if (this.readsStopped) throw new StorageUnavailableError('Saved scan storage is shutting down.')
     if (this.client && !this.client.isReady) this.fail()
     if (this.failure) throw this.failure
-    if (this.active?.comparison) throw new StorageSchedulingError('SCAN_COMPARISON_BUSY')
+    if (this.active?.comparison || this.preparingComparison?.started)
+      throw new StorageSchedulingError('SCAN_COMPARISON_BUSY')
     if (this.startingScan || this.write)
       throw new StorageUnavailableError('Saved scan storage is busy. Retry the request.')
 
@@ -270,6 +443,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
       })
     } finally {
       this.startingScan = false
+      this.drain()
       this.notifyIdle()
     }
   }
@@ -300,6 +474,8 @@ export class ScanStorageCoordinator implements ScanPersistence {
     this.readLifetime.abort()
     const error = new StorageUnavailableError('Saved scan storage is shutting down.')
     for (const job of this.reads.splice(0)) job.drop(error)
+    this.workspaceCleanup?.job.drop(error)
+    this.workspaceCleanup = undefined
     if (this.active?.read) this.active.reject(error)
   }
 
@@ -395,13 +571,16 @@ export class ScanStorageCoordinator implements ScanPersistence {
       this.fail()
       return
     }
-    const job = this.write ?? this.deletion ?? this.reads.shift()
+    const cleanup =
+      !this.startingScan && !this.buildingScanId ? this.workspaceCleanup?.job : undefined
+    const job = this.write ?? this.deletion ?? cleanup ?? this.reads.shift()
     if (!job) {
       this.notifyIdle()
       return
     }
     if (job === this.write) this.write = undefined
     if (job === this.deletion) this.deletion = undefined
+    if (job === cleanup) this.workspaceCleanup = undefined
     this.active = job
     void job.run(this.client).then(() => {
       this.active = undefined
@@ -429,5 +608,7 @@ export class ScanStorageCoordinator implements ScanPersistence {
     this.write = undefined
     this.deletion?.reject(this.failure)
     this.deletion = undefined
+    this.workspaceCleanup?.job.drop(this.failure)
+    this.workspaceCleanup = undefined
   }
 }

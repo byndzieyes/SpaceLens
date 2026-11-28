@@ -57,6 +57,7 @@ test('normalizes Windows separators and drive letters, preserving every componen
   )
   expect(comparisonPathKey('c:\\Root', file('C:/root/File.TXT'), 'win32')).toBeNull()
   expect(comparisonPathKey('C:\\Root', file('D:\\Root\\File.TXT'), 'win32')).toBeNull()
+  expect(comparisonPathKey('K:\\Root', file('\u212a:/Root/File.TXT'), 'win32')).toBeNull()
   expect(
     comparisonPathKey('\\\\Server\\Share\\', file('//Server/Share\\Dir/Name.txt'), 'win32')
   ).toBe('Dir/Name.txt')

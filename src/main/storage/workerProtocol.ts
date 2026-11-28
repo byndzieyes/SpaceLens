@@ -42,6 +42,12 @@ import {
 } from './comparisonDirectoryContracts'
 import { isComparisonSummary, readComparisonPair } from './comparisonSummaryContracts'
 import {
+  isComparisonPreparationStatus,
+  readComparisonPreparation,
+  type ComparisonPreparationRequest,
+  type ComparisonPreparationStatus
+} from './comparisonPreparation'
+import {
   isTrendBatch,
   readTrendBatchRequest,
   type TrendBatch,
@@ -103,6 +109,10 @@ interface StorageCommands {
   listScanHistory: { payload: ScanHistoryQuery; result: ScanHistoryPage }
   getScanHistoryMetadata: { payload: ScanHistoryMetadataRequest; result: ScanHistoryItem }
   readTrendBatch: { payload: TrendBatchRequest; result: TrendBatch }
+  prepareComparisonWorkspace: {
+    payload: ComparisonPreparationRequest
+    result: ComparisonPreparationStatus
+  }
   listComparisonMatches: { payload: ComparisonMatchQuery; result: ComparisonMatchPage }
   listComparisonFileChanges: { payload: ComparisonFileQuery; result: ComparisonFileResult }
   getComparisonSummary: { payload: ComparisonPair; result: ComparisonSummary }
@@ -215,6 +225,8 @@ export function parseStorageRequest(value: unknown): StorageRequest {
       return { requestId, operation, payload: readScanHistoryQuery(payload) }
     case 'readTrendBatch':
       return { requestId, operation, payload: readTrendBatchRequest(payload) }
+    case 'prepareComparisonWorkspace':
+      return { requestId, operation, payload: readComparisonPreparation(payload) }
     case 'listComparisonMatches':
       return { requestId, operation, payload: readComparisonMatchQuery(payload) }
     case 'listComparisonFileChanges':
@@ -688,6 +700,7 @@ const resultValidators: { [T in StorageOperation]: (value: unknown) => value is 
     listScanHistory: isHistoryPage,
     getScanHistoryMetadata: isHistoryItem,
     readTrendBatch: isTrendBatch,
+    prepareComparisonWorkspace: isComparisonPreparationStatus,
     listComparisonMatches: isComparisonMatchPage,
     listComparisonFileChanges: isComparisonFileResult,
     getComparisonSummary: isComparisonSummary,

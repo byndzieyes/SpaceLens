@@ -160,6 +160,12 @@ export class StorageWorkerClient {
     return this.run('listComparisonMatches', query)
   }
 
+  prepareComparisonWorkspace(
+    request: StoragePayload<'prepareComparisonWorkspace'>
+  ): Promise<StorageResult<'prepareComparisonWorkspace'>> {
+    return this.run('prepareComparisonWorkspace', request)
+  }
+
   listComparisonFileChanges(query: ComparisonFileQuery): Promise<ComparisonFileResult> {
     return this.run('listComparisonFileChanges', query)
   }

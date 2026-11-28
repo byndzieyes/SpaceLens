@@ -1,4 +1,4 @@
-import type { SQLOutputValue, StatementSync } from 'node:sqlite'
+import type { SQLInputValue, SQLOutputValue, StatementSync } from 'node:sqlite'
 import { SnapshotAccessError } from './snapshotAccess'
 
 function sizeOverflow(): SnapshotAccessError {
@@ -13,7 +13,7 @@ export function aggregateInteger(value: SQLOutputValue): number {
 
 export function readFileAggregateRows(
   statement: StatementSync,
-  request: Record<string, string | bigint>
+  request: Record<string, SQLInputValue>
 ): Record<string, SQLOutputValue>[] {
   try {
     return statement.all(request)

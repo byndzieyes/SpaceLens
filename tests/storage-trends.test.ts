@@ -5,6 +5,9 @@ import { ScanDatabase } from '../src/main/storage/database'
 import { comparisonSeries } from '../src/main/comparison/compatibility'
 import { isTrendBatch, readTrendSelection } from '../src/main/storage/trendsContracts'
 import type { CompletedScan } from '../src/main/storage/payloads'
+import { ScanStorageCoordinator } from '../src/main/storage/coordinator'
+import { readStorageTrends } from '../src/main/storage/readStorageTrends'
+import type { StorageWorkerClient } from '../src/main/storage/workerClient'
 
 const date = '2026-11-20T12:00:00.000Z'
 function saved(
@@ -141,6 +144,50 @@ test('validates canonical series identities, cursor limits and worker result bou
       isTrendBatch({ ...batch, matchedCount: 2, points: [batch.points[0], batch.points[0]] })
     ).toBe(false)
   } finally {
+    db.close()
+  }
+})
+
+test('counts 5,000 mixed-root publications in bounded admissions and retains only the newest 100 matches', async () => {
+  const db = new ScanDatabase(':memory:')
+  const ids = Array.from({ length: 5000 }, (_, n) => 'archive-' + n)
+  const matching = ids.filter((_, n) => n % 5 < 2)
+  let batches = 0
+  const exit = Promise.withResolvers<void>()
+  const client = {
+    isReady: true,
+    waitForExit: () => exit.promise,
+    readTrendBatch: async (request: Parameters<StorageWorkerClient['readTrendBatch']>[0]) => {
+      batches++
+      const result = db.readTrendBatch(request)
+      expect(isTrendBatch(result)).toBe(true)
+      return result
+    }
+  }
+  try {
+    const roots = [
+      'C:\\Archive\\Café',
+      'c:/Archive/Café/',
+      'C:/archive/Café',
+      'C:/Archive/Cafe\u0301',
+      '//ambiguous/root'
+    ]
+    db.transaction(() => {
+      for (const [n, id] of ids.entries())
+        db.insertScan(saved(id, roots[n % roots.length], n, date, n % 7 === 0 ? 1 : 0))
+    })
+    const storage = new ScanStorageCoordinator(Promise.resolve(client as StorageWorkerClient))
+    const result = await readStorageTrends(storage, new AbortController().signal, {
+      mode: 'snapshot',
+      scanId: ids[0]
+    })
+    expect(batches).toBe(40)
+    expect(result?.retainedCount).toBe(2000)
+    expect(result?.latestCompletedScanId).toBe(ids.at(-1))
+    expect(result?.points.map(({ id }) => id)).toEqual(matching.slice(-100))
+    expect(result?.points.some(({ incomplete }) => incomplete)).toBe(true)
+  } finally {
+    exit.resolve()
     db.close()
   }
 })

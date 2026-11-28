@@ -18,10 +18,15 @@ import {
 } from './coordinator'
 import { SnapshotAccessError } from './snapshotAccess'
 import { STORAGE_REQUEST_TIMEOUT_MS } from './workerClient'
+import type { ComparisonPreparationRequest } from './comparisonPreparation'
 
 export type ComparisonStorage = Pick<
   ScanStorageCoordinator,
-  'assertComparisonAvailable' | 'readPair' | 'protectComparisonPair' | 'readSignal'
+  | 'assertComparisonAvailable'
+  | 'readPair'
+  | 'protectComparisonPair'
+  | 'readSignal'
+  | 'releaseComparisonWorkspace'
 >
 
 interface PendingPair {
@@ -160,12 +165,14 @@ export class ComparisonSelection {
     this.discardPending()
     adopted?.abort.abort()
     adopted?.release()
+    if (adopted) this.storage.releaseComparisonWorkspace()
   }
 
   async read<T>(
     selectionId: string,
     pair: ComparisonPair & { readonly relativeDirectory?: string },
-    query: (client: ComparisonQueries) => Promise<T>
+    query: (client: ComparisonQueries) => Promise<T>,
+    scope: ComparisonPreparationRequest['scope'] = 'workspace'
   ): Promise<SelectionReply<T>> {
     if (this.lifetime.aborted) throw inactive()
     const adopted = this.adopted
@@ -185,7 +192,7 @@ export class ComparisonSelection {
     const signal = AbortSignal.any([this.lifetime, adopted.abort.signal])
     const verify = (): void => this.verifyAdoption(adopted)
     try {
-      const value = await this.storage.readPair<T>(signal, query, pair)
+      const value = await this.storage.readPair<T>(signal, query, pair, selectionId, scope)
       return { value, verify }
     } catch (error) {
       verify()

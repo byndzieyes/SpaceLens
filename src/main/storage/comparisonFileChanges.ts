@@ -12,7 +12,7 @@ import {
   type ResolvedComparisonFileQuery
 } from './comparisonFileContracts'
 import type { CompatiblePair } from './comparisonMatchContracts'
-import { MATCHED_ENTRIES, subtreeBindings, subtreeScope } from './comparisonSql'
+import { matchedEntries, subtreeBindings, subtreeScope } from './comparisonSql'
 import { MAX_SAFE_INTEGER, readEntryType, readText } from './entryRows'
 import { readFilesystemText } from './filesystemText'
 import { SnapshotAccessError } from './snapshotAccess'
@@ -50,8 +50,12 @@ function logicalBytes(side: ComparisonSide): string {
 }
 
 /** One file-centric relation for pages, counts, and subsequent comparison summaries. */
-export function comparisonFileChangesCte(subtree = false): string {
-  const scope = subtree ? subtreeScope('matched.path_key') : "matched.path_key > X''"
+export function comparisonFileChangesCte(subtree = false, candidate = false): string {
+  const scope = candidate
+    ? 'matched.path_key > $after AND matched.path_key <= $through'
+    : subtree
+      ? subtreeScope('matched.path_key')
+      : "matched.path_key > X''"
   return `
     WITH observed_files AS (
       SELECT matched.path_key, baseline.id AS baseline_id, baseline.type AS baseline_type,
@@ -59,7 +63,7 @@ export function comparisonFileChangesCte(subtree = false): string {
              baseline.size_bytes AS baseline_size, baseline.modified_at AS baseline_modified_at,
              target.id AS target_id, target.type AS target_type,
              target.size_bytes AS target_size, target.modified_at AS target_modified_at
-      ${MATCHED_ENTRIES}
+      ${matchedEntries(candidate)}
       WHERE ${scope}
         AND (baseline.type = 'file' OR target.type = 'file')
     ), evidence AS (
@@ -69,8 +73,12 @@ export function comparisonFileChangesCte(subtree = false): string {
         ${knownModificationTime('target_modified_at')} AS target_time_known,
         ${logicalBytes('baseline')} AS baseline_bytes, ${logicalBytes('target')} AS target_bytes
       FROM observed_files
-    ), reasons AS (
-      SELECT *,
+    ), reasons AS ${candidate ? 'MATERIALIZED ' : ''}(
+      SELECT ${
+        candidate
+          ? 'path_key, baseline_parent_id, target_parent_id, baseline_bytes, target_bytes, target_type'
+          : '*'
+      },
         CASE
           WHEN baseline_type = 'file' AND target_type = 'file' THEN
             CASE
@@ -171,25 +179,33 @@ export function readComparisonFileChanges(
   connection: DatabaseSync,
   compatibility: CompatiblePair,
   { offset, limit, sort, kinds, relativeDirectory }: ResolvedComparisonFileQuery,
-  unfilteredCount?: number
+  unfilteredCount?: number,
+  prepared = false
 ): ComparisonFileResult {
   const base = { pair: compatibility.pair, compatibility, offset, limit }
   if (kinds?.length === 0) return { ...base, items: [], totalCount: 0, nextOffset: null }
 
-  const values: Record<string, SQLInputValue> = comparisonFileBindings(compatibility)
+  const values: Record<string, SQLInputValue> = prepared
+    ? {}
+    : comparisonFileBindings(compatibility)
   if (relativeDirectory) Object.assign(values, subtreeBindings(relativeDirectory))
   const bindings = kinds?.map((kind, i) => {
     const binding = `$kind${i}`
     values[binding] = kind
     return binding
   })
-  const filter = bindings ? `WHERE kind IN (${bindings.join(', ')})` : ''
-  const relation = comparisonFileChangesCte(Boolean(relativeDirectory))
+  const filters = [
+    ...(bindings ? [`kind IN (${bindings.join(', ')})`] : []),
+    ...(prepared && relativeDirectory ? [subtreeScope('path_key')] : [])
+  ]
+  const filter = filters.length ? `WHERE ${filters.join(' AND ')}` : ''
+  const relation = prepared ? '' : comparisonFileChangesCte(Boolean(relativeDirectory))
+  const files = prepared ? 'temp.comparison_files' : 'file_changes'
   let totalCount = !kinds && !relativeDirectory ? unfilteredCount : undefined
   if (totalCount === undefined) {
     const count = readStatement(
       connection,
-      `${relation} SELECT COUNT(*) AS total FROM file_changes ${filter}`
+      `${relation} SELECT COUNT(*) AS total FROM ${files} ${filter}`
     )
     totalCount = readComparisonInteger(count.get(values)?.total ?? null, false)
   }
@@ -197,7 +213,22 @@ export function readComparisonFileChanges(
 
   const select = readStatement(
     connection,
-    `
+    prepared
+      ? `
+    WITH page AS MATERIALIZED (
+      SELECT path_key, kind, reason, delta_bytes FROM temp.comparison_files ${filter}
+      ORDER BY ${order[sort]} LIMIT $limit OFFSET $offset
+    )
+    SELECT page.path_key AS path_key, page.kind, page.reason, page.delta_bytes,
+           baseline.id AS baseline_id, baseline.type AS baseline_type,
+           baseline.size_bytes AS baseline_size, baseline.modified_at AS baseline_modified_at,
+           target.id AS target_id, target.type AS target_type,
+           target.size_bytes AS target_size, target.modified_at AS target_modified_at
+    FROM page JOIN temp.comparison_paths AS matched ON matched.path_key = page.path_key
+    LEFT JOIN main.entries AS baseline ON baseline.scan_id = $baseline AND baseline.id = matched.baseline_id
+    LEFT JOIN main.entries AS target ON target.scan_id = $target AND target.id = matched.target_id
+    ORDER BY ${order[sort]}`
+      : `
     ${relation}
     SELECT path_key, baseline_id, baseline_type, baseline_size, baseline_modified_at,
            target_id, target_type, target_size, target_modified_at, kind, reason, delta_bytes
@@ -206,6 +237,10 @@ export function readComparisonFileChanges(
     LIMIT $limit OFFSET $offset
   `
   )
+  if (prepared) {
+    values.$baseline = compatibility.pair.baselineScanId
+    values.$target = compatibility.pair.targetScanId
+  }
   const items = select
     .all({ ...values, $limit: limit, $offset: offset })
     .map((row) => readChange(row, compatibility))

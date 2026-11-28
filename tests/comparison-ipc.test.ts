@@ -9,7 +9,11 @@ import { DatabaseSync } from 'node:sqlite'
 import { ipcMain, type IpcMainInvokeEvent, type WebContents } from 'electron'
 import { afterEach, beforeEach, expect, test, vi, type MockedFunction } from 'vitest'
 import { registerScannerIpc } from '../src/main/scannerIpc'
-import { MAX_QUEUED_EXPLORER_READS, ScanStorageCoordinator } from '../src/main/storage/coordinator'
+import {
+  COMPARISON_PREPARATION_TIMEOUT_MS,
+  MAX_QUEUED_EXPLORER_READS,
+  ScanStorageCoordinator
+} from '../src/main/storage/coordinator'
 import { ScanDatabase } from '../src/main/storage/database'
 import { HistoryRetention } from '../src/main/storage/historyRetention'
 import { RetentionSettingsStore } from '../src/main/storage/retentionSettings'
@@ -61,6 +65,7 @@ type WorkerMocks = {
       | 'applyBatch'
       | 'getScan'
       | 'requireValidatedScan'
+      | 'prepareComparisonWorkspace'
       | 'getComparisonSummary'
       | 'listComparisonFileChanges'
       | 'listComparisonDirectoryChanges'
@@ -101,6 +106,9 @@ function createFixture(): ComparisonFixture {
     waitForExit: () => exit.promise,
     getScan: vi.fn(async (id: string) => db.getScan(id)),
     requireValidatedScan: vi.fn(async (id: string) => db.requireValidatedScan(id)),
+    prepareComparisonWorkspace: vi.fn<StorageWorkerClient['prepareComparisonWorkspace']>(
+      async (request) => db.prepareComparisonWorkspace(request)
+    ),
     getComparisonSummary: vi.fn(async (pair: ComparisonPair) => db.getComparisonSummary(pair)),
     listComparisonFileChanges: vi.fn<StorageWorkerClient['listComparisonFileChanges']>(
       async (query) => db.listComparisonFileChanges(query)
@@ -604,9 +612,14 @@ test('keeps both reservations for a dispatched obsolete reply until Worker settl
   const next = await app.prepared(replacement)
   const result = app.db.getComparisonSummary(pair)
   const gate = Promise.withResolvers<typeof result>()
-  app.worker.getComparisonSummary.mockReturnValueOnce(gate.promise)
+  const dispatched = Promise.withResolvers<void>()
+  app.worker.getComparisonSummary.mockImplementationOnce(() => {
+    dispatched.resolve()
+    return gate.promise
+  })
   await yieldToStorage()
   const inFlight = app.api('getComparisonSummary', { selectionId: old.selectionId, query: pair })
+  await dispatched.promise
   expect(app.worker.getComparisonSummary).toHaveBeenCalledOnce()
   success(await app.api('adoptComparisonSelection', { ticket: next.ticket }))
   await expect(inFlight).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
@@ -638,8 +651,13 @@ test('releases queued timeout holds immediately and retains dispatched timeout h
   await occupied
   await Promise.resolve()
   const failed = Promise.withResolvers<ReturnType<ScanDatabase['getComparisonSummary']>>()
-  app.worker.getComparisonSummary.mockReturnValueOnce(failed.promise)
+  const started = Promise.withResolvers<void>()
+  app.worker.getComparisonSummary.mockImplementationOnce(() => {
+    started.resolve()
+    return failed.promise
+  })
   const dispatched = app.api('getComparisonSummary', request)
+  await started.promise
   expect(app.worker.getComparisonSummary).toHaveBeenCalledOnce()
   app.worker.isReady = false
   failed.reject(new StorageRequestTimeoutError('Worker deadline'))
@@ -822,8 +840,13 @@ test('keeps conflicting scanner starts busy after view exit until dispatched com
   const { selectionId } = await app.adopt(pair)
   const result = app.db.getComparisonSummary(pair)
   const executing = Promise.withResolvers<typeof result>()
-  app.worker.getComparisonSummary.mockReturnValueOnce(executing.promise)
+  const dispatched = Promise.withResolvers<void>()
+  app.worker.getComparisonSummary.mockImplementationOnce(() => {
+    dispatched.resolve()
+    return executing.promise
+  })
   const request = app.api('getComparisonSummary', { selectionId, query: pair })
+  await dispatched.promise
   const building = fixture('retry')
   await expect(app.storage.beginScan(building.building)).rejects.toMatchObject({
     code: 'SCAN_COMPARISON_BUSY'
@@ -841,6 +864,120 @@ test('keeps conflicting scanner starts busy after view exit until dispatched com
   expect(app.db.getScan(building.scan.id)).toBeNull()
   await app.storage.beginScan(building.building)
   await app.storage.discardBuildingScan(building.scan.id)
+})
+
+test('holds staged sources through a cancelled stage and admits a fresh adoption after cleanup', async () => {
+  const { selectionId } = await app.adopt(pair)
+  const advance = app.worker.prepareComparisonWorkspace.getMockImplementation()!
+  const dispatch = Promise.withResolvers<void>()
+  const settle = Promise.withResolvers<void>()
+  app.worker.prepareComparisonWorkspace.mockImplementation(async (request) => {
+    const status = await advance(request)
+    if (request.action === 'advance') {
+      dispatch.resolve()
+      await settle.promise
+    }
+    return status
+  })
+  const old = app.api('getComparisonSummary', { selectionId, query: pair })
+  await dispatch.promise
+  await app.api('releaseComparisonSelection', { selectionId })
+  expect(app.protectedIds('a', 'b')).toEqual(['a', 'b'])
+  await expect(app.storage.deleteSnapshot({ scanId: 'b' })).rejects.toMatchObject({
+    code: 'SNAPSHOT_IN_USE'
+  })
+  await expect(app.storage.beginScan(fixture('blocked').building)).rejects.toMatchObject({
+    code: 'SCAN_COMPARISON_BUSY'
+  })
+  expect(app.worker.getComparisonSummary).not.toHaveBeenCalled()
+  expect(app.worker.beginScan).not.toHaveBeenCalled()
+  settle.resolve()
+  await expect(old).resolves.toMatchObject({ ok: false, error: { code: 'SNAPSHOT_EXPIRED' } })
+  expect(app.protectedIds('a', 'b')).toEqual([])
+  expect(
+    app.worker.prepareComparisonWorkspace.mock.calls.map(([request]) => request.action)
+  ).toEqual(['start', 'advance', 'discard'])
+
+  const next = await app.adopt(pair)
+  await expect(
+    app.api('getComparisonSummary', { selectionId: next.selectionId, query: pair })
+  ).resolves.toMatchObject({ ok: true })
+  const starts = app.worker.prepareComparisonWorkspace.mock.calls
+    .map(([request]) => request)
+    .filter(({ action }) => action === 'start')
+  expect(starts[0].id).not.toBe(starts[1].id)
+})
+
+test('discards an intermediate preparation failure and retries with a new identity', async () => {
+  const { selectionId } = await app.adopt(pair)
+  const execute = app.worker.prepareComparisonWorkspace.getMockImplementation()!
+  app.worker.prepareComparisonWorkspace
+    .mockImplementationOnce(execute)
+    .mockRejectedValueOnce(new Error('The staged connection reported a fixture failure'))
+  await expect(
+    app.api('getComparisonSummary', { selectionId, query: pair })
+  ).resolves.toMatchObject({ ok: false, error: { code: 'INTERNAL_ERROR' } })
+  expect(app.protectedIds('a', 'b')).toEqual(['a', 'b'])
+  expect(app.worker.prepareComparisonWorkspace.mock.lastCall?.[0].action).toBe('discard')
+  await expect(
+    app.api('getComparisonSummary', { selectionId, query: pair })
+  ).resolves.toMatchObject({ ok: true })
+})
+
+test('bounds the logical preparation lifetime without releasing an unsettled stage', async () => {
+  const { selectionId } = await app.adopt(pair)
+  vi.useFakeTimers()
+  const execute = app.worker.prepareComparisonWorkspace.getMockImplementation()!
+  const started = Promise.withResolvers<void>()
+  const stage =
+    Promise.withResolvers<Awaited<ReturnType<StorageWorkerClient['prepareComparisonWorkspace']>>>()
+  app.worker.prepareComparisonWorkspace
+    .mockImplementationOnce(execute)
+    .mockImplementationOnce(() => {
+      started.resolve()
+      return stage.promise
+    })
+  const pending = app.api('getComparisonSummary', { selectionId, query: pair })
+  await started.promise
+  await vi.advanceTimersByTimeAsync(COMPARISON_PREPARATION_TIMEOUT_MS)
+  expect(
+    app.worker.prepareComparisonWorkspace.mock.calls.map(([request]) => request.action)
+  ).toEqual(['start', 'advance'])
+  expect(app.protectedIds('a', 'b')).toEqual(['a', 'b'])
+  await expect(app.storage.beginScan(fixture('blocked').building)).rejects.toMatchObject({
+    code: 'SCAN_COMPARISON_BUSY'
+  })
+  stage.resolve({ phase: 'matching', completed: 1 })
+  await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'COMPARISON_TIMEOUT' } })
+  expect(app.worker.prepareComparisonWorkspace.mock.lastCall?.[0].action).toBe('discard')
+  await expect(
+    app.api('getComparisonSummary', { selectionId, query: pair })
+  ).resolves.toMatchObject({ ok: true })
+})
+
+test('keeps a failed stage protected until the unhealthy Worker actually exits', async () => {
+  const { selectionId } = await app.adopt(pair)
+  const execute = app.worker.prepareComparisonWorkspace.getMockImplementation()!
+  const started = Promise.withResolvers<void>()
+  const stage =
+    Promise.withResolvers<Awaited<ReturnType<StorageWorkerClient['prepareComparisonWorkspace']>>>()
+  app.worker.prepareComparisonWorkspace
+    .mockImplementationOnce(execute)
+    .mockImplementationOnce(() => {
+      started.resolve()
+      return stage.promise
+    })
+  const pending = app.api('getComparisonSummary', { selectionId, query: pair })
+  await started.promise
+  app.worker.isReady = false
+  stage.reject(new StorageRequestTimeoutError('Worker command deadline'))
+  await expect(pending).resolves.toMatchObject({ ok: false, error: { code: 'COMPARISON_TIMEOUT' } })
+  await app.api('releaseComparisonSelection', { selectionId })
+  expect(app.protectedIds('a', 'b')).toEqual(['a', 'b'])
+  expect(app.worker.getComparisonSummary).not.toHaveBeenCalled()
+  app.exit.resolve()
+  await yieldToStorage()
+  expect(app.protectedIds('a', 'b')).toEqual([])
 })
 
 test('clears scanner reservation after confirmed begin failure', async () => {

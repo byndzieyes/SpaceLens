@@ -26,7 +26,8 @@ import { MAX_SAFE_INTEGER, readText } from './entryRows'
 import { readFilesystemText } from './filesystemText'
 import { SnapshotAccessError } from './snapshotAccess'
 
-const DIRECTORY_BATCH_SIZE = 512
+const DIRECTORY_BATCH_SIZE = 1024
+const DIRECTORY_RANGE_SIZE = 4096
 const kinds = ['added', 'removed', 'modified', 'unchanged', 'indeterminate'] as const
 const totals = [
   ...kinds,
@@ -68,8 +69,14 @@ export function prepareComparisonDirectories(
   target: CompletedScanMetadata,
   summaryFiles: ComparisonFileSummary | undefined
 ): void {
-  try {
+  directoryWork(() => {
     prepareDirectories(connection, compatibility, baseline, target, summaryFiles)
+  })
+}
+
+function directoryWork<T>(operation: () => T): T {
+  try {
+    return operation()
   } catch (error) {
     // SQLite SUM can overflow int64. An overflowing scalar addition becomes REAL, which
     // cannot be written to the STRICT INTEGER totals during the bottom-up pass.
@@ -92,6 +99,21 @@ function prepareDirectories(
   target: CompletedScanMetadata,
   summaryFiles: ComparisonFileSummary | undefined
 ): void {
+  createDirectoryTable(connection)
+  connection.prepare(directoryObservations('')).run(comparisonFileBindings(compatibility))
+  connection.exec(directoryParents(''))
+  verifyDirectoryParents(connection.prepare(invalidDirectoryParent('')))
+  connection.prepare(directoryFileTotals(false)).run(comparisonFileBindings(compatibility))
+  const rollup = new DirectoryRollup(connection)
+  while (!rollup.advance()) {
+    // Synchronous entry point for direct standalone database callers.
+  }
+  connection.exec(finalizeDirectories(''))
+  verifyDirectoryRoot(connection, baseline, target, summaryFiles)
+  verifyDirectoryRange(connection, compatibility, '')
+}
+
+function createDirectoryTable(connection: DatabaseSync): void {
   connection.exec(`
     CREATE TEMP TABLE IF NOT EXISTS comparison_directories (
       path_key BLOB PRIMARY KEY,
@@ -116,10 +138,10 @@ function prepareDirectories(
       ON comparison_directories(target_id) WHERE target_id IS NOT NULL;
     DELETE FROM temp.comparison_directories;
   `)
-  const bindings = comparisonFileBindings(compatibility)
-  connection
-    .prepare(
-      `
+}
+
+function directoryObservations(scope: string): string {
+  return `
     WITH directory_observations AS (
       SELECT matched.path_key,
         CASE WHEN baseline.type = 'directory' THEN baseline.id END AS baseline_id,
@@ -132,7 +154,7 @@ function prepareDirectories(
         CASE WHEN baseline.type IN ('file', 'symlink', 'other')
                OR target.type IN ('file', 'symlink', 'other') THEN 1 ELSE 0 END AS replacement
       ${MATCHED_ENTRIES}
-      WHERE baseline.type = 'directory' OR target.type = 'directory'
+      WHERE (baseline.type = 'directory' OR target.type = 'directory') ${scope}
     ), directory_sizes AS (
       SELECT *,
         CASE WHEN baseline_presence = 'absent' THEN 0 ELSE baseline_size END AS baseline_bytes,
@@ -157,34 +179,42 @@ function prepareDirectories(
              OR baseline_bytes IS NULL OR target_bytes IS NULL THEN 1 ELSE 0 END
     FROM directory_sizes
   `
-    )
-    .run(bindings)
-  connection.exec(`
+}
+
+function directoryParents(scope: string): string {
+  return `
     UPDATE temp.comparison_directories AS directory
     SET parent_key = CASE WHEN baseline_id IS NOT NULL
       THEN (SELECT path_key FROM temp.comparison_directories WHERE baseline_id = directory.parent_id)
       ELSE (SELECT path_key FROM temp.comparison_directories WHERE target_id = directory.parent_id)
     END
-    WHERE path_key > X'';
-  `)
-  if (
-    connection
-      .prepare(
-        `
-    SELECT 1 FROM temp.comparison_directories
-    WHERE path_key > X'' AND (parent_key IS NULL OR parent_key >= path_key) LIMIT 1
+    WHERE path_key > X'' ${scope};
   `
-      )
-      .get()
-  )
-    throw new Error('Invalid comparison directory parent.')
+}
 
+function invalidDirectoryParent(scope: string): string {
+  return `
+    SELECT 1 FROM temp.comparison_directories
+    WHERE path_key > X'' AND (parent_key IS NULL OR parent_key >= path_key) ${scope} LIMIT 1
+  `
+}
+
+function verifyDirectoryParents(
+  statement: StatementSync,
+  range: Record<string, SQLInputValue> = {}
+): void {
+  if (statement.get(range)) throw new Error('Invalid comparison directory parent.')
+}
+
+function directoryFileTotals(prepared: boolean): string {
   // An exact-path replacement stays with the file's parent. Every eligible file is assigned
   // to just one immediate parent before any subtree totals are propagated.
-  connection
-    .prepare(
-      `
-    ${comparisonFileChangesCte()},
+  return `
+    ${
+      prepared
+        ? 'WITH file_changes AS (SELECT * FROM temp.comparison_files WHERE path_key > $after AND path_key <= $through)'
+        : comparisonFileChangesCte()
+    },
     direct_files AS (
       SELECT file_changes.*, COALESCE(baseline_dir.path_key, target_dir.path_key) AS directory_key
       FROM file_changes
@@ -206,14 +236,14 @@ function prepareDirectories(
       GROUP BY directory_key
     )
     UPDATE temp.comparison_directories AS directory
-    SET ${totals.map((column) => `${column} = direct.${column}`).join(',\n')}
+    SET ${totals.map((column) => `${column} = directory.${column} + direct.${column}`).join(',\n')}
     FROM direct_file_totals AS direct
     WHERE directory.path_key = direct.directory_key
   `
-    )
-    .run(bindings)
-  rollUpDirectories(connection)
-  connection.exec(`
+}
+
+function finalizeDirectories(scope: string): string {
+  return `
     UPDATE temp.comparison_directories
     SET uncertain = MAX(uncertain, unknown_count > 0, indeterminate > 0),
       kind = CASE
@@ -221,20 +251,50 @@ function prepareDirectories(
         WHEN added > 0 OR removed > 0 OR modified > 0 OR structural_change = 1 THEN 'modified'
         WHEN uncertain = 1 OR unknown_count > 0 OR indeterminate > 0 THEN 'indeterminate'
         ELSE 'unchanged'
-      END;
-  `)
+      END ${scope};
+  `
+}
+
+function verifyDirectoryRange(
+  connection: DatabaseSync,
+  compatibility: CompatiblePair,
+  scope: string,
+  range: Record<string, SQLInputValue> = {}
+): void {
   if (
     connection
       .prepare(
         `
     SELECT 1 FROM temp.comparison_directories
-    WHERE baseline_bytes NOT BETWEEN 0 AND ${MAX_SAFE_INTEGER}
-       OR target_bytes NOT BETWEEN 0 AND ${MAX_SAFE_INTEGER} LIMIT 1
+    WHERE (baseline_bytes NOT BETWEEN 0 AND ${MAX_SAFE_INTEGER}
+       OR target_bytes NOT BETWEEN 0 AND ${MAX_SAFE_INTEGER}) ${scope} LIMIT 1
   `
       )
-      .get()
+      .get(range)
   )
     throw sizeOverflow()
+  if (
+    compatibility.coverage.baseline === 'complete' &&
+    compatibility.coverage.target === 'complete' &&
+    connection
+      .prepare(
+        `
+        SELECT 1 FROM temp.comparison_directories
+        WHERE unknown_count = 0 AND observed_delta IS NOT NULL AND net_bytes <> observed_delta
+        ${scope} LIMIT 1
+      `
+      )
+      .get(range)
+  )
+    throw new Error('Inconsistent observed and file-level directory totals.')
+}
+
+function verifyDirectoryRoot(
+  connection: DatabaseSync,
+  baseline: CompletedScanMetadata,
+  target: CompletedScanMetadata,
+  summaryFiles: ComparisonFileSummary | undefined
+): void {
   const root = integerStatement(
     connection,
     "SELECT * FROM temp.comparison_directories WHERE path_key = X''"
@@ -250,33 +310,24 @@ function prepareDirectories(
     (summaryFiles && !isDeepStrictEqual(files, summaryFiles))
   )
     throw new Error('Inconsistent comparison root totals.')
-
-  if (
-    compatibility.coverage.baseline === 'complete' &&
-    compatibility.coverage.target === 'complete' &&
-    connection
-      .prepare(
-        `
-        SELECT 1 FROM temp.comparison_directories
-        WHERE unknown_count = 0 AND observed_delta IS NOT NULL AND net_bytes <> observed_delta
-        LIMIT 1
-      `
-      )
-      .get()
-  )
-    throw new Error('Inconsistent observed and file-level directory totals.')
 }
 
-function rollUpDirectories(connection: DatabaseSync): void {
-  const first = connection.prepare(`
+class DirectoryRollup {
+  private readonly first: StatementSync
+  private readonly next: StatementSync
+  private readonly addToParent: StatementSync
+  private lastKey?: Uint8Array
+
+  constructor(connection: DatabaseSync) {
+    this.first = connection.prepare(`
     SELECT path_key FROM temp.comparison_directories
     WHERE path_key > X'' ORDER BY path_key DESC LIMIT ${DIRECTORY_BATCH_SIZE}
   `)
-  const next = connection.prepare(`
+    this.next = connection.prepare(`
     SELECT path_key FROM temp.comparison_directories
     WHERE path_key > X'' AND path_key < ? ORDER BY path_key DESC LIMIT ${DIRECTORY_BATCH_SIZE}
   `)
-  const addToParent = connection.prepare(`
+    this.addToParent = connection.prepare(`
     UPDATE temp.comparison_directories AS parent
     SET ${totals.map((column) => `${column} = parent.${column} + child.${column}`).join(',\n')},
       structural_change = MAX(parent.structural_change, child.structural_change, child.kind IN ('added', 'removed')),
@@ -284,18 +335,103 @@ function rollUpDirectories(connection: DatabaseSync): void {
     FROM temp.comparison_directories AS child
     WHERE child.path_key = ? AND parent.path_key = child.parent_key
   `)
-  // Every parent is a proper prefix and follows all its descendants in descending BLOB order.
-  let page = first.all()
-  while (page.length) {
-    let lastKey: Uint8Array | undefined
+  }
+
+  advance(): boolean {
+    // Every parent is a proper prefix and follows all its descendants in descending BLOB order.
+    const page = this.lastKey ? this.next.all(this.lastKey) : this.first.all()
     for (const { path_key } of page) {
       if (!(path_key instanceof Uint8Array)) throw new Error('Invalid comparison directory key.')
-      if (Number(addToParent.run(path_key).changes) !== 1)
+      if (Number(this.addToParent.run(path_key).changes) !== 1)
         throw new Error('Invalid comparison directory parent.')
-      lastKey = path_key
+      this.lastKey = path_key
     }
-    if (page.length < DIRECTORY_BATCH_SIZE) break
-    page = next.all(lastKey!)
+    return page.length < DIRECTORY_BATCH_SIZE
+  }
+}
+
+type DirectoryRangeTable = 'comparison_paths' | 'comparison_directories' | 'comparison_files'
+const ascendingRange = 'path_key > $after AND path_key <= $through'
+
+class DirectoryRanges {
+  private readonly boundary: StatementSync
+  private readonly last: StatementSync
+  private after: Uint8Array = Buffer.alloc(0)
+
+  constructor(connection: DatabaseSync, table: DirectoryRangeTable) {
+    const select = `SELECT path_key FROM temp.${table} WHERE path_key > ?`
+    this.boundary = connection.prepare(
+      `${select} ORDER BY path_key LIMIT 1 OFFSET ${DIRECTORY_RANGE_SIZE - 1}`
+    )
+    this.last = connection.prepare(`${select} ORDER BY path_key DESC LIMIT 1`)
+  }
+
+  advance(read: (range: { $after: Uint8Array; $through: Uint8Array }) => void): boolean {
+    const boundary = this.boundary.get(this.after)?.path_key
+    const through = boundary ?? this.last.get(this.after)?.path_key
+    if (through === undefined) return true
+    if (!(through instanceof Uint8Array)) throw new Error('Invalid directory preparation cursor.')
+    read({ $after: this.after, $through: through })
+    this.after = through
+    return boundary === undefined
+  }
+}
+
+/** Each step prepares or verifies only one range. The table remains private until ready. */
+export class ComparisonPreparedDirectories {
+  private readonly operations: readonly (() => boolean)[]
+  private index = 0
+
+  constructor(
+    connection: DatabaseSync,
+    compatibility: CompatiblePair,
+    baseline: CompletedScanMetadata,
+    target: CompletedScanMetadata,
+    files: ComparisonFileSummary
+  ) {
+    createDirectoryTable(connection)
+    const bindings = comparisonFileBindings(compatibility)
+    connection.prepare(directoryObservations("AND matched.path_key = X''")).run(bindings)
+    const observations = connection.prepare(
+      directoryObservations('AND matched.path_key > $after AND matched.path_key <= $through')
+    )
+    const parents = connection.prepare(directoryParents(`AND ${ascendingRange}`))
+    const invalidParent = connection.prepare(invalidDirectoryParent(`AND ${ascendingRange}`))
+    const directTotals = connection.prepare(directoryFileTotals(true))
+    const rollup = new DirectoryRollup(connection)
+    const finalize = connection.prepare(finalizeDirectories(`WHERE ${ascendingRange}`))
+    const observedPaths = new DirectoryRanges(connection, 'comparison_paths')
+    const parentPaths = new DirectoryRanges(connection, 'comparison_directories')
+    const filePaths = new DirectoryRanges(connection, 'comparison_files')
+    const finalPaths = new DirectoryRanges(connection, 'comparison_directories')
+    this.operations = [
+      () => observedPaths.advance((range) => observations.run({ ...bindings, ...range })),
+      () =>
+        parentPaths.advance((range) => {
+          parents.run(range)
+          verifyDirectoryParents(invalidParent, range)
+        }),
+      () => filePaths.advance((range) => directTotals.run(range)),
+      () => rollup.advance(),
+      () =>
+        finalPaths.advance((range) => {
+          finalize.run(range)
+          verifyDirectoryRange(connection, compatibility, `AND ${ascendingRange}`, range)
+        }),
+      () => {
+        connection.exec(finalizeDirectories("WHERE path_key = X''"))
+        verifyDirectoryRange(connection, compatibility, "AND path_key = X''")
+        verifyDirectoryRoot(connection, baseline, target, files)
+        return true
+      }
+    ]
+  }
+
+  advance(): boolean {
+    return directoryWork(() => {
+      if (this.operations[this.index]()) this.index++
+      return this.index === this.operations.length
+    })
   }
 }
 

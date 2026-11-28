@@ -87,6 +87,10 @@ import {
 import { readComparisonSummary } from './comparisonSummary'
 import { readComparisonPair } from './comparisonSummaryContracts'
 import { ComparisonWorkspace } from './comparisonWorkspace'
+import {
+  readComparisonPreparation,
+  type ComparisonPreparationStatus
+} from './comparisonPreparation'
 import type { ComparisonPair, ComparisonSummary } from '../../shared/comparison'
 import { entryColumns, MAX_SAFE_INTEGER, readEntry, readInteger, readText } from './entryRows'
 
@@ -818,9 +822,79 @@ export class ScanDatabase {
         this.connection,
         compatibility,
         query,
-        this.comparison.summary?.files.totalCount
+        this.comparison.summary?.files.totalCount,
+        this.comparison.hasPreparedFiles
       )
     )
+  }
+
+  prepareComparisonWorkspace(input: unknown): ComparisonPreparationStatus {
+    this.requireOpen()
+    const request = readComparisonPreparation(input)
+    const { action, id, pair, scope } = request
+    if (action === 'discard') {
+      this.comparison.discard(request)
+      return { phase: 'ready', completed: 0 }
+    }
+    if (
+      action === 'start' &&
+      (this.comparison.isPreparing || this.comparison.isPreparingDirectories)
+    )
+      throw new SnapshotAccessError('SNAPSHOT_UNAVAILABLE', 'Comparison preparation is busy.')
+    if (scope === 'workspace' && action === 'start' && this.comparison.reuse(id, pair))
+      return { phase: 'ready', completed: 0 }
+    let status!: ComparisonPreparationStatus
+    try {
+      inTransaction(
+        this.connection,
+        () => {
+          if (scope === 'directories') {
+            status =
+              action === 'start'
+                ? this.comparison.beginDirectories(id, pair)
+                : this.comparison.advanceDirectories(id, pair)
+          } else if (action === 'start') {
+            const { compatibility, baseline, target } = this.comparisonSources(pair)
+            status = this.comparison.begin(id, compatibility, baseline, target, [
+              this.resolveSavedSnapshot(baseline),
+              this.resolveSavedSnapshot(target)
+            ])
+          } else {
+            status = this.comparison.advance(request)
+          }
+        },
+        'BEGIN'
+      )
+    } catch (error) {
+      if (scope === 'directories') this.comparison.abandonDirectories(id, pair)
+      else this.comparison.abandonCandidate(id, pair)
+      throw error
+    }
+    if (status.phase === 'ready' && action === 'advance') {
+      if (scope === 'directories') this.comparison.promoteDirectories(pair)
+      else this.comparison.promote()
+    }
+    return status
+  }
+
+  private comparisonSources(pair: ComparisonPair): {
+    compatibility: CompatiblePair
+    baseline: CompletedScan
+    target: CompletedScan
+  } {
+    const baseline = this.requireCompletedMetadata(pair.baselineScanId)
+    const target = this.requireCompletedMetadata(pair.targetScanId)
+    const compatibility = evaluateComparisonCompatibility(
+      pair,
+      comparisonMetadataForStoredScan(baseline),
+      comparisonMetadataForStoredScan(target)
+    )
+    if (compatibility.status === 'incompatible')
+      throw new ComparisonStorageError(
+        'INCOMPATIBLE_SNAPSHOTS',
+        `These saved scans are incompatible (${compatibility.reason.code}).`
+      )
+    return { compatibility, baseline, target }
   }
 
   getComparisonSummary(request: unknown): ComparisonSummary {
@@ -847,6 +921,11 @@ export class ScanDatabase {
       query.relativeDirectory,
       (compatibility, baseline, target) => {
         if (!this.comparison.hasDirectories && query.kinds?.length !== 0) {
+          if (this.comparison.isPreparingDirectories)
+            throw new SnapshotAccessError(
+              'SNAPSHOT_UNAVAILABLE',
+              'Directory preparation is incomplete.'
+            )
           prepareComparisonDirectories(
             this.connection,
             compatibility,
@@ -882,23 +961,16 @@ export class ScanDatabase {
     inTransaction(
       this.connection,
       () => {
-        const baseline = this.requireCompletedMetadata(baselineScanId)
-        const target = this.requireCompletedMetadata(targetScanId)
-        const compatibility = evaluateComparisonCompatibility(
-          pair,
-          comparisonMetadataForStoredScan(baseline),
-          comparisonMetadataForStoredScan(target)
-        )
-        if (compatibility.status === 'incompatible') {
-          throw new ComparisonStorageError(
-            'INCOMPATIBLE_SNAPSHOTS',
-            `These saved scans are incompatible (${compatibility.reason.code}).`
-          )
-        }
+        const { compatibility, baseline, target } = this.comparisonSources(pair)
         if (path !== undefined && !isComparisonPathKey(path, compatibility.pathStyle)) {
           throw new SnapshotAccessError('INVALID_REQUEST', 'The comparison path is invalid.')
         }
         if (!this.comparison.matches(pair)) {
+          if (this.comparison.isPreparing || this.comparison.isPreparingDirectories)
+            throw new SnapshotAccessError(
+              'SNAPSHOT_UNAVAILABLE',
+              'Comparison preparation is incomplete.'
+            )
           validated = [this.resolveSavedSnapshot(baseline), this.resolveSavedSnapshot(target)]
           this.comparison.prepare(compatibility, ...validated)
         }

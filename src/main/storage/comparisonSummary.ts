@@ -32,6 +32,15 @@ export function readComparisonSummary(
   `)
   statement.setReadBigInts(true)
   const rows = readFileAggregateRows(statement, comparisonFileBindings(compatibility))
+  return summarizeComparisonRows(compatibility, baseline, target, rows)
+}
+
+export function summarizeComparisonRows(
+  compatibility: CompatiblePair,
+  baseline: CompletedScanMetadata,
+  target: CompletedScanMetadata,
+  rows: readonly Record<string, SQLOutputValue>[]
+): ComparisonSummary {
   const counts: Record<EntryChangeKind, number> = {
     added: 0,
     removed: 0,

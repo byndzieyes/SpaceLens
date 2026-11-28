@@ -87,6 +87,7 @@ const storage = {
   assertComparisonAvailable: vi.fn(),
   read: (async (_signal, query) => query(queries)) as ScanStorageCoordinator['read'],
   readPair: (async (_signal, query) => query(queries)) as ScanStorageCoordinator['readPair'],
+  releaseComparisonWorkspace: vi.fn(),
   protectComparisonPair: vi.fn<ScanStorageCoordinator['protectComparisonPair']>(),
   readSignal: new AbortController().signal,
   deleteSnapshot: vi.fn<ScanStorageCoordinator['deleteSnapshot']>(),

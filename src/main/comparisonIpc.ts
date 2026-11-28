@@ -114,7 +114,12 @@ const commands = {
   },
   listComparisonDirectoryChanges: (slot: ComparisonSelection, value: unknown) => {
     const { selectionId, query } = readRequest(value, readComparisonDirectoryQuery)
-    return slot.read(selectionId, query, (client) => client.listComparisonDirectoryChanges(query))
+    return slot.read(
+      selectionId,
+      query,
+      (client) => client.listComparisonDirectoryChanges(query),
+      query.kinds?.length === 0 ? 'workspace' : 'directories'
+    )
   }
 }
 
